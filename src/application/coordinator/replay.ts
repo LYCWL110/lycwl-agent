@@ -43,6 +43,10 @@ export async function replayRun(
         break;
       case "run_cancel_requested":
         break;
+      case "run_resumed":
+        state = "active";
+        safeFailureCode = null;
+        break;
       case "run_waiting":
         state = "waiting";
         safeFailureCode = event.payload.safeCode;
