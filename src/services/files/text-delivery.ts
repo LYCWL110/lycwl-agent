@@ -18,6 +18,7 @@ export type TextDelivery = Readonly<{
   modelTextUnits: number;
   modelTextTruncated: boolean;
   modelTextTruncationReason: "model_budget" | null;
+  deliveredByteRange: Readonly<{ start: number; end: number }>;
   snapshot: TextDeliveryEvidence;
 }>;
 
@@ -43,6 +44,10 @@ export function boundTextSnapshotForModel(snapshot: TextSnapshot): TextDelivery 
       modelTextUnits: snapshot.content.length,
       modelTextTruncated: false,
       modelTextTruncationReason: null,
+      deliveredByteRange: {
+        start: snapshot.byteStart,
+        end: snapshot.byteEnd,
+      },
       snapshot: evidence,
     };
   }
@@ -60,6 +65,16 @@ export function boundTextSnapshotForModel(snapshot: TextSnapshot): TextDelivery 
     modelTextUnits: text.length,
     modelTextTruncated: true,
     modelTextTruncationReason: "model_budget",
+    deliveredByteRange: {
+      start: snapshot.byteStart,
+      end: snapshot.byteStart + encodedPrefixLength(text, snapshot.encoding),
+    },
     snapshot: evidence,
   };
+}
+
+function encodedPrefixLength(text: string, encoding: TextSnapshot["encoding"]): number {
+  if (encoding === "utf-16le" || encoding === "utf-16be") return text.length * 2;
+  if (encoding === "latin-1") return text.length;
+  return new TextEncoder().encode(text).byteLength;
 }
