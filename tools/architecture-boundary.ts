@@ -3,16 +3,18 @@ import path from "node:path";
 
 export const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts"]);
 
-export const FORBIDDEN_IMPORT_PREFIXES: Readonly<Record<string, readonly string[]>> = {
-  contracts: ["node:", "../adapters/", "../application/", "../bootstrap/", "../services/", "../tui/"],
-  domain: ["node:", "../adapters/", "../application/", "../bootstrap/", "../services/", "../tui/"],
-  application: ["node:", "../adapters/", "../bootstrap/", "../tui/"],
-  ports: ["node:", "../adapters/", "../application/", "../bootstrap/", "../services/", "../tui/"],
-  adapters: ["../bootstrap/", "../tui/"],
-  services: ["../bootstrap/", "../tui/"],
-  tui: ["../bootstrap/"],
+export const FORBIDDEN_TARGET_LAYERS: Readonly<Record<string, readonly string[]>> = {
+  contracts: ["adapters", "application", "bootstrap", "services", "tui"],
+  domain: ["adapters", "application", "bootstrap", "services", "tui"],
+  application: ["adapters", "bootstrap", "tui"],
+  ports: ["adapters", "application", "bootstrap", "services", "tui"],
+  adapters: ["application", "bootstrap", "tui"],
+  services: ["bootstrap", "tui"],
+  tui: ["bootstrap"],
   bootstrap: [],
 };
+
+export const FORBIDDEN_NODE_LAYERS = new Set(["contracts", "domain", "application", "ports"]);
 
 export type SourceModule = Readonly<{
   path: string;
@@ -46,6 +48,10 @@ export function findBoundaryViolations(modules: readonly SourceModule[]): string
     for (const specifier of importedSpecifiers(source)) {
       if (specifier.startsWith(".")) {
         const target = path.normalize(path.join(path.dirname(relative), specifier));
+        if (target.startsWith("..") || path.isAbsolute(target)) {
+          violations.push(`${relative} imports outside the source root "${specifier}"`);
+          continue;
+        }
         const resolved = SOURCE_EXTENSIONS.has(path.extname(target))
           ? target
           : [...SOURCE_EXTENSIONS].map((extension) => `${target}${extension}`).find((candidate) =>
@@ -53,16 +59,13 @@ export function findBoundaryViolations(modules: readonly SourceModule[]): string
             );
         if (resolved !== undefined) edges.push(resolved);
 
-        for (const prefix of FORBIDDEN_IMPORT_PREFIXES[layer] ?? []) {
-          if (specifier.startsWith(prefix)) {
-            violations.push(`${relative} imports forbidden "${specifier}"`);
-          }
+        const targetLayer = sourceLayer(target);
+        if (FORBIDDEN_TARGET_LAYERS[layer]?.includes(targetLayer)) {
+          violations.push(`${relative} imports forbidden "${specifier}"`);
         }
       } else {
-        for (const prefix of FORBIDDEN_IMPORT_PREFIXES[layer] ?? []) {
-          if (prefix === "node:" && specifier.startsWith("node:")) {
-            violations.push(`${relative} imports runtime module "${specifier}"`);
-          }
+        if (FORBIDDEN_NODE_LAYERS.has(layer) && specifier.startsWith("node:")) {
+          violations.push(`${relative} imports runtime module "${specifier}"`);
         }
       }
     }

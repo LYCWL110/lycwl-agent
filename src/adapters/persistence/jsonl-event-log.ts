@@ -1,8 +1,12 @@
 import { mkdir, open, readFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { EventInput, EventLog } from "../../application/coordinator/event-log.ts";
-import type { InternalEvent, InternalEventBody } from "../../application/coordinator/internal-events.ts";
+import type {
+  EventInput,
+  EventLog,
+  InternalEvent,
+  InternalEventBody,
+} from "../../ports/event-log.ts";
 import type { DigestService, IdentifierFactory } from "../../ports/identity.ts";
 
 export type JsonlReadResult =
