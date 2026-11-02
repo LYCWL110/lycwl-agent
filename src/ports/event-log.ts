@@ -44,6 +44,7 @@ export type InternalEventPayload =
       approvalId: string;
       toolCallId: string;
       toolName: string;
+      safePreview: string;
     }>
   | Readonly<{
       kind: "approval_decided";

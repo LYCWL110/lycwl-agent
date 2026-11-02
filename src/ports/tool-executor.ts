@@ -25,5 +25,12 @@ export type ToolExecutionResult =
 
 export interface ToolExecutor {
   getDefinition(toolName: string): ToolDefinition | null;
+  /**
+   * Optional operation-specific preview bound to the validated invocation.
+   * It must not conceal or alter targets, arguments or permission scope, and
+   * sensitive values must be redacted. Returning null keeps the caller's
+   * generic preview.
+   */
+  preview?(request: ToolExecutionRequest): Promise<string | null>;
   execute(request: ToolExecutionRequest): Promise<ToolExecutionResult>;
 }

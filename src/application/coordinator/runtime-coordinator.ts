@@ -21,7 +21,7 @@ import type {
   ProviderConversationItem,
   ProviderToolCall,
 } from "../../ports/model-provider.ts";
-import type { ToolExecutor } from "../../ports/tool-executor.ts";
+import type { ToolExecutionRequest, ToolExecutor } from "../../ports/tool-executor.ts";
 import type { EventInput, EventLog } from "./event-log.ts";
 import type { InternalEvent } from "./internal-events.ts";
 import { completeWithBoundedRetries } from "./model-attempts.ts";
@@ -691,8 +691,12 @@ export class RuntimeCoordinator {
    */
   #sessionTools(context: MutableRunContext): ToolExecutor {
     const base = this.#deps.tools;
+    const preview = base.preview;
     return {
       getDefinition: (toolName) => base.getDefinition(toolName),
+      ...(preview === undefined
+        ? {}
+        : { preview: (request: ToolExecutionRequest) => preview.call(base, request) }),
       execute: async (request) => {
         if (request.toolName !== "todo") return base.execute(request);
         const result = await base.execute(request);

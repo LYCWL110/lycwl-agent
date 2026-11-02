@@ -190,11 +190,13 @@ export async function executeToolCall(
       const approvalId = dependencies.ids.create();
       const pending = requestApproval(approvalId, toolCallId);
       if (!pending.ok) return { kind: "invalid", safeCode: pending.code };
+      const safePreview = await resolvePreview(dependencies, call, toolCallId);
       await dependencies.onEvent("approval_requested", {
         kind: "approval_requested",
         approvalId,
         toolCallId,
         toolName: call.toolName,
+        safePreview,
       });
 
       if (dependencies.deferApprovals === true) {
@@ -212,7 +214,7 @@ export async function executeToolCall(
         approvalId,
         toolCallId,
         toolName: call.toolName,
-        safePreview: `${call.toolName} in synthetic workspace`,
+        safePreview,
       });
       const decided = decideApproval(pending.value, decision);
       if (!decided.ok) return { kind: "invalid", safeCode: decided.code };
@@ -300,6 +302,26 @@ async function finishQuestion(
     status: outcome.toolStatus,
     text: outcome.toolStatus === "succeeded" ? outcome.text : null,
   };
+}
+
+async function resolvePreview(
+  dependencies: ToolCallDependencies,
+  call: ProviderToolCall,
+  toolCallId: string,
+): Promise<string> {
+  const preview = dependencies.tools.preview;
+  if (preview === undefined) return `${call.toolName} in synthetic workspace`;
+  try {
+    const rendered = await preview.call(dependencies.tools, {
+      toolCallId,
+      toolName: call.toolName,
+      arguments: call.arguments,
+    });
+    return rendered ?? `${call.toolName} in synthetic workspace`;
+  } catch {
+    // A broken preview must not silently authorize the operation.
+    return `${call.toolName}: preview unavailable`;
+  }
 }
 
 async function deniedOutcome(
