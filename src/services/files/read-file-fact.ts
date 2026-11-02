@@ -26,6 +26,24 @@ export type ReadFileFact = Readonly<{
   textTruncated: boolean;
 }>;
 
+export type ReadFileAttachment = Readonly<{
+  attachmentId: string;
+  sha256: string;
+  byteLength: number;
+  mediaKind: "text/plain";
+  publicationStatus: "published";
+}>;
+
+export type ReadFileEvidenceSummary = Readonly<{
+  attachmentRefs: readonly ReadFileAttachment[];
+  capturedBytes: number;
+  rawComplete: boolean;
+  rawTruncationReason: "capture_interrupted" | null;
+  modelTextUnits: number;
+  modelTextTruncated: boolean;
+  modelTextTruncationReason: "model_budget" | null;
+}>;
+
 export function createReadFileFact(
   snapshotId: string,
   delivery: TextDelivery,
@@ -41,6 +59,26 @@ export function createReadFileFact(
     slice,
     content: delivery.text,
     textTruncated: delivery.modelTextTruncated,
+  };
+}
+
+export function createReadFileEvidence(
+  fact: ReadFileFact,
+  attachment: ReadFileAttachment | null,
+): ReadFileEvidenceSummary {
+  const attachmentMatches =
+    attachment !== null &&
+    attachment.sha256 === fact.snapshot.fileSha256 &&
+    attachment.byteLength === fact.snapshot.totalBytes;
+
+  return {
+    attachmentRefs: attachmentMatches && attachment !== null ? [attachment] : [],
+    capturedBytes: fact.snapshot.totalBytes,
+    rawComplete: attachmentMatches,
+    rawTruncationReason: attachmentMatches ? null : "capture_interrupted",
+    modelTextUnits: fact.content.length,
+    modelTextTruncated: fact.textTruncated,
+    modelTextTruncationReason: fact.textTruncated ? "model_budget" : null,
   };
 }
 
