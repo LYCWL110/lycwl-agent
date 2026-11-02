@@ -1,5 +1,9 @@
 import type { ApprovalGate } from "../../ports/approval-gate.ts";
-import { captureConsistentSnapshot, type FileSnapshotFacts } from "./consistent-snapshot.ts";
+import {
+  captureConsistentSnapshot,
+  MAX_SNAPSHOT_BYTES,
+  type FileSnapshotFacts,
+} from "./consistent-snapshot.ts";
 import { createReadFileFact, type ReadFileFact } from "./read-file-fact.ts";
 import { boundTextSnapshotForModel } from "./text-delivery.ts";
 import { readTextSnapshot, type TextFileEncoding } from "./text-snapshot.ts";
@@ -69,6 +73,9 @@ export async function runReadFileFlow(
     return { ok: false, code: "invalid_path" };
   }
   if (decision.outcome === "denied") return { ok: false, code: decision.code };
+  if (inspected.snapshot.size > MAX_SNAPSHOT_BYTES) {
+    return { ok: false, code: "file_too_large" };
+  }
 
   if (decision.outcome === "approval_required") {
     const approval = await dependencies.approvals.decide({
