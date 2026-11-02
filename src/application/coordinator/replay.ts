@@ -68,12 +68,19 @@ export async function replayRun(
         toolOutcomes[event.payload.toolCallId] = "denied";
         openDispatches.delete(event.payload.toolCallId);
         break;
+      case "tool_call_cancelled":
+        toolOutcomes[event.payload.toolCallId] = "cancelled";
+        openDispatches.delete(event.payload.toolCallId);
+        break;
       case "model_retry_scheduled":
       case "model_response_validated":
       case "tool_call_received":
       case "approval_requested":
       case "approval_decided":
       case "approval_grant_revoked":
+      case "run_input_queued":
+      case "run_input_withdrawn":
+      case "run_input_batch_consumed":
       case "tool_execution_started":
         break;
       case "tool_dispatch_committed":

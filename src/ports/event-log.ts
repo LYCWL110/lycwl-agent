@@ -54,6 +54,28 @@ export type InternalEventPayload =
       reason: "restart" | "superseded_input" | "precondition_changed";
     }>
   | Readonly<{
+      kind: "run_input_queued";
+      inputId: string;
+      text: string;
+      acceptedSeq: number;
+    }>
+  | Readonly<{
+      kind: "run_input_withdrawn";
+      inputId: string;
+    }>
+  | Readonly<{
+      kind: "run_input_batch_consumed";
+      inputIds: readonly string[];
+      throughSeq: number;
+      taskRevision: number;
+    }>
+  | Readonly<{
+      kind: "tool_call_cancelled";
+      toolCallId: string;
+      toolName: string;
+      reason: "user_input_superseded" | "run_cancelled";
+    }>
+  | Readonly<{
       kind: "tool_dispatch_committed";
       dispatchId: string;
       toolCallId: string;

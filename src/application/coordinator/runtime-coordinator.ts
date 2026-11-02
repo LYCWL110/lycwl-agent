@@ -1,5 +1,11 @@
 import { addModelRound, createRunBudget } from "../../domain/run/run-budget.ts";
 import {
+  consumeRunInput,
+  emptyRunInputQueue,
+  queueRunInput,
+  type RunInputQueue,
+} from "../../domain/run/input-queue.ts";
+import {
   finishRun,
   startRun,
   waitRun,
@@ -43,6 +49,20 @@ export type CoordinatorDependencies = Readonly<{
   sleep?: (delayMs: number) => Promise<void>;
 }>;
 
+export type QueueInputOutcome =
+  | Readonly<{ ok: true; inputId: string | null }>
+  | Readonly<{
+      ok: false;
+      code:
+        | "invalid_identity"
+        | "invalid_text"
+        | "input_too_long"
+        | "queue_full"
+        | "queue_units_exceeded"
+        | "run_terminal"
+        | "sequence_not_increasing";
+    }>;
+
 type MutableRunContext = {
   run: Run;
   readonly sessionId: string;
@@ -52,13 +72,47 @@ type MutableRunContext = {
   budget: ReturnType<typeof createRunBudget>;
   lastEventId: string | null;
   conversation: ProviderConversationItem[];
+  inputQueue: RunInputQueue;
+  nextAcceptedSeq: number;
+  taskRevision: number;
 };
 
 export class RuntimeCoordinator {
   readonly #deps: CoordinatorDependencies;
+  #activeContext: MutableRunContext | null = null;
 
   constructor(dependencies: CoordinatorDependencies) {
     this.#deps = dependencies;
+  }
+
+  /**
+   * Durably accept ordinary supplementary input for the current Run. Arrival is
+   * not authorization: it only updates task context at the next safe boundary.
+   */
+  async queueInput(text: string): Promise<QueueInputOutcome> {
+    const context = this.#activeContext;
+    if (context === null) return { ok: false, code: "run_terminal" };
+    const acceptedSeq = context.nextAcceptedSeq;
+    const queued = queueRunInput(context.inputQueue, {
+      commandId: this.#deps.ids.create(),
+      inputId: this.#deps.ids.create(),
+      text,
+      acceptedSeq,
+      runState: context.run.state,
+    });
+    if (!queued.ok) return { ok: false, code: queued.code };
+    context.inputQueue = queued.queue;
+    if (queued.duplicate) return { ok: true, inputId: null };
+    context.nextAcceptedSeq = acceptedSeq + 1;
+    const item = queued.queue.items.at(-1);
+    if (item === undefined) return { ok: true, inputId: null };
+    await this.#record(context, "run_input_queued", {
+      kind: "run_input_queued",
+      inputId: item.inputId,
+      text: item.text,
+      acceptedSeq: item.acceptedSeq,
+    });
+    return { ok: true, inputId: item.inputId };
   }
 
   async run(input: string): Promise<CoordinatorResult> {
@@ -71,8 +125,12 @@ export class RuntimeCoordinator {
       budget: createRunBudget(),
       lastEventId: null,
       conversation: [{ kind: "user", text: input }],
+      inputQueue: emptyRunInputQueue(),
+      nextAcceptedSeq: 1,
+      taskRevision: 1,
     };
     await this.#record(context, "run_started", { kind: "run_started", input });
+    this.#activeContext = context;
 
     try {
       while (context.run.state === "active") {
@@ -99,6 +157,19 @@ export class RuntimeCoordinator {
           text: completion.text,
         });
 
+        const superseded = await this.#consumeQueuedInput(context);
+        if (superseded) {
+          for (const call of completion.toolCalls) {
+            await this.#record(context, "tool_call_cancelled", {
+              kind: "tool_call_cancelled",
+              toolCallId: this.#deps.ids.create(),
+              toolName: call.toolName,
+              reason: "user_input_superseded",
+            });
+          }
+          continue;
+        }
+
         if (completion.toolCalls.length === 0) {
           const finished = finishRun(context.run, "completed");
           if (!finished.ok) return this.#fail(context, finished.code);
@@ -117,6 +188,8 @@ export class RuntimeCoordinator {
       }
     } catch {
       return this.#fail(context, "unexpected_internal_error");
+    } finally {
+      this.#activeContext = null;
     }
 
     return this.#result(
@@ -131,6 +204,30 @@ export class RuntimeCoordinator {
       null,
       "unexpected_run_state",
     );
+  }
+
+  /**
+   * Consume queued input at the safe boundary before any dispatch. Returns true
+   * when new input superseded the current response's undispatched calls.
+   */
+  async #consumeQueuedInput(context: MutableRunContext): Promise<boolean> {
+    const pending = context.inputQueue.items;
+    if (pending.length === 0) return false;
+    const throughSeq = pending.at(-1)?.acceptedSeq ?? 0;
+    const consumed = consumeRunInput(context.inputQueue, throughSeq, context.taskRevision);
+    if (!consumed.ok) return false;
+    context.inputQueue = consumed.queue;
+    context.taskRevision = consumed.batch.taskRevision + 1;
+    await this.#record(context, "run_input_batch_consumed", {
+      kind: "run_input_batch_consumed",
+      inputIds: consumed.batch.inputIds,
+      throughSeq: consumed.batch.throughSeq,
+      taskRevision: consumed.batch.taskRevision,
+    });
+    for (const item of pending) {
+      context.conversation.push({ kind: "user", text: item.text });
+    }
+    return true;
   }
 
   async #completeWithRetries(
