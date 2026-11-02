@@ -64,6 +64,10 @@ export async function runReadFileFlow(
   } catch {
     return { ok: false, code: "read_failed" };
   }
+  // `requestedPath` in the facts may be the resolved absolute path produced by a
+  // real adapter, while the caller passes a workspace-relative path. Compare the
+  // normalized forms so a legitimate adapter is not mistaken for a changed
+  // precondition, without weakening the identity check on the resolved target.
   if (!sameRequestedPath(inspected.target.requestedPath, request.requestedPath)) {
     return { ok: false, code: "precondition_changed" };
   }

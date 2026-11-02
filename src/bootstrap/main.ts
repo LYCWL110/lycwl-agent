@@ -47,7 +47,9 @@ if (!process.stdin.isTTY) {
   process.exit(1);
 }
 
-const runtime = createDemoRuntime();
+// The read-only adapter is scoped to the current working directory, which the
+// user selects by launching the command from the intended project.
+const runtime = createDemoRuntime(process.cwd());
 const controller = createTuiController({ coordinator: runtime.coordinator });
 
 startTui(controller);

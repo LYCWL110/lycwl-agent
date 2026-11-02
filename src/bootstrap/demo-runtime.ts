@@ -14,6 +14,7 @@ import type {
   ToolExecutionResult,
   ToolExecutor,
 } from "../ports/tool-executor.ts";
+import { createReadOnlyWorkspaceTools } from "./read-only-tools.ts";
 
 /**
  * Local demo bootstrap. It wires the real Runtime and TUI to a scripted Provider
@@ -115,6 +116,30 @@ export class DemoProvider implements ModelProvider {
   }
 }
 
+export class DemoCompositeTools implements ToolExecutor {
+  readonly #demo = new DemoTools();
+  readonly #real: ToolExecutor;
+
+  constructor(workspaceRoot: string) {
+    this.#real = createReadOnlyWorkspaceTools({
+      workspaceRoot,
+      approvals: { decide: async () => "approved" },
+      ids: demoIds,
+    });
+  }
+
+  getDefinition(toolName: string): ToolDefinition | null {
+    return this.#real.getDefinition(toolName) ?? this.#demo.getDefinition(toolName);
+  }
+
+  execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
+    if (this.#real.getDefinition(request.toolName) !== null) {
+      return this.#real.execute(request);
+    }
+    return this.#demo.execute(request);
+  }
+}
+
 export class DemoTools implements ToolExecutor {
   readonly #definitions: ReadonlyMap<string, ToolDefinition>;
 
@@ -175,13 +200,13 @@ export type DemoRuntime = Readonly<{
   provider: DemoProvider;
 }>;
 
-export function createDemoRuntime(): DemoRuntime {
+export function createDemoRuntime(workspaceRoot: string): DemoRuntime {
   const eventLog = new InMemoryEventLog(demoIds, demoDigests);
   const provider = new DemoProvider();
 
   const coordinator = new RuntimeCoordinator({
     provider,
-    tools: new DemoTools(),
+    tools: new DemoCompositeTools(workspaceRoot),
     approvals: { decide: async () => "approved" },
     eventLog,
     ids: demoIds,
