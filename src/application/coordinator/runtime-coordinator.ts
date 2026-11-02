@@ -1,3 +1,4 @@
+import { emptyTodoList, replaceTodoList, type TodoList } from "../../domain/planning/todo.ts";
 import {
   type AnswerFailure,
   type AskUserQuestion,
@@ -184,6 +185,7 @@ type MutableRunContext = {
   resumeCommandIds: Set<string>;
   pendingResume: Promise<CoordinatorResult> | null;
   checkpointFailure: string | null;
+  todoList: TodoList;
 };
 
 export class RuntimeCoordinator {
@@ -450,6 +452,7 @@ export class RuntimeCoordinator {
       resumeCommandIds: new Set<string>(),
       pendingResume: null,
       checkpointFailure: null,
+      todoList: emptyTodoList(),
     };
     await this.#record(context, "run_started", { kind: "run_started", input });
     this.#activeContext = context;
@@ -681,6 +684,35 @@ export class RuntimeCoordinator {
     };
   }
 
+  /**
+   * Session-scoped tool view. Todo state lives in the Run context and is
+   * recorded as an event on every accepted replacement, so a restart restores
+   * planning state from facts instead of trusting the model's message history.
+   */
+  #sessionTools(context: MutableRunContext): ToolExecutor {
+    const base = this.#deps.tools;
+    return {
+      getDefinition: (toolName) => base.getDefinition(toolName),
+      execute: async (request) => {
+        if (request.toolName !== "todo") return base.execute(request);
+        const result = await base.execute(request);
+        if (result.status !== "succeeded") return result;
+        const items = (request.arguments as { items?: unknown } | null)?.items;
+        const replaced = replaceTodoList(context.todoList, items);
+        if (!replaced.ok) {
+          return { status: "failed", safeCode: replaced.code, text: null };
+        }
+        context.todoList = replaced.value;
+        await this.#record(context, "todo_replaced", {
+          kind: "todo_replaced",
+          revision: replaced.value.revision,
+          items: replaced.value.items,
+        });
+        return result;
+      },
+    };
+  }
+
   async #executeCall(
     context: MutableRunContext,
     call: Parameters<typeof executeToolCall>[1],
@@ -696,7 +728,7 @@ export class RuntimeCoordinator {
     context.cancelledDuring = "tool_execution";
     const outcome = await executeToolCall(
       {
-        tools: this.#deps.tools,
+        tools: this.#sessionTools(context),
         approvals: this.#deps.approvals,
         ids: this.#deps.ids,
         deferApprovals: this.#deps.suspendOnApproval ?? false,
@@ -792,7 +824,7 @@ export class RuntimeCoordinator {
 
     const outcome = await executeToolCall(
       {
-        tools: this.#deps.tools,
+        tools: this.#sessionTools(context),
         approvals: this.#deps.approvals,
         ids: this.#deps.ids,
         onEvent: async (type, payload) => {
@@ -882,7 +914,7 @@ export class RuntimeCoordinator {
 
     const outcome = await executeToolCall(
       {
-        tools: this.#deps.tools,
+        tools: this.#sessionTools(context),
         approvals: this.#deps.approvals,
         ids: this.#deps.ids,
         onEvent: async (type, payload) => {

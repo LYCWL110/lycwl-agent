@@ -114,6 +114,15 @@ export type InternalEventPayload =
       questionId: string;
     }>
   | Readonly<{
+      kind: "todo_replaced";
+      revision: number;
+      items: readonly Readonly<{
+        id: string;
+        content: string;
+        state: "pending" | "in_progress" | "completed" | "cancelled";
+      }>[];
+    }>
+  | Readonly<{
       kind: "tool_dispatch_committed";
       dispatchId: string;
       toolCallId: string;
