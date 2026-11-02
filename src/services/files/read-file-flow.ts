@@ -41,6 +41,7 @@ export type ReadFileFlowResult =
         | "approval_denied"
         | "precondition_changed"
         | "file_too_large"
+        | "not_a_regular_file"
         | "file_changed"
         | "read_failed"
         | "decoding_failed"
