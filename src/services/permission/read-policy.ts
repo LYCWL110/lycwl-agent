@@ -1,7 +1,7 @@
 import {
   classifySensitiveRead,
-  resolveWorkspacePath,
   type ParsedWorkspacePath,
+  resolveWorkspacePath,
   type SensitiveReadReason,
   type WorkspacePathFailure,
 } from "./workspace-path.ts";

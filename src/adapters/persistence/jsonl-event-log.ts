@@ -117,17 +117,28 @@ export class JsonlEventLog implements EventLog {
 }
 
 function isNotFound(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "ENOENT"
-  );
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
+
+type UnknownEventShape = Readonly<{
+  schemaVersion: unknown;
+  eventId: unknown;
+  sessionId: unknown;
+  runId: unknown;
+  seq: unknown;
+  timestampUtc: unknown;
+  type: unknown;
+  correlationId: unknown;
+  causationId: unknown;
+  previousEventId: unknown;
+  previousHash: unknown;
+  payload: unknown;
+  hash: unknown;
+}>;
 
 function isInternalEvent(value: unknown): value is InternalEvent {
   if (typeof value !== "object" || value === null) return false;
-  const candidate = value as Record<string, unknown>;
+  const candidate = value as UnknownEventShape;
   return (
     candidate.schemaVersion === 1 &&
     typeof candidate.eventId === "string" &&

@@ -23,8 +23,7 @@ export type SourceModule = Readonly<{
 
 export function importedSpecifiers(source: string): string[] {
   const specifiers: string[] = [];
-  const importPattern =
-    /(?:import|export)\s+(?:type\s+)?(?:[\s\S]*?\s+from\s+)?["']([^"']+)["']/g;
+  const importPattern = /(?:import|export)\s+(?:type\s+)?(?:[\s\S]*?\s+from\s+)?["']([^"']+)["']/g;
   for (const match of source.matchAll(importPattern)) {
     const specifier = match[1];
     if (specifier !== undefined) specifiers.push(specifier);
@@ -54,9 +53,9 @@ export function findBoundaryViolations(modules: readonly SourceModule[]): string
         }
         const resolved = SOURCE_EXTENSIONS.has(path.extname(target))
           ? target
-          : [...SOURCE_EXTENSIONS].map((extension) => `${target}${extension}`).find((candidate) =>
-              knownPaths.has(candidate),
-            );
+          : [...SOURCE_EXTENSIONS]
+              .map((extension) => `${target}${extension}`)
+              .find((candidate) => knownPaths.has(candidate));
         if (resolved !== undefined) edges.push(resolved);
 
         const targetLayer = sourceLayer(target);

@@ -20,10 +20,11 @@ export type WorkspacePathResult =
   | Readonly<{ ok: true; value: ParsedWorkspacePath }>
   | Readonly<{ ok: false; code: WorkspacePathFailure }>;
 
-export type SensitiveReadReason =
-  | "protected_directory"
-  | "sensitive_file"
-  | "environment_file";
+type NormalizedPathResult =
+  | Readonly<{ ok: true; value: string }>
+  | Readonly<{ ok: false; code: WorkspacePathFailure }>;
+
+export type SensitiveReadReason = "protected_directory" | "sensitive_file" | "environment_file";
 
 const RESERVED_BASENAMES = new Set([
   "CON",
@@ -145,7 +146,7 @@ function joinRootAndRelative(root: string, relative: string): string {
   return `${root}${separator}${relative.replace(/^[\\/]+/, "")}`;
 }
 
-function normalizeAbsolutePath(value: string): WorkspacePathResult {
+function normalizeAbsolutePath(value: string): NormalizedPathResult {
   let candidate = value.replace(/\//g, "\\");
   let prefix = "";
 
@@ -209,7 +210,6 @@ function isSameOrChild(root: string, candidate: string): boolean {
   const normalizedRoot = root.toLowerCase().replace(/\\$/, "");
   const normalizedCandidate = candidate.toLowerCase().replace(/\\$/, "");
   return (
-    normalizedCandidate === normalizedRoot ||
-    normalizedCandidate.startsWith(`${normalizedRoot}\\`)
+    normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}\\`)
   );
 }

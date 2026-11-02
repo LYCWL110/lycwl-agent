@@ -63,7 +63,11 @@ export function queueRunInput(queue: RunInputQueue, command: QueueInputCommand):
       : { ok: false, code: "invalid_identity" };
   }
 
-  if (command.runState === "completed" || command.runState === "failed" || command.runState === "cancelled") {
+  if (
+    command.runState === "completed" ||
+    command.runState === "failed" ||
+    command.runState === "cancelled"
+  ) {
     return { ok: false, code: "run_terminal" };
   }
 
@@ -150,6 +154,9 @@ export function withdrawRunInput(queue: RunInputQueue, inputId: string): Withdra
   }
   return {
     ok: true,
-    queue: { items: queue.items.filter((item) => item.inputId !== inputId), handledCommandIds: queue.handledCommandIds },
+    queue: {
+      items: queue.items.filter((item) => item.inputId !== inputId),
+      handledCommandIds: queue.handledCommandIds,
+    },
   };
 }

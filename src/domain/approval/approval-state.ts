@@ -64,10 +64,12 @@ export type ToolDispatchCommit = Readonly<{
 export function commitToolDispatch(
   grant: ApprovalGrant | null,
   commit: ToolDispatchCommit,
-): Readonly<{ ok: true; grant: ApprovalGrant | null }> | Readonly<{
-  ok: false;
-  code: "invalid_identity" | "grant_required" | "grant_mismatch" | "grant_unavailable";
-}> {
+):
+  | Readonly<{ ok: true; grant: ApprovalGrant | null }>
+  | Readonly<{
+      ok: false;
+      code: "invalid_identity" | "grant_required" | "grant_mismatch" | "grant_unavailable";
+    }> {
   if (
     commit.dispatchId.length === 0 ||
     commit.toolCallId.length === 0 ||
@@ -89,7 +91,9 @@ export function commitToolDispatch(
 
 export function consumeApprovalGrant(
   grant: ApprovalGrant,
-): Readonly<{ ok: true; value: ApprovalGrant }> | Readonly<{ ok: false; code: "grant_unavailable" }> {
+):
+  | Readonly<{ ok: true; value: ApprovalGrant }>
+  | Readonly<{ ok: false; code: "grant_unavailable" }> {
   if (grant.state !== "available") {
     return { ok: false, code: "grant_unavailable" };
   }
@@ -98,7 +102,9 @@ export function consumeApprovalGrant(
 
 export function revokeApprovalGrant(
   grant: ApprovalGrant,
-): Readonly<{ ok: true; value: ApprovalGrant }> | Readonly<{ ok: false; code: "grant_unavailable" }> {
+):
+  | Readonly<{ ok: true; value: ApprovalGrant }>
+  | Readonly<{ ok: false; code: "grant_unavailable" }> {
   if (grant.state !== "available") {
     return { ok: false, code: "grant_unavailable" };
   }

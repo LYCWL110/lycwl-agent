@@ -92,10 +92,12 @@ export async function replayRun(
     previous = event;
   }
 
-  if (previous?.payload.kind !== "run_completed" &&
-      previous?.payload.kind !== "run_failed" &&
-      previous?.payload.kind !== "run_cancelled" &&
-      previous?.payload.kind !== "run_waiting") {
+  if (
+    previous?.payload.kind !== "run_completed" &&
+    previous?.payload.kind !== "run_failed" &&
+    previous?.payload.kind !== "run_cancelled" &&
+    previous?.payload.kind !== "run_waiting"
+  ) {
     return { ok: false, code: "replay_invalid" };
   }
   if (previous.payload.kind === "run_completed" && openDispatches.size > 0) {

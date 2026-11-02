@@ -18,9 +18,7 @@ export type ApprovalGrantProjection =
         | "revoke_without_grant";
     }>;
 
-export function projectApprovalGrants(
-  events: readonly InternalEvent[],
-): ApprovalGrantProjection {
+export function projectApprovalGrants(events: readonly InternalEvent[]): ApprovalGrantProjection {
   const requested = new Set<string>();
   const grants: Record<string, ApprovalGrantState> = {};
 

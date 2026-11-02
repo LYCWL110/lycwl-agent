@@ -1,13 +1,13 @@
 import {
+  type ApprovalGrant,
   commitToolDispatch,
   decideApproval,
   requestApproval,
-  type ApprovalGrant,
 } from "../../domain/approval/approval-state.ts";
 import {
   receiveToolInvocation,
-  transitionToolInvocation,
   type ToolInvocation,
+  transitionToolInvocation,
 } from "../../domain/tool-invocation/tool-invocation-state.ts";
 import type { ApprovalGate } from "../../ports/approval-gate.ts";
 import type { IdentifierFactory } from "../../ports/identity.ts";

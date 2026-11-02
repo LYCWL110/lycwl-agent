@@ -1,16 +1,16 @@
 import type { ApprovalGate } from "../../ports/approval-gate.ts";
 import {
+  decideResolvedReadPermission,
+  type ResolvedReadTarget,
+} from "../permission/resolved-read-policy.ts";
+import {
   captureConsistentSnapshot,
-  MAX_SNAPSHOT_BYTES,
   type FileSnapshotFacts,
+  MAX_SNAPSHOT_BYTES,
 } from "./consistent-snapshot.ts";
 import { createReadFileFact, type ReadFileFact } from "./read-file-fact.ts";
 import { boundTextSnapshotForModel } from "./text-delivery.ts";
 import { readTextSnapshot, type TextFileEncoding } from "./text-snapshot.ts";
-import {
-  decideResolvedReadPermission,
-  type ResolvedReadTarget,
-} from "../permission/resolved-read-policy.ts";
 
 export type ReadFileFlowRequest = Readonly<{
   workspaceRoot: string;
@@ -154,10 +154,7 @@ export function sameResolvedTarget(left: ResolvedReadTarget, right: ResolvedRead
   );
 }
 
-export function sameSnapshotFacts(
-  left: FileSnapshotFacts,
-  right: FileSnapshotFacts,
-): boolean {
+export function sameSnapshotFacts(left: FileSnapshotFacts, right: FileSnapshotFacts): boolean {
   return (
     left.identity === right.identity &&
     left.size === right.size &&

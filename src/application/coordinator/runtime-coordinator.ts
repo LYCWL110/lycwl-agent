@@ -1,21 +1,17 @@
-import { addModelRound, createRunBudget } from "../../domain/run/run-budget.ts";
 import {
   consumeRunInput,
   emptyRunInputQueue,
   queueRunInput,
   type RunInputQueue,
 } from "../../domain/run/input-queue.ts";
-import {
-  finishRun,
-  startRun,
-  waitRun,
-  type Run,
-} from "../../domain/run/run-state.ts";
+import { addModelRound, createRunBudget } from "../../domain/run/run-budget.ts";
+import { finishRun, type Run, startRun, waitRun } from "../../domain/run/run-state.ts";
 import type { ApprovalGate } from "../../ports/approval-gate.ts";
 import type { IdentifierFactory } from "../../ports/identity.ts";
 import type {
   ModelProvider,
   ProviderConversationItem,
+  ProviderToolCall,
 } from "../../ports/model-provider.ts";
 import type { ToolExecutor } from "../../ports/tool-executor.ts";
 import type { EventInput, EventLog } from "./event-log.ts";
@@ -134,7 +130,11 @@ export class RuntimeCoordinator {
     if (context.cancelCommandIds.has(commandId)) {
       return { ok: true, duplicate: true };
     }
-    if (context.run.state === "completed" || context.run.state === "failed" || context.run.state === "cancelled") {
+    if (
+      context.run.state === "completed" ||
+      context.run.state === "failed" ||
+      context.run.state === "cancelled"
+    ) {
       return { ok: false, code: "run_terminal" };
     }
     context.cancelCommandIds.add(commandId);
@@ -273,18 +273,17 @@ export class RuntimeCoordinator {
   async #completeWithRetries(
     context: MutableRunContext,
     modelRequestId: string,
-  ):
-    Promise<
-      | Readonly<{
-          kind: "completed";
-          attemptNo: number;
-          toolCalls: readonly ProviderToolCall[];
-          text: string | null;
-        }>
-      | Readonly<{ kind: "terminal"; result: CoordinatorResult }>
-      | Readonly<{ kind: "waiting"; result: CoordinatorResult }>
-      | Readonly<{ kind: "failed"; result: CoordinatorResult }>
-    > {
+  ): Promise<
+    | Readonly<{
+        kind: "completed";
+        attemptNo: number;
+        toolCalls: readonly ProviderToolCall[];
+        text: string | null;
+      }>
+    | Readonly<{ kind: "terminal"; result: CoordinatorResult }>
+    | Readonly<{ kind: "waiting"; result: CoordinatorResult }>
+    | Readonly<{ kind: "failed"; result: CoordinatorResult }>
+  > {
     const outcome = await completeWithBoundedRetries(
       {
         provider: this.#deps.provider,
@@ -309,26 +308,26 @@ export class RuntimeCoordinator {
 
     if (outcome.kind === "completed") return outcome;
     if (outcome.kind === "authentication_failure") {
-        const waiting = waitRun(context.run, "configuration", this.#deps.ids.create(), 1);
-        if (!waiting.ok) {
-          return { kind: "failed", result: await this.#fail(context, waiting.code) };
-        }
-        context.run = waiting.value;
-        await this.#record(context, "run_waiting", {
-          kind: "run_waiting",
-          reason: "configuration",
+      const waiting = waitRun(context.run, "configuration", this.#deps.ids.create(), 1);
+      if (!waiting.ok) {
+        return { kind: "failed", result: await this.#fail(context, waiting.code) };
+      }
+      context.run = waiting.value;
+      await this.#record(context, "run_waiting", {
+        kind: "run_waiting",
+        reason: "configuration",
+        safeCode: outcome.safeCode,
+      });
+      return {
+        kind: "waiting",
+        result: {
+          status: "waiting",
+          run: context.run,
+          events: [...context.events],
+          text: null,
           safeCode: outcome.safeCode,
-        });
-        return {
-          kind: "waiting",
-          result: {
-            status: "waiting",
-            run: context.run,
-            events: [...context.events],
-            text: null,
-            safeCode: outcome.safeCode,
-          },
-        };
+        },
+      };
     }
     return {
       kind: "failed",
@@ -344,7 +343,9 @@ export class RuntimeCoordinator {
   async #executeCall(
     context: MutableRunContext,
     call: Parameters<typeof executeToolCall>[1],
-  ): Promise<Readonly<{ kind: "continue" }> | Readonly<{ kind: "stop"; result: CoordinatorResult }>> {
+  ): Promise<
+    Readonly<{ kind: "continue" }> | Readonly<{ kind: "stop"; result: CoordinatorResult }>
+  > {
     if (context.run.state !== "active") {
       return { kind: "stop", result: await this.#fail(context, "run_not_active") };
     }

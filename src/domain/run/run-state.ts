@@ -33,11 +33,7 @@ export type RunTransition =
   | Readonly<{ ok: true; value: Run }>
   | Readonly<{ ok: false; code: RunTransitionErrorCode }>;
 
-const TERMINAL_STATES: ReadonlySet<RunState> = new Set([
-  "completed",
-  "failed",
-  "cancelled",
-]);
+const TERMINAL_STATES: ReadonlySet<RunState> = new Set(["completed", "failed", "cancelled"]);
 
 export function isTerminalRun(run: Run): run is RunTerminal {
   return TERMINAL_STATES.has(run.state);

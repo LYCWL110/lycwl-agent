@@ -59,10 +59,7 @@ export type ReadFileEvidenceRef =
       byteRange: Readonly<{ start: number; end: number }>;
     }>;
 
-export function createReadFileFact(
-  snapshotId: string,
-  delivery: TextDelivery,
-): ReadFileFact {
+export function createReadFileFact(snapshotId: string, delivery: TextDelivery): ReadFileFact {
   const snapshot = delivery.snapshot;
   const slice = createSlice(delivery);
 

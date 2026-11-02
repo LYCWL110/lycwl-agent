@@ -65,7 +65,11 @@ export function readTextSnapshot(
 
   const detectedBom = detectBom(bytes);
   const requestedEncoding = request.encoding;
-  if (requestedEncoding !== undefined && detectedBom !== null && detectedBom !== requestedEncoding) {
+  if (
+    requestedEncoding !== undefined &&
+    detectedBom !== null &&
+    detectedBom !== requestedEncoding
+  ) {
     return { ok: false, code: "encoding_mismatch" };
   }
   if (requestedEncoding === "latin-1" && detectedBom !== null) {
@@ -91,7 +95,9 @@ export function readTextSnapshot(
   const first = selected[0] ?? null;
   const last = selected.at(-1) ?? null;
   const byteStart =
-    first === null ? bytes.byteLength : bomLength(detectedBom) + encodedLength(decoded.slice(0, first.start), encoding);
+    first === null
+      ? bytes.byteLength
+      : bomLength(detectedBom) + encodedLength(decoded.slice(0, first.start), encoding);
   const byteEnd =
     last === null
       ? bytes.byteLength
@@ -137,8 +143,7 @@ function findLines(value: string): LinePosition[] {
   for (let index = 0; index < value.length; index += 1) {
     const character = value[index];
     if (character === "\r" || character === "\n") {
-      const terminatorLength =
-        character === "\r" && value[index + 1] === "\n" ? 2 : 1;
+      const terminatorLength = character === "\r" && value[index + 1] === "\n" ? 2 : 1;
       lines.push({
         start,
         end: index,
