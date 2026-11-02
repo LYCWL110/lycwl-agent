@@ -5,3 +5,12 @@ docs-check/
 AGENTS.md
 tests/
 
+# Installed dependencies and tool caches.
+node_modules/
+.pnpm-store/
+coverage/
+biome-cache/
+
+# Local runtime data.
+.tmp/
+*.log
