@@ -386,7 +386,7 @@ async function dispatchAndExecute(
     toolCallId,
     status: result.status,
     safeCode: result.status === "succeeded" ? null : result.safeCode,
-    text: result.status === "outcome_unknown" ? null : result.text,
+    text: result.text ?? null,
   });
 
   if (result.status === "outcome_unknown") {
