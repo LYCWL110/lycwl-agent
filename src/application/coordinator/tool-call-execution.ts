@@ -9,6 +9,7 @@ import {
   type QuestionOutcome,
   validateAskUserQuestion,
 } from "../../domain/question/ask-user.ts";
+import type { OwnedKeyRegistry } from "../../domain/security/owned-key-guard.ts";
 import {
   receiveToolInvocation,
   type ToolInvocation,
@@ -18,6 +19,7 @@ import type { ApprovalGate } from "../../ports/approval-gate.ts";
 import type { IdentifierFactory } from "../../ports/identity.ts";
 import type { ProviderToolCall } from "../../ports/model-provider.ts";
 import type { ToolExecutor } from "../../ports/tool-executor.ts";
+import { guardToolResultText } from "../../services/security/guarded-delivery.ts";
 
 export type ToolCallOutcome =
   | Readonly<{
@@ -78,6 +80,8 @@ export type ToolCallDependencies = Readonly<{
   deferApprovals?: boolean;
   /** When true, ask_user suspends the call until a matching answer arrives. */
   deferQuestions?: boolean;
+  /** C10 owned-key registry applied to persisted tool result text. */
+  ownedKeys?: OwnedKeyRegistry;
   onEvent: (
     type:
       | "tool_call_received"
@@ -381,12 +385,19 @@ async function dispatchAndExecute(
   });
   const terminal = transitionToolInvocation(executing.value, result.status);
   if (!terminal.ok) return { kind: "invalid", safeCode: terminal.code };
+  // C10: the persisted tool result is a protected exit too. A blocked text is
+  // withheld from the event while the real status is preserved.
+  const registry = dependencies.ownedKeys;
+  const delivery =
+    registry === undefined
+      ? { text: result.text ?? null, deliveryBlocked: false as const }
+      : guardToolResultText(registry, result.status, result.text ?? null);
   await dependencies.onEvent("tool_execution_finished", {
     kind: "tool_execution_finished",
     toolCallId,
     status: result.status,
     safeCode: result.status === "succeeded" ? null : result.safeCode,
-    text: result.text ?? null,
+    text: delivery.text,
   });
 
   if (result.status === "outcome_unknown") {

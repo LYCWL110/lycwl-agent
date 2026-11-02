@@ -115,6 +115,10 @@ export type InternalEventPayload =
       questionId: string;
     }>
   | Readonly<{
+      kind: "tool_result_delivery_blocked";
+      reason: "owned_key_detected" | "guard_failure";
+    }>
+  | Readonly<{
       kind: "todo_replaced";
       revision: number;
       items: readonly Readonly<{

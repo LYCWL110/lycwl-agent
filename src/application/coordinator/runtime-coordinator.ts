@@ -14,6 +14,7 @@ import {
 } from "../../domain/run/input-queue.ts";
 import { addModelRound, createRunBudget } from "../../domain/run/run-budget.ts";
 import { finishRun, type Run, resumeRun, startRun, waitRun } from "../../domain/run/run-state.ts";
+import type { OwnedKeyRegistry } from "../../domain/security/owned-key-guard.ts";
 import type { ApprovalGate } from "../../ports/approval-gate.ts";
 import type { IdentifierFactory } from "../../ports/identity.ts";
 import type {
@@ -22,6 +23,7 @@ import type {
   ProviderToolCall,
 } from "../../ports/model-provider.ts";
 import type { ToolExecutionRequest, ToolExecutor } from "../../ports/tool-executor.ts";
+import { guardText, guardToolResultText } from "../../services/security/guarded-delivery.ts";
 import type { EventInput, EventLog } from "./event-log.ts";
 import type { InternalEvent } from "./internal-events.ts";
 import { completeWithBoundedRetries } from "./model-attempts.ts";
@@ -69,6 +71,12 @@ export type CoordinatorDependencies = Readonly<{
    * the event log; a checkpoint failure must not fail the Run.
    */
   checkpoints?: CheckpointWriter;
+  /**
+   * Harness-owned Provider key registry (C10). When present, tool result text and
+   * final assistant text are checked before delivery; a match blocks the payload
+   * instead of rewriting it.
+   */
+  ownedKeys?: OwnedKeyRegistry;
 }>;
 
 export type QueueInputOutcome =
@@ -185,6 +193,7 @@ type MutableRunContext = {
   resumeCommandIds: Set<string>;
   pendingResume: Promise<CoordinatorResult> | null;
   checkpointFailure: string | null;
+  deliveryBlocked: boolean;
   todoList: TodoList;
 };
 
@@ -452,6 +461,7 @@ export class RuntimeCoordinator {
       resumeCommandIds: new Set<string>(),
       pendingResume: null,
       checkpointFailure: null,
+      deliveryBlocked: false,
       todoList: emptyTodoList(),
     };
     await this.#record(context, "run_started", { kind: "run_started", input });
@@ -531,12 +541,37 @@ export class RuntimeCoordinator {
           return this.#fail(context, "duplicate_provider_tool_call_id");
         }
 
+        // C10: the recorded model text is a protected exit. A blocked response
+        // never dispatches its calls and never claims a clean completion.
+        const guardRegistry = this.#deps.ownedKeys;
+        const guardedCompletionText =
+          guardRegistry === undefined || completion.text === null
+            ? completion.text
+            : (() => {
+                const guarded = guardText(guardRegistry, completion.text);
+                if (guarded.kind === "blocked") {
+                  context.deliveryBlocked = true;
+                  return null;
+                }
+                return guarded.text;
+              })();
+        if (
+          guardRegistry !== undefined &&
+          completion.text !== null &&
+          guardedCompletionText === null
+        ) {
+          await this.#record(context, "tool_result_delivery_blocked", {
+            kind: "tool_result_delivery_blocked",
+            reason: "owned_key_detected",
+          });
+          return this.#fail(context, "model_text_blocked");
+        }
         await this.#record(context, "model_response_validated", {
           kind: "model_response_validated",
           modelRequestId,
           attemptNo: completion.attemptNo,
           toolCallCount: completion.toolCalls.length,
-          text: completion.text,
+          text: guardedCompletionText,
         });
 
         const superseded = await this.#consumeQueuedInput(context);
@@ -554,14 +589,28 @@ export class RuntimeCoordinator {
         }
 
         if (completion.toolCalls.length === 0) {
+          // C10: the final assistant text is also a protected exit.
+          const registry = this.#deps.ownedKeys;
+          const guarded =
+            registry === undefined || completion.text === null
+              ? { kind: "delivered" as const, text: completion.text }
+              : guardText(registry, completion.text);
+          if (guarded.kind === "blocked") {
+            context.deliveryBlocked = true;
+            await this.#record(context, "tool_result_delivery_blocked", {
+              kind: "tool_result_delivery_blocked",
+              reason: guarded.reason,
+            });
+            return this.#fail(context, "model_text_blocked");
+          }
           const finished = finishRun(context.run, "completed");
           if (!finished.ok) return this.#fail(context, finished.code);
           context.run = finished.value;
           await this.#record(context, "run_completed", {
             kind: "run_completed",
-            text: completion.text,
+            text: guardedCompletionText,
           });
-          return this.#result(context, "completed", completion.text, null);
+          return this.#result(context, "completed", guarded.text, null);
         }
 
         for (const call of completion.toolCalls) {
@@ -737,6 +786,7 @@ export class RuntimeCoordinator {
         ids: this.#deps.ids,
         deferApprovals: this.#deps.suspendOnApproval ?? false,
         deferQuestions: this.#deps.suspendOnApproval ?? false,
+        ...(this.#deps.ownedKeys === undefined ? {} : { ownedKeys: this.#deps.ownedKeys }),
         onEvent: async (type, payload) => {
           await this.#record(context, type, payload as InternalEvent["payload"]);
         },
@@ -957,12 +1007,22 @@ export class RuntimeCoordinator {
     status: "succeeded" | "failed" | "denied" | "outcome_unknown",
     text: string | null,
   ): void {
+    // C10: a blocked tool result keeps its real status but its text never
+    // reaches model context. Blocking is not evidence of non-execution.
+    const registry = this.#deps.ownedKeys;
+    const delivery =
+      registry === undefined
+        ? { status, text, deliveryBlocked: false as const }
+        : guardToolResultText(registry, status, text);
+    if (delivery.deliveryBlocked) {
+      context.deliveryBlocked = true;
+    }
     context.conversation.push({
       kind: "tool_result",
       providerToolCallId: call.providerToolCallId,
       toolName: call.toolName,
       status,
-      text,
+      text: delivery.text,
     });
   }
 

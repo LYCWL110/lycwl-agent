@@ -87,6 +87,8 @@ export async function replayRun(
       case "run_input_queued":
       case "run_input_withdrawn":
       case "run_input_batch_consumed":
+      case "tool_result_delivery_blocked":
+      case "todo_replaced":
       case "tool_execution_started":
         break;
       case "tool_dispatch_committed":
