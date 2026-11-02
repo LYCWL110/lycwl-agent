@@ -10,7 +10,7 @@ import {
 
 export type ReadFileFlowRequest = Readonly<{
   workspaceRoot: string;
-  target: ResolvedReadTarget;
+  requestedPath: string;
   snapshotId: string;
   approvalId: string;
   toolCallId: string;
@@ -53,7 +53,17 @@ export async function runReadFileFlow(
   request: ReadFileFlowRequest,
   dependencies: ReadFileFlowDependencies,
 ): Promise<ReadFileFlowResult> {
-  const decision = decideResolvedReadPermission(request.workspaceRoot, request.target);
+  let inspected: ReadFileFlowTargetFacts;
+  try {
+    inspected = await dependencies.inspectTarget();
+  } catch {
+    return { ok: false, code: "read_failed" };
+  }
+  if (!sameRequestedPath(inspected.target.requestedPath, request.requestedPath)) {
+    return { ok: false, code: "precondition_changed" };
+  }
+
+  const decision = decideResolvedReadPermission(request.workspaceRoot, inspected.target);
   if (decision.outcome === "invalid") {
     return { ok: false, code: "invalid_path" };
   }
@@ -64,27 +74,34 @@ export async function runReadFileFlow(
       approvalId: request.approvalId,
       toolCallId: request.toolCallId,
       toolName: "read_file",
-      safePreview: createPreview(decision.requestedPath, decision.resolvedPath, decision.disclosureWarning),
+      safePreview: createPreview(
+        decision.requestedPath,
+        decision.resolvedPath,
+        inspected.snapshot,
+        decision.disclosureWarning,
+      ),
     });
     if (approval !== "approved") return { ok: false, code: "approval_denied" };
-  }
 
-  let before: ReadFileFlowTargetFacts;
-  try {
-    before = await dependencies.inspectTarget();
-  } catch {
-    return { ok: false, code: "read_failed" };
-  }
-  const precondition = decideResolvedReadPermission(request.workspaceRoot, before.target);
-  if (
-    !sameDecision(decision, precondition) ||
-    !sameResolvedTarget(before.target, request.target)
-  ) {
-    return { ok: false, code: "precondition_changed" };
+    let before: ReadFileFlowTargetFacts;
+    try {
+      before = await dependencies.inspectTarget();
+    } catch {
+      return { ok: false, code: "read_failed" };
+    }
+    const precondition = decideResolvedReadPermission(request.workspaceRoot, before.target);
+    if (
+      !sameDecision(decision, precondition) ||
+      !sameResolvedTarget(before.target, inspected.target) ||
+      !sameSnapshotFacts(before.snapshot, inspected.snapshot)
+    ) {
+      return { ok: false, code: "precondition_changed" };
+    }
+    inspected = before;
   }
 
   const snapshot = await captureConsistentSnapshot({
-    before: before.snapshot,
+    before: inspected.snapshot,
     read: dependencies.readBytes,
     after: async () => (await dependencies.inspectTarget()).snapshot,
   });
@@ -103,7 +120,7 @@ export async function runReadFileFlow(
   };
 }
 
-function sameDecision(
+export function sameDecision(
   left: ReturnType<typeof decideResolvedReadPermission>,
   right: ReturnType<typeof decideResolvedReadPermission>,
 ): boolean {
@@ -120,7 +137,7 @@ function sameDecision(
   return left.outcome === "allowed" && right.outcome === "allowed";
 }
 
-function sameResolvedTarget(left: ResolvedReadTarget, right: ResolvedReadTarget): boolean {
+export function sameResolvedTarget(left: ResolvedReadTarget, right: ResolvedReadTarget): boolean {
   return (
     left.requestedPath.toLowerCase() === right.requestedPath.toLowerCase() &&
     left.resolvedPath.toLowerCase() === right.resolvedPath.toLowerCase() &&
@@ -129,11 +146,35 @@ function sameResolvedTarget(left: ResolvedReadTarget, right: ResolvedReadTarget)
   );
 }
 
-function createPreview(requestedPath: string, resolvedPath: string, warning: string): string {
+export function sameSnapshotFacts(
+  left: FileSnapshotFacts,
+  right: FileSnapshotFacts,
+): boolean {
+  return (
+    left.identity === right.identity &&
+    left.size === right.size &&
+    left.lastWriteTimeNs === right.lastWriteTimeNs &&
+    left.isFile === right.isFile &&
+    left.isSymbolicLink === right.isSymbolicLink
+  );
+}
+
+function sameRequestedPath(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+function createPreview(
+  requestedPath: string,
+  resolvedPath: string,
+  facts: FileSnapshotFacts,
+  warning: string,
+): string {
   return [
     "read_file",
     `requested=${requestedPath}`,
     `resolved=${resolvedPath}`,
+    `identity=${facts.identity}`,
+    `bytes=${facts.size}`,
     "capture=complete file snapshot up to 5 MiB",
     "delivery=selected lines, at most 20000 UTF-16 units",
     warning,
