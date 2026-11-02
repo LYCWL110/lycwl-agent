@@ -44,6 +44,21 @@ export type ReadFileEvidenceSummary = Readonly<{
   modelTextTruncationReason: "model_budget" | null;
 }>;
 
+export type ReadFileEvidenceRef =
+  | Readonly<{
+      kind: "whole_file";
+      snapshot: ReadFileSnapshot;
+      attachment: ReadFileAttachment;
+    }>
+  | Readonly<{
+      kind: "file_lines";
+      snapshot: ReadFileSnapshot;
+      attachment: ReadFileAttachment;
+      startLine: number;
+      endLine: number;
+      byteRange: Readonly<{ start: number; end: number }>;
+    }>;
+
 export function createReadFileFact(
   snapshotId: string,
   delivery: TextDelivery,
@@ -80,6 +95,41 @@ export function createReadFileEvidence(
     modelTextTruncated: fact.textTruncated,
     modelTextTruncationReason: fact.textTruncated ? "model_budget" : null,
   };
+}
+
+export function createReadFileEvidenceRef(
+  fact: ReadFileFact,
+  attachment: ReadFileAttachment | null,
+): ReadFileEvidenceRef | null {
+  if (!attachmentMatchesSnapshot(fact, attachment)) return null;
+  if (fact.snapshot.totalBytes === 0) {
+    return {
+      kind: "whole_file",
+      snapshot: fact.snapshot,
+      attachment,
+    };
+  }
+  if (fact.slice.kind !== "lines") return null;
+
+  return {
+    kind: "file_lines",
+    snapshot: fact.snapshot,
+    attachment,
+    startLine: fact.slice.startLine,
+    endLine: fact.slice.endLine,
+    byteRange: fact.slice.byteRange,
+  };
+}
+
+function attachmentMatchesSnapshot(
+  fact: ReadFileFact,
+  attachment: ReadFileAttachment | null,
+): attachment is ReadFileAttachment {
+  return (
+    attachment !== null &&
+    attachment.sha256 === fact.snapshot.fileSha256 &&
+    attachment.byteLength === fact.snapshot.totalBytes
+  );
 }
 
 function createSlice(delivery: TextDelivery): ReadFileSlice {
