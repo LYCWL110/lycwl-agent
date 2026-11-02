@@ -55,6 +55,38 @@ export type ApprovalGrant = Readonly<{
   state: "available" | "consumed" | "revoked";
 }>;
 
+export type ToolDispatchCommit = Readonly<{
+  dispatchId: string;
+  toolCallId: string;
+  approvalId: string | null;
+}>;
+
+export function commitToolDispatch(
+  grant: ApprovalGrant | null,
+  commit: ToolDispatchCommit,
+): Readonly<{ ok: true; grant: ApprovalGrant | null }> | Readonly<{
+  ok: false;
+  code: "invalid_identity" | "grant_required" | "grant_mismatch" | "grant_unavailable";
+}> {
+  if (
+    commit.dispatchId.length === 0 ||
+    commit.toolCallId.length === 0 ||
+    (commit.approvalId !== null && commit.approvalId.length === 0)
+  ) {
+    return { ok: false, code: "invalid_identity" };
+  }
+  if (grant === null) {
+    return commit.approvalId === null
+      ? { ok: true, grant: null }
+      : { ok: false, code: "grant_required" };
+  }
+  if (commit.approvalId === null) return { ok: false, code: "grant_mismatch" };
+  if (grant.approvalId !== commit.approvalId) return { ok: false, code: "grant_mismatch" };
+  const consumed = consumeApprovalGrant(grant);
+  if (!consumed.ok) return { ok: false, code: consumed.code };
+  return { ok: true, grant: consumed.value };
+}
+
 export function consumeApprovalGrant(
   grant: ApprovalGrant,
 ): Readonly<{ ok: true; value: ApprovalGrant }> | Readonly<{ ok: false; code: "grant_unavailable" }> {

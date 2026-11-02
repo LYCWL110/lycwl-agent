@@ -1,5 +1,5 @@
 import {
-  consumeApprovalGrant,
+  commitToolDispatch,
   decideApproval,
   requestApproval,
   type ApprovalGrant,
@@ -39,6 +39,7 @@ export type ToolCallDependencies = Readonly<{
       | "tool_call_received"
       | "approval_requested"
       | "approval_decided"
+      | "tool_dispatch_committed"
       | "tool_execution_denied"
       | "tool_execution_started"
       | "tool_execution_finished",
@@ -129,8 +130,33 @@ export async function executeToolCall(
     }
 
     const grant: ApprovalGrant = { approvalId, state: "available" };
-    const consumed = consumeApprovalGrant(grant);
-    if (!consumed.ok) return { kind: "invalid", safeCode: consumed.code };
+    const dispatchId = dependencies.ids.create();
+    const committed = commitToolDispatch(grant, {
+      dispatchId,
+      toolCallId,
+      approvalId,
+    });
+    if (!committed.ok) return { kind: "invalid", safeCode: committed.code };
+    await dependencies.onEvent("tool_dispatch_committed", {
+      kind: "tool_dispatch_committed",
+      dispatchId,
+      toolCallId,
+      approvalId,
+    });
+  } else {
+    const dispatchId = dependencies.ids.create();
+    const committed = commitToolDispatch(null, {
+      dispatchId,
+      toolCallId,
+      approvalId: null,
+    });
+    if (!committed.ok) return { kind: "invalid", safeCode: committed.code };
+    await dependencies.onEvent("tool_dispatch_committed", {
+      kind: "tool_dispatch_committed",
+      dispatchId,
+      toolCallId,
+      approvalId: null,
+    });
   }
 
   const ready = transitionToolInvocation(invocation, "ready");

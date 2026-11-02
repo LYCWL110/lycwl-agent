@@ -5,6 +5,7 @@ export type ReplayedRun = Readonly<{
   state: "active" | "waiting" | "completed" | "failed" | "cancelled";
   finalText: string | null;
   toolOutcomes: Readonly<Record<string, string>>;
+  uncertainDispatches: readonly string[];
   modelAttempts: number;
   safeFailureCode: string | null;
 }>;
@@ -23,6 +24,7 @@ export async function replayRun(
   let modelAttempts = 0;
   let safeFailureCode: string | null = null;
   const toolOutcomes: Record<string, string> = {};
+  const openDispatches = new Set<string>();
 
   for (const event of events) {
     if (event.seq !== (previous?.seq ?? 0) + 1) return { ok: false, code: "sequence_invalid" };
@@ -60,9 +62,11 @@ export async function replayRun(
         break;
       case "tool_execution_finished":
         toolOutcomes[event.payload.toolCallId] = event.payload.status;
+        openDispatches.delete(event.payload.toolCallId);
         break;
       case "tool_execution_denied":
         toolOutcomes[event.payload.toolCallId] = "denied";
+        openDispatches.delete(event.payload.toolCallId);
         break;
       case "model_retry_scheduled":
       case "model_response_validated":
@@ -70,6 +74,9 @@ export async function replayRun(
       case "approval_requested":
       case "approval_decided":
       case "tool_execution_started":
+        break;
+      case "tool_dispatch_committed":
+        openDispatches.add(event.payload.toolCallId);
         break;
     }
     previous = event;
@@ -81,9 +88,19 @@ export async function replayRun(
       previous?.payload.kind !== "run_waiting") {
     return { ok: false, code: "replay_invalid" };
   }
+  if (previous.payload.kind === "run_completed" && openDispatches.size > 0) {
+    return { ok: false, code: "replay_invalid" };
+  }
 
   return {
     ok: true,
-    value: { state, finalText, toolOutcomes, modelAttempts, safeFailureCode },
+    value: {
+      state,
+      finalText,
+      toolOutcomes,
+      uncertainDispatches: [...openDispatches],
+      modelAttempts,
+      safeFailureCode,
+    },
   };
 }

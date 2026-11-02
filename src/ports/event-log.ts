@@ -48,6 +48,12 @@ export type InternalEventPayload =
       decision: "approved" | "denied";
     }>
   | Readonly<{
+      kind: "tool_dispatch_committed";
+      dispatchId: string;
+      toolCallId: string;
+      approvalId: string | null;
+    }>
+  | Readonly<{
       kind: "tool_execution_started";
       toolCallId: string;
       toolName: string;
