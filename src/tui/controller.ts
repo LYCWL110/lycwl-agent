@@ -3,6 +3,7 @@ import type {
   RuntimeCoordinator,
 } from "../application/coordinator/runtime-coordinator.ts";
 import type { TodoList } from "../domain/planning/todo.ts";
+import { emptyTodoList, replaceTodoList } from "../domain/planning/todo.ts";
 import type { InternalEvent } from "../ports/event-log.ts";
 import { deriveView, interpretComposer, type TuiViewState } from "./view-model.ts";
 
@@ -12,9 +13,6 @@ import { deriveView, interpretComposer, type TuiViewState } from "./view-model.t
  */
 export type TuiSessionDeps = Readonly<{
   coordinator: RuntimeCoordinator;
-  getEvents: () => readonly InternalEvent[];
-  getTodo: () => TodoList | null;
-  nowUtc: () => string;
 }>;
 
 export type TuiController = Readonly<{
@@ -33,65 +31,53 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   let safeCode: string | null = null;
   let lastResult: CoordinatorResult | null = null;
   let draft = "";
-  let approvalCommandCounter = 0;
+  let commandCounter = 0;
+  let events: readonly InternalEvent[] = [];
+  let todo: TodoList = emptyTodoList();
+
+  function applyResult(result: CoordinatorResult): void {
+    lastResult = result;
+    runStatus = result.status;
+    safeCode = result.safeCode;
+    events = result.events;
+    todo = deriveTodo(todo, result.events);
+  }
 
   function view(): TuiViewState {
     return deriveView({
       runStatus,
       safeCode,
-      events: deps.getEvents(),
-      todo: deps.getTodo(),
+      events,
+      todo: todo.items.length === 0 ? null : todo,
       pendingApproval: deps.coordinator.pendingApprovalView(),
       pendingQuestion: deps.coordinator.pendingQuestionView(),
       draft,
     });
   }
 
-  function applyResult(result: CoordinatorResult): void {
-    lastResult = result;
-    runStatus = result.status;
-    safeCode = result.safeCode;
-  }
-
   async function submit(text: string): Promise<void> {
     const intent = interpretComposer(view(), text);
     draft = "";
-    if (intent.kind === "reject") return;
+    if (intent.kind === "reject" || intent.kind === "withdraw") return;
     if (intent.kind === "queue_input") {
       await deps.coordinator.queueInput(intent.text);
       return;
     }
-    if (intent.kind === "withdraw") return;
     runStatus = "active";
     safeCode = null;
     applyResult(await deps.coordinator.run(intent.text));
   }
 
-  async function approve(): Promise<void> {
+  async function reply(decision: "approved" | "denied"): Promise<void> {
     const pending = deps.coordinator.pendingApprovalView();
     if (pending === null) return;
-    approvalCommandCounter += 1;
+    commandCounter += 1;
     await deps.coordinator.replyApproval({
-      commandId: `tui-approval-${approvalCommandCounter}`,
+      commandId: `tui-approval-${commandCounter}`,
       approvalId: pending.approvalId,
       toolCallId: pending.toolCallId,
       requestVersion: pending.requestVersion,
-      decision: "approved",
-    });
-    const settled = await deps.coordinator.settle();
-    if (settled !== null) applyResult(settled);
-  }
-
-  async function deny(): Promise<void> {
-    const pending = deps.coordinator.pendingApprovalView();
-    if (pending === null) return;
-    approvalCommandCounter += 1;
-    await deps.coordinator.replyApproval({
-      commandId: `tui-approval-${approvalCommandCounter}`,
-      approvalId: pending.approvalId,
-      toolCallId: pending.toolCallId,
-      requestVersion: pending.requestVersion,
-      decision: "denied",
+      decision,
     });
     const settled = await deps.coordinator.settle();
     if (settled !== null) applyResult(settled);
@@ -101,17 +87,19 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     const pending = deps.coordinator.pendingQuestionView();
     if (pending === null) return;
     draft = "";
-    approvalCommandCounter += 1;
+    commandCounter += 1;
+    const answerPayload =
+      pending.answerType === "choice"
+        ? { kind: "choice" as const, optionIds: [text] }
+        : pending.answerType === "confirmation"
+          ? { kind: "confirmation" as const, confirmed: text.toLowerCase() === "yes" }
+          : { kind: "text" as const, text };
     await deps.coordinator.submitUserInput({
-      commandId: `tui-question-${approvalCommandCounter}`,
+      commandId: `tui-question-${commandCounter}`,
       questionId: pending.questionId,
       toolCallId: pending.toolCallId,
       requestVersion: pending.requestVersion,
-      answer: {
-        kind: pending.answerType === "choice" ? "choice" : "text",
-        optionIds: [text],
-        text,
-      },
+      answer: answerPayload,
     });
     const settled = await deps.coordinator.settle();
     if (settled !== null) applyResult(settled);
@@ -120,9 +108,9 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   async function declineQuestion(): Promise<void> {
     const pending = deps.coordinator.pendingQuestionView();
     if (pending === null) return;
-    approvalCommandCounter += 1;
+    commandCounter += 1;
     await deps.coordinator.declineQuestion({
-      commandId: `tui-decline-${approvalCommandCounter}`,
+      commandId: `tui-decline-${commandCounter}`,
       questionId: pending.questionId,
       toolCallId: pending.toolCallId,
       requestVersion: pending.requestVersion,
@@ -133,8 +121,8 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
 
   async function cancelRun(): Promise<void> {
     if (runStatus !== "active" && runStatus !== "waiting") return;
-    approvalCommandCounter += 1;
-    await deps.coordinator.cancelRun(`tui-cancel-${approvalCommandCounter}`);
+    commandCounter += 1;
+    await deps.coordinator.cancelRun(`tui-cancel-${commandCounter}`);
     const settled = await deps.coordinator.settle();
     if (settled !== null) applyResult(settled);
   }
@@ -142,11 +130,25 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   return {
     view,
     submit,
-    approve,
-    deny,
+    approve: () => reply("approved"),
+    deny: () => reply("denied"),
     answer,
     declineQuestion,
     cancelRun,
     lastResult: () => lastResult,
   };
+}
+
+/**
+ * Todo state is restored from the authoritative todo_replaced events rather than
+ * trusting the model's message history.
+ */
+function deriveTodo(previous: TodoList, events: readonly InternalEvent[]): TodoList {
+  let current = previous;
+  for (const event of events) {
+    if (event.payload.kind !== "todo_replaced") continue;
+    const replaced = replaceTodoList(current, event.payload.items);
+    if (replaced.ok) current = replaced.value;
+  }
+  return current;
 }
