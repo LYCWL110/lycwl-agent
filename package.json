@@ -11,6 +11,7 @@
     "test": "node --test tests/**/*.test.ts",
     "test:unit": "node --test tests/unit/**/*.test.ts",
     "test:contract": "node --test tests/contract/**/*.test.ts",
+    "test:tui": "vitest run tests/unit/tui-render.test.tsx",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome format --write ."
@@ -18,7 +19,13 @@
   "devDependencies": {
     "@biomejs/biome": "2.3.4",
     "@types/node": "24.10.1",
+    "@types/react": "19.3.0",
+    "ink-testing-library": "4.0.0",
     "typescript": "5.9.3",
     "vitest": "4.0.8"
+  },
+  "dependencies": {
+    "ink": "8.0.0",
+    "react": "19.3.1"
   }
 }
