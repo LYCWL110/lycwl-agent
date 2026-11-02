@@ -9,7 +9,7 @@ export type FileSnapshotFacts = Readonly<{
 export type FileSnapshotSource = Readonly<{
   before: FileSnapshotFacts;
   read: () => Promise<Uint8Array>;
-  after: FileSnapshotFacts;
+  after: FileSnapshotFacts | (() => Promise<FileSnapshotFacts>);
 }>;
 
 export type ConsistentSnapshotFailure =
@@ -48,9 +48,15 @@ export async function captureConsistentSnapshot(
     return { ok: false, code: "read_failed" };
   }
 
-  const afterFailure = validateFacts(source.after);
+  let after: FileSnapshotFacts;
+  try {
+    after = typeof source.after === "function" ? await source.after() : source.after;
+  } catch {
+    return { ok: false, code: "read_failed" };
+  }
+  const afterFailure = validateFacts(after);
   if (afterFailure !== null) return { ok: false, code: afterFailure };
-  if (!sameFacts(source.before, source.after)) {
+  if (!sameFacts(source.before, after)) {
     return { ok: false, code: "file_changed" };
   }
   if (bytes.byteLength !== source.before.size) {

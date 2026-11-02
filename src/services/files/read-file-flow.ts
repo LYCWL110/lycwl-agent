@@ -1,0 +1,141 @@
+import type { ApprovalGate } from "../../ports/approval-gate.ts";
+import { captureConsistentSnapshot, type FileSnapshotFacts } from "./consistent-snapshot.ts";
+import { createReadFileFact, type ReadFileFact } from "./read-file-fact.ts";
+import { boundTextSnapshotForModel } from "./text-delivery.ts";
+import { readTextSnapshot, type TextFileEncoding } from "./text-snapshot.ts";
+import {
+  decideResolvedReadPermission,
+  type ResolvedReadTarget,
+} from "../permission/resolved-read-policy.ts";
+
+export type ReadFileFlowRequest = Readonly<{
+  workspaceRoot: string;
+  target: ResolvedReadTarget;
+  snapshotId: string;
+  approvalId: string;
+  toolCallId: string;
+  startLine?: number;
+  lineCount?: number;
+  encoding?: TextFileEncoding;
+}>;
+
+export type ReadFileFlowDependencies = Readonly<{
+  approvals: ApprovalGate;
+  inspectTarget: () => Promise<ReadFileFlowTargetFacts>;
+  readBytes: () => Promise<Uint8Array>;
+}>;
+
+export type ReadFileFlowTargetFacts = Readonly<{
+  snapshot: FileSnapshotFacts;
+  target: ResolvedReadTarget;
+}>;
+
+export type ReadFileFlowResult =
+  | Readonly<{ ok: true; value: ReadFileFact }>
+  | Readonly<{
+      ok: false;
+      code:
+        | "invalid_path"
+        | "directory_target"
+        | "symbolic_link"
+        | "approval_denied"
+        | "precondition_changed"
+        | "file_too_large"
+        | "file_changed"
+        | "read_failed"
+        | "decoding_failed"
+        | "encoding_mismatch"
+        | "binary_content"
+        | "invalid_line_range";
+    }>;
+
+export async function runReadFileFlow(
+  request: ReadFileFlowRequest,
+  dependencies: ReadFileFlowDependencies,
+): Promise<ReadFileFlowResult> {
+  const decision = decideResolvedReadPermission(request.workspaceRoot, request.target);
+  if (decision.outcome === "invalid") {
+    return { ok: false, code: "invalid_path" };
+  }
+  if (decision.outcome === "denied") return { ok: false, code: decision.code };
+
+  if (decision.outcome === "approval_required") {
+    const approval = await dependencies.approvals.decide({
+      approvalId: request.approvalId,
+      toolCallId: request.toolCallId,
+      toolName: "read_file",
+      safePreview: createPreview(decision.requestedPath, decision.resolvedPath, decision.disclosureWarning),
+    });
+    if (approval !== "approved") return { ok: false, code: "approval_denied" };
+  }
+
+  let before: ReadFileFlowTargetFacts;
+  try {
+    before = await dependencies.inspectTarget();
+  } catch {
+    return { ok: false, code: "read_failed" };
+  }
+  const precondition = decideResolvedReadPermission(request.workspaceRoot, before.target);
+  if (
+    !sameDecision(decision, precondition) ||
+    !sameResolvedTarget(before.target, request.target)
+  ) {
+    return { ok: false, code: "precondition_changed" };
+  }
+
+  const snapshot = await captureConsistentSnapshot({
+    before: before.snapshot,
+    read: dependencies.readBytes,
+    after: async () => (await dependencies.inspectTarget()).snapshot,
+  });
+  if (!snapshot.ok) return { ok: false, code: snapshot.code };
+
+  const text = readTextSnapshot(snapshot.value.bytes, {
+    ...(request.startLine === undefined ? {} : { startLine: request.startLine }),
+    ...(request.lineCount === undefined ? {} : { lineCount: request.lineCount }),
+    ...(request.encoding === undefined ? {} : { encoding: request.encoding }),
+  });
+  if (!text.ok) return { ok: false, code: text.code };
+
+  return {
+    ok: true,
+    value: createReadFileFact(request.snapshotId, boundTextSnapshotForModel(text.value)),
+  };
+}
+
+function sameDecision(
+  left: ReturnType<typeof decideResolvedReadPermission>,
+  right: ReturnType<typeof decideResolvedReadPermission>,
+): boolean {
+  if (left.outcome !== right.outcome) return false;
+  if (left.outcome === "approval_required" && right.outcome === "approval_required") {
+    return left.reason === right.reason;
+  }
+  if (left.outcome === "invalid" && right.outcome === "invalid") {
+    return left.code === right.code;
+  }
+  if (left.outcome === "denied" && right.outcome === "denied") {
+    return left.code === right.code;
+  }
+  return left.outcome === "allowed" && right.outcome === "allowed";
+}
+
+function sameResolvedTarget(left: ResolvedReadTarget, right: ResolvedReadTarget): boolean {
+  return (
+    left.requestedPath.toLowerCase() === right.requestedPath.toLowerCase() &&
+    left.resolvedPath.toLowerCase() === right.resolvedPath.toLowerCase() &&
+    left.isDirectory === right.isDirectory &&
+    left.isSymbolicLink === right.isSymbolicLink
+  );
+}
+
+function createPreview(requestedPath: string, resolvedPath: string, warning: string): string {
+  return [
+    "read_file",
+    `requested=${requestedPath}`,
+    `resolved=${resolvedPath}`,
+    "capture=complete file snapshot up to 5 MiB",
+    "delivery=selected lines, at most 20000 UTF-16 units",
+    warning,
+  ].join("\n");
+}
