@@ -81,13 +81,10 @@ export function createReadFileEvidence(
   fact: ReadFileFact,
   attachment: ReadFileAttachment | null,
 ): ReadFileEvidenceSummary {
-  const attachmentMatches =
-    attachment !== null &&
-    attachment.sha256 === fact.snapshot.fileSha256 &&
-    attachment.byteLength === fact.snapshot.totalBytes;
+  const attachmentMatches = attachmentMatchesSnapshot(fact, attachment);
 
   return {
-    attachmentRefs: attachmentMatches && attachment !== null ? [attachment] : [],
+    attachmentRefs: attachmentMatches ? [attachment] : [],
     capturedBytes: fact.snapshot.totalBytes,
     rawComplete: attachmentMatches,
     rawTruncationReason: attachmentMatches ? null : "capture_interrupted",
