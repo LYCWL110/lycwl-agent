@@ -1,31 +1,47 @@
+import { createApplyPatchTool } from "../adapters/tools/patch-tool.ts";
 import { createReadFileTool } from "../adapters/tools/read-file-tool.ts";
-import type { SearchEntry } from "../adapters/tools/search-tools.ts";
-import { createSearchTools } from "../adapters/tools/search-tools.ts";
+import { createSearchTools, type SearchEntry } from "../adapters/tools/search-tools.ts";
+import { createWriteTools } from "../adapters/tools/write-tools.ts";
 import { createWindowsFileReader } from "../adapters/windows/windows-directory-reader.ts";
 import { createWindowsFsAdapter } from "../adapters/windows/windows-fs-adapter.ts";
+import { createWindowsWriteAdapter } from "../adapters/windows/windows-write-adapter.ts";
 import type { ApprovalGate } from "../ports/approval-gate.ts";
 import type { IdentifierFactory } from "../ports/identity.ts";
-import type { ToolDefinition, ToolExecutionResult, ToolExecutor } from "../ports/tool-executor.ts";
+import type {
+  ToolDefinition,
+  ToolExecutionRequest,
+  ToolExecutionResult,
+  ToolExecutor,
+} from "../ports/tool-executor.ts";
 
 /**
- * Composition root for the Stage 2A read-only filesystem slice.
+ * Composition root for the delivered filesystem slices.
  *
- * Only read_file, list_dir, glob and grep are wired to real disk. Every other
- * tool name fails closed with `tool_unavailable_in_build`, so a model can never
- * reach a write, process, network, credential or LSP path in this build.
+ * Read-only tools (Stage 2A) and write tools (Stage 2B) are wired to real disk.
+ * Every other tool name fails closed with `tool_unavailable_in_build`, so a model
+ * can never reach a process, network, credential, LSP, delete or rename path.
  */
 export const UNAVAILABLE_CODE = "tool_unavailable_in_build";
 
-export type ReadOnlyToolsOptions = Readonly<{
+export type WorkspaceToolsOptions = Readonly<{
   workspaceRoot: string;
   approvals: ApprovalGate;
   ids: IdentifierFactory;
+  /** Set false to keep the build read-only even where writes are implemented. */
+  enableWrites?: boolean;
 }>;
 
-export function createReadOnlyWorkspaceTools(options: ReadOnlyToolsOptions): ToolExecutor {
+export function createReadOnlyWorkspaceTools(options: WorkspaceToolsOptions): ToolExecutor {
+  return createWorkspaceTools({ ...options, enableWrites: false });
+}
+
+export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecutor {
   const { workspaceRoot, approvals, ids } = options;
+  const enableWrites = options.enableWrites !== false;
+
   const fsAdapter = createWindowsFsAdapter({ workspaceRoot });
   const reader = createWindowsFileReader({ workspaceRoot });
+  const writer = createWindowsWriteAdapter({ workspaceRoot });
 
   const readFile = createReadFileTool({
     workspaceRoot,
@@ -34,13 +50,7 @@ export function createReadOnlyWorkspaceTools(options: ReadOnlyToolsOptions): Too
     inspectTarget: async (requestedPath) => {
       const inspected = await fsAdapter.inspect(requestedPath);
       if (!inspected.ok) throw new Error(inspected.code);
-      // Keep the caller's requested path: the flow compares it against the
-      // invocation it was given, while the resolved target identity stays from
-      // the adapter.
-      return {
-        snapshot: inspected.snapshot,
-        target: { ...inspected.target, requestedPath },
-      };
+      return { snapshot: inspected.snapshot, target: { ...inspected.target, requestedPath } };
     },
     readBytes: async (requestedPath) => {
       const read = await reader.readFile(requestedPath);
@@ -55,37 +65,80 @@ export function createReadOnlyWorkspaceTools(options: ReadOnlyToolsOptions): Too
       if (!listed.ok) throw new Error(listed.code);
       return listed.entries;
     },
-    readText: async (path) => {
-      const text = await reader.readText(path);
+    readText: async (filePath) => {
+      const text = await reader.readText(filePath);
       if (text === null) throw new Error("read_failed");
       return text;
     },
   });
 
+  const writes = enableWrites
+    ? createWriteTools({
+        approvals,
+        inspectTarget: async (requestedPath) => {
+          try {
+            return await writer.inspectTarget(requestedPath);
+          } catch (error) {
+            throw new Error(error instanceof Error ? error.message : "invalid_path");
+          }
+        },
+        readBytes: async (requestedPath) => writer.readBytes(requestedPath),
+        writeBytes: async (requestedPath, bytes) => {
+          const result = await writer.writeBytes(requestedPath, bytes);
+          if (!result.ok) throw new Error(result.code);
+        },
+      })
+    : null;
+
+  const patch = enableWrites
+    ? createApplyPatchTool({
+        inspectTargets: async (paths) => {
+          const snapshots = [];
+          for (const candidate of paths) {
+            snapshots.push(await writer.inspectPatchTarget(candidate));
+          }
+          return snapshots;
+        },
+        writeBytes: async (requestedPath, bytes) => {
+          const result = await writer.writeBytes(requestedPath, bytes);
+          if (!result.ok) throw new Error(result.code);
+        },
+      })
+    : null;
+
+  const delegates: ToolExecutor[] = [readFile, search];
+  if (writes !== null) delegates.push(writes);
+  if (patch !== null) delegates.push(patch);
+
+  function resolveDelegate(toolName: string): ToolExecutor | null {
+    for (const delegate of delegates) {
+      if (delegate.getDefinition(toolName) !== null) return delegate;
+    }
+    return null;
+  }
+
   return {
     getDefinition(toolName: string): ToolDefinition | null {
-      return readFile.getDefinition(toolName) ?? search.getDefinition(toolName);
+      for (const delegate of delegates) {
+        const definition = delegate.getDefinition(toolName);
+        if (definition !== null) return definition;
+      }
+      return null;
     },
 
-    async preview(request) {
-      const delegate = readFile.getDefinition(request.toolName) !== null ? readFile : search;
-      return delegate.preview === undefined ? null : delegate.preview(request);
+    async preview(request: ToolExecutionRequest) {
+      const delegate = resolveDelegate(request.toolName);
+      return delegate?.preview === undefined ? null : delegate.preview(request);
     },
 
-    async execute(request): Promise<ToolExecutionResult> {
-      const delegate =
-        readFile.getDefinition(request.toolName) !== null
-          ? readFile
-          : search.getDefinition(request.toolName) !== null
-            ? search
-            : null;
+    async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
+      const delegate = resolveDelegate(request.toolName);
       if (delegate === null) {
         return { status: "failed", safeCode: UNAVAILABLE_CODE, text: null };
       }
       try {
         return await delegate.execute(request);
       } catch (error) {
-        // Adapter failures surface as safe codes, never raw OS messages.
         const safeCode = error instanceof Error ? error.message : "read_failed";
         return { status: "failed", safeCode, text: null };
       }

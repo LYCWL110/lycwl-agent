@@ -52,6 +52,14 @@ export const EDIT_FILE_DEFINITION: ToolDefinition = {
 };
 
 const DEFINITIONS: readonly ToolDefinition[] = [CREATE_FILE_DEFINITION, EDIT_FILE_DEFINITION];
+/** Codes that prove the sink refused before any byte was written. */
+const KNOWN_PRE_WRITE_CODES: ReadonlySet<string> = new Set([
+  "invalid_path",
+  "file_conflict",
+  "access_denied",
+  "not_found",
+  "locked",
+]);
 
 export function createWriteTools(dependencies: WriteToolDependencies): ToolExecutor {
   return {
@@ -80,8 +88,14 @@ export function createWriteTools(dependencies: WriteToolDependencies): ToolExecu
 
       try {
         await dependencies.writeBytes(plan.path, plan.bytes);
-      } catch {
-        // The write may have partially happened; never claim it did not.
+      } catch (error) {
+        // Distinguish a known pre-write refusal from an uncertain outcome: a
+        // rejected path or denied access means nothing was written, while any
+        // other failure may have left a partial effect.
+        const code = error instanceof Error ? error.message : "";
+        if (KNOWN_PRE_WRITE_CODES.has(code)) {
+          return { status: "failed", safeCode: code, text: null };
+        }
         return { status: "outcome_unknown", safeCode: "write_outcome_unknown" };
       }
 
