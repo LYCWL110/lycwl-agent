@@ -42,6 +42,12 @@ export type CoordinatorResult =
       safeCode: string;
     }>;
 
+export type CheckpointWriter = Readonly<{
+  /** Report an appended event; true means a checkpoint is now due. */
+  noteEvent: (sessionId: string, event: InternalEvent) => boolean;
+  write: (sessionId: string, events: readonly InternalEvent[]) => Promise<unknown>;
+}>;
+
 export type CoordinatorDependencies = Readonly<{
   provider: ModelProvider;
   tools: ToolExecutor;
@@ -57,6 +63,11 @@ export type CoordinatorDependencies = Readonly<{
    * adapters that already hold the reply.
    */
   suspendOnApproval?: boolean;
+  /**
+   * Optional checkpoint store. Checkpoints accelerate replay and never replace
+   * the event log; a checkpoint failure must not fail the Run.
+   */
+  checkpoints?: CheckpointWriter;
 }>;
 
 export type QueueInputOutcome =
@@ -172,6 +183,7 @@ type MutableRunContext = {
   pendingQuestion: PendingQuestion | null;
   resumeCommandIds: Set<string>;
   pendingResume: Promise<CoordinatorResult> | null;
+  checkpointFailure: string | null;
 };
 
 export class RuntimeCoordinator {
@@ -437,6 +449,7 @@ export class RuntimeCoordinator {
       pendingQuestion: null,
       resumeCommandIds: new Set<string>(),
       pendingResume: null,
+      checkpointFailure: null,
     };
     await this.#record(context, "run_started", { kind: "run_started", input });
     this.#activeContext = context;
@@ -934,6 +947,30 @@ export class RuntimeCoordinator {
     const event = await this.#deps.eventLog.append(input);
     context.events.push(event);
     context.lastEventId = event.eventId;
+    await this.#maybeCheckpoint(context, event);
+  }
+
+  /**
+   * Checkpoint after the authoritative event write. A checkpoint failure is
+   * recorded as a diagnostic fact only: it must never fail the Run or pretend
+   * the event was not written.
+   */
+  async #maybeCheckpoint(context: MutableRunContext, event: InternalEvent): Promise<void> {
+    const store = this.#deps.checkpoints;
+    if (store === undefined) return;
+    let due: boolean;
+    try {
+      due = store.noteEvent(context.sessionId, event);
+    } catch {
+      context.checkpointFailure = "checkpoint_counter_failed";
+      return;
+    }
+    if (!due) return;
+    try {
+      await store.write(context.sessionId, context.events);
+    } catch {
+      context.checkpointFailure = "checkpoint_write_failed";
+    }
   }
 
   async #cancel(context: MutableRunContext): Promise<CoordinatorResult> {
