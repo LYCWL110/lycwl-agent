@@ -6,6 +6,7 @@ export type TextDeliveryEvidence = Readonly<{
   bom: TextSnapshot["bom"];
   totalBytes: number;
   totalLines: number;
+  lineEndings: TextSnapshot["lineEndings"];
   startLine: number;
   endLineExclusive: number;
   byteStart: number;
@@ -29,6 +30,7 @@ export function boundTextSnapshotForModel(snapshot: TextSnapshot): TextDelivery 
     bom: snapshot.bom,
     totalBytes: snapshot.totalBytes,
     totalLines: snapshot.totalLines,
+    lineEndings: snapshot.lineEndings,
     startLine: snapshot.startLine,
     endLineExclusive: snapshot.endLineExclusive,
     byteStart: snapshot.byteStart,

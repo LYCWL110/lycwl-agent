@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 export type TextFileEncoding = "utf-8" | "utf-16le" | "utf-16be" | "latin-1";
+export type TextLineEndings = "none" | "lf" | "crlf" | "cr" | "mixed";
 
 export type TextSnapshotRequest = Readonly<{
   startLine?: number;
@@ -21,6 +22,7 @@ export type TextSnapshot = Readonly<{
   fileSha256: string;
   totalBytes: number;
   totalLines: number;
+  lineEndings: TextLineEndings;
   startLine: number;
   endLineExclusive: number;
   byteStart: number;
@@ -40,6 +42,7 @@ type LinePosition = Readonly<{
   start: number;
   end: number;
   terminatorEnd: number;
+  terminator: "lf" | "crlf" | "cr" | null;
 }>;
 
 export function readTextSnapshot(
@@ -102,6 +105,7 @@ export function readTextSnapshot(
       fileSha256: createHash("sha256").update(bytes).digest("hex"),
       totalBytes: bytes.byteLength,
       totalLines: lines.length,
+      lineEndings: classifyLineEndings(lines),
       startLine,
       endLineExclusive: fromIndex < lines.length ? toIndex + 1 : startLine,
       byteStart,
@@ -139,13 +143,28 @@ function findLines(value: string): LinePosition[] {
         start,
         end: index,
         terminatorEnd: index + terminatorLength,
+        terminator: terminatorLength === 2 ? "crlf" : character === "\r" ? "cr" : "lf",
       });
       index += terminatorLength - 1;
       start = index + 1;
     }
   }
-  if (start < value.length) lines.push({ start, end: value.length, terminatorEnd: value.length });
+  if (start < value.length) {
+    lines.push({ start, end: value.length, terminatorEnd: value.length, terminator: null });
+  }
   return lines;
+}
+
+function classifyLineEndings(lines: readonly LinePosition[]): TextLineEndings {
+  let observed: Exclude<TextLineEndings, "none" | "mixed"> | null = null;
+
+  for (const line of lines) {
+    if (line.terminator === null) continue;
+    if (observed === null) observed = line.terminator;
+    else if (observed !== line.terminator) return "mixed";
+  }
+
+  return observed ?? "none";
 }
 
 function encodedLength(value: string, encoding: TextFileEncoding): number {
