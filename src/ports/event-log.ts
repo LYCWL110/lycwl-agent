@@ -48,6 +48,12 @@ export type InternalEventPayload =
       decision: "approved" | "denied";
     }>
   | Readonly<{
+      kind: "approval_grant_revoked";
+      approvalId: string;
+      toolCallId: string;
+      reason: "restart" | "superseded_input" | "precondition_changed";
+    }>
+  | Readonly<{
       kind: "tool_dispatch_committed";
       dispatchId: string;
       toolCallId: string;

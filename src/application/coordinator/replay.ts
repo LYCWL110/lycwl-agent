@@ -73,6 +73,7 @@ export async function replayRun(
       case "tool_call_received":
       case "approval_requested":
       case "approval_decided":
+      case "approval_grant_revoked":
       case "tool_execution_started":
         break;
       case "tool_dispatch_committed":
