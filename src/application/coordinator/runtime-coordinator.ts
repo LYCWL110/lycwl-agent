@@ -63,6 +63,10 @@ export type QueueInputOutcome =
         | "sequence_not_increasing";
     }>;
 
+export type CancelRunOutcome =
+  | Readonly<{ ok: true; duplicate: boolean }>
+  | Readonly<{ ok: false; code: "invalid_identity" | "run_terminal" }>;
+
 type MutableRunContext = {
   run: Run;
   readonly sessionId: string;
@@ -75,6 +79,9 @@ type MutableRunContext = {
   inputQueue: RunInputQueue;
   nextAcceptedSeq: number;
   taskRevision: number;
+  cancelRequested: boolean;
+  cancelCommandIds: Set<string>;
+  cancelledDuring: "model_request" | "tool_execution" | null;
 };
 
 export class RuntimeCoordinator {
@@ -115,6 +122,30 @@ export class RuntimeCoordinator {
     return { ok: true, inputId: item.inputId };
   }
 
+  /**
+   * Durably record a CancelRun command for the current Run. Cancellation never
+   * undoes a side effect that already started; the loop stops before any further
+   * dispatch and reports what was actually executing.
+   */
+  async cancelRun(commandId: string): Promise<CancelRunOutcome> {
+    const context = this.#activeContext;
+    if (commandId.length === 0) return { ok: false, code: "invalid_identity" };
+    if (context === null) return { ok: false, code: "run_terminal" };
+    if (context.cancelCommandIds.has(commandId)) {
+      return { ok: true, duplicate: true };
+    }
+    if (context.run.state === "completed" || context.run.state === "failed" || context.run.state === "cancelled") {
+      return { ok: false, code: "run_terminal" };
+    }
+    context.cancelCommandIds.add(commandId);
+    await this.#record(context, "run_cancel_requested", {
+      kind: "run_cancel_requested",
+      commandId,
+    });
+    context.cancelRequested = true;
+    return { ok: true, duplicate: false };
+  }
+
   async run(input: string): Promise<CoordinatorResult> {
     const context: MutableRunContext = {
       run: startRun(),
@@ -128,18 +159,26 @@ export class RuntimeCoordinator {
       inputQueue: emptyRunInputQueue(),
       nextAcceptedSeq: 1,
       taskRevision: 1,
+      cancelRequested: false,
+      cancelCommandIds: new Set<string>(),
+      cancelledDuring: null,
     };
     await this.#record(context, "run_started", { kind: "run_started", input });
     this.#activeContext = context;
 
     try {
       while (context.run.state === "active") {
+        if (context.cancelRequested) return this.#cancel(context);
+
         const round = addModelRound(context.budget);
         if (!round.ok) return this.#fail(context, round.code);
         context.budget = round.value;
 
         const modelRequestId = this.#deps.ids.create();
+        context.cancelledDuring = "model_request";
         const completion = await this.#completeWithRetries(context, modelRequestId);
+        context.cancelledDuring = null;
+        if (context.cancelRequested) return this.#cancel(context);
         if (completion.kind === "terminal") return completion.result;
         if (completion.kind === "waiting") return completion.result;
         if (completion.kind === "failed") return completion.result;
@@ -158,6 +197,7 @@ export class RuntimeCoordinator {
         });
 
         const superseded = await this.#consumeQueuedInput(context);
+        if (context.cancelRequested) return this.#cancel(context);
         if (superseded) {
           for (const call of completion.toolCalls) {
             await this.#record(context, "tool_call_cancelled", {
@@ -308,6 +348,10 @@ export class RuntimeCoordinator {
     if (context.run.state !== "active") {
       return { kind: "stop", result: await this.#fail(context, "run_not_active") };
     }
+    if (context.cancelRequested) {
+      return { kind: "stop", result: await this.#cancel(context) };
+    }
+    context.cancelledDuring = "tool_execution";
     const outcome = await executeToolCall(
       {
         tools: this.#deps.tools,
@@ -319,6 +363,7 @@ export class RuntimeCoordinator {
       },
       call,
     );
+    context.cancelledDuring = null;
     if (outcome.kind === "invalid") {
       return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
     }
@@ -326,6 +371,9 @@ export class RuntimeCoordinator {
       return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
     }
     this.#appendToolResult(context, call, outcome.status, outcome.text);
+    if (context.cancelRequested) {
+      return { kind: "stop", result: await this.#cancel(context) };
+    }
     return { kind: "continue" };
   }
 
@@ -361,6 +409,17 @@ export class RuntimeCoordinator {
     const event = await this.#deps.eventLog.append(input);
     context.events.push(event);
     context.lastEventId = event.eventId;
+  }
+
+  async #cancel(context: MutableRunContext): Promise<CoordinatorResult> {
+    const finished = finishRun(context.run, "cancelled");
+    if (!finished.ok) return this.#fail(context, finished.code);
+    context.run = finished.value;
+    await this.#record(context, "run_cancelled", {
+      kind: "run_cancelled",
+      safeCode: "run_cancelled",
+    });
+    return this.#result(context, "cancelled", null, "run_cancelled");
   }
 
   async #fail(context: MutableRunContext, safeCode: string): Promise<CoordinatorResult> {

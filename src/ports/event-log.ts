@@ -14,6 +14,7 @@ export type InternalEventPayload =
   | Readonly<{ kind: "run_completed"; text: string | null }>
   | Readonly<{ kind: "run_failed"; safeCode: string }>
   | Readonly<{ kind: "run_cancelled"; safeCode: string }>
+  | Readonly<{ kind: "run_cancel_requested"; commandId: string }>
   | Readonly<{ kind: "model_request_started"; modelRequestId: string; attemptNo: number }>
   | Readonly<{
       kind: "model_retry_scheduled";
