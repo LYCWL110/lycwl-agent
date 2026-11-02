@@ -1,4 +1,11 @@
 import {
+  type AnswerFailure,
+  type AskUserQuestion,
+  type QuestionOutcome,
+  questionOutcome,
+  validateUserAnswer,
+} from "../../domain/question/ask-user.ts";
+import {
   consumeRunInput,
   emptyRunInputQueue,
   queueRunInput,
@@ -91,6 +98,31 @@ export type ResumeRunOutcome =
       code: "invalid_identity" | "run_terminal" | "not_waiting_for_configuration";
     }>;
 
+export type PendingQuestionView = Readonly<{
+  questionId: string;
+  toolCallId: string;
+  question: string;
+  answerType: "choice" | "text" | "confirmation";
+  options: readonly Readonly<{ id: string; label: string }>[];
+  multiple: boolean;
+  allowFreeText: boolean;
+  requestVersion: number;
+}>;
+
+export type QuestionReplyOutcome =
+  | Readonly<{ ok: true; duplicate: boolean }>
+  | Readonly<{
+      ok: false;
+      code:
+        | "invalid_identity"
+        | "run_terminal"
+        | "not_waiting_for_question"
+        | "unknown_question"
+        | "tool_call_mismatch"
+        | "stale_version"
+        | AnswerFailure;
+    }>;
+
 export type PendingApprovalView = Readonly<{
   approvalId: string;
   toolCallId: string;
@@ -105,6 +137,18 @@ type PendingApproval = {
   requestVersion: number;
   call: ProviderToolCall;
   decision: "approved" | "denied" | null;
+  commandIds: Set<string>;
+  resolve: () => void;
+};
+
+type PendingQuestion = {
+  toolCallId: string;
+  questionId: string;
+  waitToken: string;
+  requestVersion: number;
+  question: AskUserQuestion;
+  call: ProviderToolCall;
+  outcome: QuestionOutcome | null;
   commandIds: Set<string>;
   resolve: () => void;
 };
@@ -125,6 +169,7 @@ type MutableRunContext = {
   cancelCommandIds: Set<string>;
   cancelledDuring: "model_request" | "tool_execution" | null;
   pendingApproval: PendingApproval | null;
+  pendingQuestion: PendingQuestion | null;
   resumeCommandIds: Set<string>;
   pendingResume: Promise<CoordinatorResult> | null;
 };
@@ -246,6 +291,132 @@ export class RuntimeCoordinator {
     return { ok: true, duplicate: false };
   }
 
+  /**
+   * Read-only projection of the question the Run is currently waiting on.
+   * Rendering or closing the panel changes nothing; only a reply does.
+   */
+  pendingQuestionView(): PendingQuestionView | null {
+    const pending = this.#activeContext?.pendingQuestion;
+    if (pending === null || pending === undefined) return null;
+    const question = pending.question;
+    const options = question.answerType === "choice" ? question.options : [];
+    return {
+      questionId: pending.questionId,
+      toolCallId: pending.toolCallId,
+      question: question.question,
+      answerType: question.answerType,
+      options,
+      multiple: question.answerType === "choice" ? question.multiple : false,
+      allowFreeText: question.answerType === "choice" ? question.allowFreeText : false,
+      requestVersion: pending.requestVersion,
+    };
+  }
+
+  /** Submit a typed answer to the pending question. */
+  async submitUserInput(input: {
+    commandId: string;
+    questionId: string;
+    toolCallId: string;
+    requestVersion: number;
+    answer: unknown;
+  }): Promise<QuestionReplyOutcome> {
+    return this.#resolveQuestion(input, (question) => {
+      const validated = validateUserAnswer(question, input.answer);
+      if (!validated.ok) return { ok: false, code: validated.code };
+      return { ok: true, outcome: questionOutcome("answered", validated.text) };
+    });
+  }
+
+  /** Explicitly decline the pending question: a failed tool result, not approval. */
+  async declineQuestion(input: {
+    commandId: string;
+    questionId: string;
+    toolCallId: string;
+    requestVersion: number;
+  }): Promise<QuestionReplyOutcome> {
+    return this.#resolveQuestion(input, () => ({
+      ok: true,
+      outcome: questionOutcome("declined", null),
+    }));
+  }
+
+  /** Cancel only this question; this is not CancelRun. */
+  async cancelQuestion(input: {
+    commandId: string;
+    questionId: string;
+    toolCallId: string;
+    requestVersion: number;
+  }): Promise<QuestionReplyOutcome> {
+    return this.#resolveQuestion(input, () => ({
+      ok: true,
+      outcome: questionOutcome("cancelled", null),
+    }));
+  }
+
+  /** Report that no usable interaction channel exists for the question. */
+  async markQuestionUnavailable(input: {
+    commandId: string;
+    questionId: string;
+    toolCallId: string;
+    requestVersion: number;
+  }): Promise<QuestionReplyOutcome> {
+    return this.#resolveQuestion(input, () => ({
+      ok: true,
+      outcome: questionOutcome("unavailable", null),
+    }));
+  }
+
+  /** Closing the panel retains the wait; it is a view event only. */
+  async closeQuestionView(questionId: string): Promise<{ ok: boolean }> {
+    const context = this.#activeContext;
+    if (context === null || context.pendingQuestion?.questionId !== questionId) {
+      return { ok: false };
+    }
+    await this.#record(context, "question_view_closed", {
+      kind: "question_view_closed",
+      questionId,
+    });
+    return { ok: true };
+  }
+
+  async #resolveQuestion(
+    input: {
+      commandId: string;
+      questionId: string;
+      toolCallId: string;
+      requestVersion: number;
+    },
+    decide: (
+      question: AskUserQuestion,
+    ) =>
+      | Readonly<{ ok: true; outcome: QuestionOutcome }>
+      | Readonly<{ ok: false; code: AnswerFailure }>,
+  ): Promise<QuestionReplyOutcome> {
+    const context = this.#activeContext;
+    if (input.commandId.length === 0 || input.questionId.length === 0) {
+      return { ok: false, code: "invalid_identity" };
+    }
+    if (context === null) return { ok: false, code: "run_terminal" };
+    const pending = context.pendingQuestion;
+    if (pending === null) return { ok: false, code: "not_waiting_for_question" };
+    if (pending.commandIds.has(input.commandId)) return { ok: true, duplicate: true };
+    if (pending.questionId !== input.questionId) {
+      return { ok: false, code: "unknown_question" };
+    }
+    if (pending.toolCallId !== input.toolCallId) {
+      return { ok: false, code: "tool_call_mismatch" };
+    }
+    if (pending.requestVersion !== input.requestVersion) {
+      return { ok: false, code: "stale_version" };
+    }
+    const decided = decide(pending.question);
+    if (!decided.ok) return { ok: false, code: decided.code };
+    pending.commandIds.add(input.commandId);
+    pending.outcome = decided.outcome;
+    pending.resolve();
+    return { ok: true, duplicate: false };
+  }
+
   async run(input: string): Promise<CoordinatorResult> {
     const context: MutableRunContext = {
       run: startRun(),
@@ -263,6 +434,7 @@ export class RuntimeCoordinator {
       cancelCommandIds: new Set<string>(),
       cancelledDuring: null,
       pendingApproval: null,
+      pendingQuestion: null,
       resumeCommandIds: new Set<string>(),
       pendingResume: null,
     };
@@ -515,6 +687,7 @@ export class RuntimeCoordinator {
         approvals: this.#deps.approvals,
         ids: this.#deps.ids,
         deferApprovals: this.#deps.suspendOnApproval ?? false,
+        deferQuestions: this.#deps.suspendOnApproval ?? false,
         onEvent: async (type, payload) => {
           await this.#record(context, type, payload as InternalEvent["payload"]);
         },
@@ -525,6 +698,9 @@ export class RuntimeCoordinator {
 
     if (outcome.kind === "waiting") {
       return this.#awaitApproval(context, outcome);
+    }
+    if (outcome.kind === "question_waiting") {
+      return this.#awaitQuestion(context, outcome);
     }
     if (outcome.kind === "invalid") {
       return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
@@ -626,8 +802,98 @@ export class RuntimeCoordinator {
     if (outcome.kind === "unknown") {
       return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
     }
-    if (outcome.kind === "waiting") {
+    if (outcome.kind === "waiting" || outcome.kind === "question_waiting") {
       return { kind: "stop", result: await this.#fail(context, "approval_wait_repeated") };
+    }
+    this.#appendToolResult(context, pending.call, outcome.status, outcome.text);
+    if (context.cancelRequested) {
+      return { kind: "stop", result: await this.#cancel(context) };
+    }
+    return { kind: "continue" };
+  }
+
+  /**
+   * Suspend the Run on a pending ask_user question. Only a matching
+   * SubmitUserInput answers it; decline/cancel/unavailable are separate.
+   */
+  async #awaitQuestion(
+    context: MutableRunContext,
+    waiting: Extract<ToolCallOutcome, { kind: "question_waiting" }>,
+  ): Promise<
+    Readonly<{ kind: "continue" }> | Readonly<{ kind: "stop"; result: CoordinatorResult }>
+  > {
+    const wait = waitRun(context.run, "user_input", waiting.waitToken, waiting.requestVersion);
+    if (!wait.ok) {
+      return { kind: "stop", result: await this.#fail(context, wait.code) };
+    }
+    context.run = wait.value;
+    await this.#record(context, "run_waiting", {
+      kind: "run_waiting",
+      reason: "user_input",
+      safeCode: "question_pending",
+      waitToken: waiting.waitToken,
+      requestVersion: waiting.requestVersion,
+    });
+
+    const answered = await new Promise<QuestionOutcome | null>((resolve) => {
+      context.pendingQuestion = {
+        toolCallId: waiting.toolCallId,
+        questionId: waiting.questionId,
+        waitToken: waiting.waitToken,
+        requestVersion: waiting.requestVersion,
+        question: waiting.question,
+        call: waiting.call,
+        outcome: null,
+        commandIds: new Set<string>(),
+        resolve: () => resolve(context.pendingQuestion?.outcome ?? null),
+      };
+    });
+
+    const pending = context.pendingQuestion;
+    context.pendingQuestion = null;
+    if (pending === null) {
+      return { kind: "stop", result: await this.#fail(context, "question_wait_lost") };
+    }
+    if (context.cancelRequested) {
+      return { kind: "stop", result: await this.#cancel(context) };
+    }
+    if (answered === null) {
+      return { kind: "stop", result: await this.#fail(context, "question_wait_lost") };
+    }
+
+    const resumed = resumeRun(context.run);
+    if (!resumed.ok) {
+      return { kind: "stop", result: await this.#fail(context, resumed.code) };
+    }
+    context.run = resumed.value;
+
+    const outcome = await executeToolCall(
+      {
+        tools: this.#deps.tools,
+        approvals: this.#deps.approvals,
+        ids: this.#deps.ids,
+        onEvent: async (type, payload) => {
+          await this.#record(context, type, payload as InternalEvent["payload"]);
+        },
+      },
+      pending.call,
+      {
+        toolCallId: pending.toolCallId,
+        questionId: pending.questionId,
+        waitToken: pending.waitToken,
+        requestVersion: pending.requestVersion,
+        outcome: answered,
+      },
+    );
+
+    if (outcome.kind === "invalid") {
+      return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
+    }
+    if (outcome.kind === "unknown") {
+      return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
+    }
+    if (outcome.kind === "waiting" || outcome.kind === "question_waiting") {
+      return { kind: "stop", result: await this.#fail(context, "question_wait_repeated") };
     }
     this.#appendToolResult(context, pending.call, outcome.status, outcome.text);
     if (context.cancelRequested) {

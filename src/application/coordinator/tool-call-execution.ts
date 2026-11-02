@@ -5,6 +5,11 @@ import {
   requestApproval,
 } from "../../domain/approval/approval-state.ts";
 import {
+  type AskUserQuestion,
+  type QuestionOutcome,
+  validateAskUserQuestion,
+} from "../../domain/question/ask-user.ts";
+import {
   receiveToolInvocation,
   type ToolInvocation,
   transitionToolInvocation,
@@ -36,7 +41,26 @@ export type ToolCallOutcome =
       waitToken: string;
       requestVersion: number;
       call: ProviderToolCall;
+    }>
+  | Readonly<{
+      kind: "question_waiting";
+      toolCallId: string;
+      questionId: string;
+      waitToken: string;
+      requestVersion: number;
+      question: AskUserQuestion;
+      call: ProviderToolCall;
     }>;
+
+export const ASK_USER_TOOL = "ask_user";
+
+export type QuestionResume = Readonly<{
+  toolCallId: string;
+  questionId: string;
+  waitToken: string;
+  requestVersion: number;
+  outcome: QuestionOutcome;
+}>;
 
 export type ApprovalResume = Readonly<{
   toolCallId: string;
@@ -52,6 +76,8 @@ export type ToolCallDependencies = Readonly<{
   ids: IdentifierFactory;
   /** When true, an approval request suspends the call instead of deciding inline. */
   deferApprovals?: boolean;
+  /** When true, ask_user suspends the call until a matching answer arrives. */
+  deferQuestions?: boolean;
   onEvent: (
     type:
       | "tool_call_received"
@@ -60,7 +86,12 @@ export type ToolCallDependencies = Readonly<{
       | "tool_dispatch_committed"
       | "tool_execution_denied"
       | "tool_execution_started"
-      | "tool_execution_finished",
+      | "tool_execution_finished"
+      | "question_requested"
+      | "question_answered"
+      | "question_declined"
+      | "question_cancelled"
+      | "question_unavailable",
     payload: unknown,
   ) => Promise<void>;
 }>;
@@ -68,10 +99,14 @@ export type ToolCallDependencies = Readonly<{
 export async function executeToolCall(
   dependencies: ToolCallDependencies,
   call: ProviderToolCall,
-  resume?: ApprovalResume,
+  resume?: ApprovalResume | QuestionResume,
 ): Promise<ToolCallOutcome> {
   const toolCallId = resume?.toolCallId ?? dependencies.ids.create();
   let invocation: ToolInvocation = { toolCallId, state: "received" };
+
+  if (resume !== undefined && "outcome" in resume) {
+    return finishQuestion(dependencies, call, resume);
+  }
 
   if (resume === undefined) {
     const received = receiveToolInvocation(toolCallId);
@@ -105,6 +140,48 @@ export async function executeToolCall(
     const validated = transitionToolInvocation(invocation, "validated");
     if (!validated.ok) return { kind: "invalid", safeCode: validated.code };
     invocation = validated.value;
+
+    if (call.toolName === ASK_USER_TOOL) {
+      const question = validateAskUserQuestion(call.arguments);
+      if (!question.ok) {
+        await dependencies.onEvent("tool_execution_finished", {
+          kind: "tool_execution_finished",
+          toolCallId,
+          status: "failed",
+          safeCode: question.code,
+          text: null,
+        });
+        return {
+          kind: "continue",
+          providerToolCallId: call.providerToolCallId,
+          toolName: call.toolName,
+          status: "failed",
+          text: null,
+        };
+      }
+      const questionId = dependencies.ids.create();
+      await dependencies.onEvent("question_requested", {
+        kind: "question_requested",
+        questionId,
+        toolCallId,
+        question: question.question.question,
+        answerType: question.question.answerType,
+        waitToken: questionId,
+        requestVersion: 1,
+      });
+      if (dependencies.deferQuestions !== true) {
+        return { kind: "invalid", safeCode: "question_requires_interaction" };
+      }
+      return {
+        kind: "question_waiting",
+        toolCallId,
+        questionId,
+        waitToken: questionId,
+        requestVersion: 1,
+        question: question.question,
+        call,
+      };
+    }
 
     if (definition.requiresApproval) {
       const awaiting = transitionToolInvocation(invocation, "awaiting_approval");
@@ -159,6 +236,70 @@ export async function executeToolCall(
     return deniedOutcome(dependencies, call, toolCallId);
   }
   return dispatchAndExecute(dependencies, call, toolCallId, invocation, resume.approvalId);
+}
+
+/**
+ * Record the terminal question fact and map it to a tool result. An answered
+ * question succeeds; decline/unavailable fail; cancel is a tool cancellation.
+ * None of these is approval or disclosure consent.
+ */
+async function finishQuestion(
+  dependencies: ToolCallDependencies,
+  call: ProviderToolCall,
+  resume: QuestionResume,
+): Promise<ToolCallOutcome> {
+  const { outcome } = resume;
+  if (outcome.status === "answered") {
+    await dependencies.onEvent("question_answered", {
+      kind: "question_answered",
+      questionId: resume.questionId,
+      toolCallId: resume.toolCallId,
+      answerText: outcome.text,
+    });
+  } else if (outcome.status === "declined") {
+    await dependencies.onEvent("question_declined", {
+      kind: "question_declined",
+      questionId: resume.questionId,
+      toolCallId: resume.toolCallId,
+    });
+  } else if (outcome.status === "cancelled") {
+    await dependencies.onEvent("question_cancelled", {
+      kind: "question_cancelled",
+      questionId: resume.questionId,
+      toolCallId: resume.toolCallId,
+    });
+  } else {
+    await dependencies.onEvent("question_unavailable", {
+      kind: "question_unavailable",
+      questionId: resume.questionId,
+      toolCallId: resume.toolCallId,
+    });
+  }
+
+  await dependencies.onEvent("tool_execution_finished", {
+    kind: "tool_execution_finished",
+    toolCallId: resume.toolCallId,
+    status: outcome.toolStatus,
+    safeCode: outcome.toolStatus === "succeeded" ? null : outcome.safeCode,
+    text: outcome.toolStatus === "succeeded" ? outcome.text : null,
+  });
+
+  if (outcome.toolStatus === "cancelled") {
+    return {
+      kind: "continue",
+      providerToolCallId: call.providerToolCallId,
+      toolName: call.toolName,
+      status: "failed",
+      text: null,
+    };
+  }
+  return {
+    kind: "continue",
+    providerToolCallId: call.providerToolCallId,
+    toolName: call.toolName,
+    status: outcome.toolStatus,
+    text: outcome.toolStatus === "succeeded" ? outcome.text : null,
+  };
 }
 
 async function deniedOutcome(

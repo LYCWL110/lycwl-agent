@@ -8,7 +8,7 @@ export type InternalEventPayload =
   | Readonly<{ kind: "run_started"; input: string }>
   | Readonly<{
       kind: "run_waiting";
-      reason: "configuration" | "approval";
+      reason: "configuration" | "approval" | "user_input";
       safeCode: string;
       waitToken: string;
       requestVersion: number;
@@ -78,6 +78,40 @@ export type InternalEventPayload =
       toolCallId: string;
       toolName: string;
       reason: "user_input_superseded" | "run_cancelled";
+    }>
+  | Readonly<{
+      kind: "question_requested";
+      questionId: string;
+      toolCallId: string;
+      question: string;
+      answerType: "choice" | "text" | "confirmation";
+      waitToken: string;
+      requestVersion: number;
+    }>
+  | Readonly<{
+      kind: "question_answered";
+      questionId: string;
+      toolCallId: string;
+      answerText: string;
+    }>
+  | Readonly<{
+      kind: "question_declined";
+      questionId: string;
+      toolCallId: string;
+    }>
+  | Readonly<{
+      kind: "question_cancelled";
+      questionId: string;
+      toolCallId: string;
+    }>
+  | Readonly<{
+      kind: "question_unavailable";
+      questionId: string;
+      toolCallId: string;
+    }>
+  | Readonly<{
+      kind: "question_view_closed";
+      questionId: string;
     }>
   | Readonly<{
       kind: "tool_dispatch_committed";
