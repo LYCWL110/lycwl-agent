@@ -18,10 +18,19 @@ export type BackgroundRegistry = Readonly<{
   disposeAll: () => void;
 }>;
 
+type StreamState = {
+  /** Bytes already captured into published records. */
+  capturedBytes: number;
+  /** Partial multi-byte character held until the next poll completes it. */
+  pending: Buffer;
+};
+
 type Entry = {
   task: BackgroundTask;
   processId: number;
   executionId: string;
+  stdout: StreamState;
+  stderr: StreamState;
 };
 
 export function createBackgroundRegistry(
@@ -44,14 +53,61 @@ export function createBackgroundRegistry(
     const alive = supervisor.isAlive(entry.processId);
     const exitCode = supervisor.exitCodeOf(entry.processId);
     const { stdout, stderr } = supervisor.readOutput(entry.processId);
+
+    // Append only bytes that have not been published yet. Record indices and
+    // stream byte offsets are stable, so a returned cursor keeps meaning.
+    const newRecords = [
+      ...appendStream(entry, "stdout", stdout),
+      ...appendStream(entry, "stderr", stderr),
+    ];
+
     return {
       ...entry.task,
       state: alive ? "running" : "exited",
       exitCode,
-      records: toRecords(stdout, stderr),
+      records: [...entry.task.records, ...newRecords],
       captureComplete: true,
       timedOut: false,
     };
+  }
+
+  /**
+   * Publish the new tail of one stream as an immutable record.
+   *
+   * The supervisor's capture read returns the whole file each time, so this
+   * slices from the already-published byte count. A trailing incomplete UTF-8
+   * sequence is held back rather than emitted as a replacement character.
+   */
+  function appendStream(
+    entry: Entry,
+    stream: "stdout" | "stderr",
+    text: string,
+  ): readonly OutputRecord[] {
+    const state = stream === "stdout" ? entry.stdout : entry.stderr;
+    const full = Buffer.concat([state.pending, Buffer.from(text, "utf8")]);
+    const alreadyPublished = state.capturedBytes - state.pending.length;
+    if (full.length <= alreadyPublished) return [];
+
+    const fresh = full.subarray(alreadyPublished);
+    const usable = trimIncompleteUtf8(fresh);
+    if (usable.length === 0) {
+      state.pending = fresh;
+      state.capturedBytes = alreadyPublished + fresh.length;
+      return [];
+    }
+
+    state.pending = fresh.subarray(usable.length);
+    state.capturedBytes = alreadyPublished + fresh.length;
+
+    return [
+      {
+        recordIndex: entry.task.records.length,
+        stream,
+        streamByteStart: alreadyPublished,
+        byteLength: usable.length,
+        text: usable.toString("utf8"),
+      },
+    ];
   }
 
   const dependencies: BackgroundToolDependencies = {
@@ -81,7 +137,13 @@ export function createBackgroundRegistry(
         captureComplete: true,
         timedOut: false,
       };
-      entries.set(taskId, { task, processId: start.handle.processId, executionId });
+      entries.set(taskId, {
+        task,
+        processId: start.handle.processId,
+        executionId,
+        stdout: { capturedBytes: 0, pending: Buffer.alloc(0) },
+        stderr: { capturedBytes: 0, pending: Buffer.alloc(0) },
+      });
       return { kind: "started", task };
     },
 
@@ -112,30 +174,23 @@ export function createBackgroundRegistry(
 }
 
 /**
- * Convert raw capture text into the per-stream records the paging layer expects.
- * Source provenance is preserved: stdout and stderr never merge into one chunk.
+ * Number of leading bytes that form complete UTF-8 sequences. A trailing
+ * partial sequence is excluded so it can be completed on the next poll instead
+ * of being emitted as a replacement character.
  */
-function toRecords(stdout: string, stderr: string): readonly OutputRecord[] {
-  const records: OutputRecord[] = [];
-  let index = 0;
-  if (stdout.length > 0) {
-    records.push({
-      recordIndex: index,
-      stream: "stdout",
-      streamByteStart: 0,
-      byteLength: Buffer.byteLength(stdout, "utf8"),
-      text: stdout,
-    });
-    index += 1;
+function trimIncompleteUtf8(bytes: Buffer): Buffer {
+  if (bytes.length === 0) return bytes;
+
+  // Find the last lead byte and check whether its sequence is complete.
+  let index = bytes.length - 1;
+  while (index >= 0 && (bytes[index] ?? 0) & 0xc0) {
+    if (((bytes[index] ?? 0) & 0xc0) === 0xc0) break;
+    index -= 1;
   }
-  if (stderr.length > 0) {
-    records.push({
-      recordIndex: index,
-      stream: "stderr",
-      streamByteStart: 0,
-      byteLength: Buffer.byteLength(stderr, "utf8"),
-      text: stderr,
-    });
-  }
-  return records;
+  // `index` now points at a lead byte or a 1-byte ASCII character.
+  const lead = bytes[index] ?? 0;
+  const needed =
+    (lead & 0x80) === 0 ? 1 : (lead & 0xe0) === 0xc0 ? 2 : (lead & 0xf0) === 0xe0 ? 3 : 4;
+  const available = bytes.length - index;
+  return available < needed ? bytes.subarray(0, index) : bytes;
 }
