@@ -2,7 +2,9 @@ import { createMutationTools } from "../adapters/tools/mutation-tools.ts";
 import { createApplyPatchTool } from "../adapters/tools/patch-tool.ts";
 import { createReadFileTool } from "../adapters/tools/read-file-tool.ts";
 import { createSearchTools, type SearchEntry } from "../adapters/tools/search-tools.ts";
+import { createShellTool } from "../adapters/tools/shell-tool.ts";
 import { createWriteTools } from "../adapters/tools/write-tools.ts";
+import { createProcessSupervisor } from "../adapters/windows/process-supervisor.ts";
 import { createWindowsFileReader } from "../adapters/windows/windows-directory-reader.ts";
 import { createWindowsFsAdapter } from "../adapters/windows/windows-fs-adapter.ts";
 import { createWindowsMutationAdapter } from "../adapters/windows/windows-mutation-adapter.ts";
@@ -31,15 +33,21 @@ export type WorkspaceToolsOptions = Readonly<{
   ids: IdentifierFactory;
   /** Set false to keep the build read-only even where writes are implemented. */
   enableWrites?: boolean;
+  /**
+   * Set true only where G02 supervision has been validated on this host. When
+   * false, `shell` and the background tools stay unavailable.
+   */
+  enableProcesses?: boolean;
 }>;
 
 export function createReadOnlyWorkspaceTools(options: WorkspaceToolsOptions): ToolExecutor {
-  return createWorkspaceTools({ ...options, enableWrites: false });
+  return createWorkspaceTools({ ...options, enableWrites: false, enableProcesses: false });
 }
 
 export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecutor {
   const { workspaceRoot, approvals, ids } = options;
   const enableWrites = options.enableWrites !== false;
+  const enableProcesses = options.enableProcesses === true;
 
   const fsAdapter = createWindowsFsAdapter({ workspaceRoot });
   const reader = createWindowsFileReader({ workspaceRoot });
@@ -118,10 +126,37 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
       })
     : null;
 
+  const processes = enableProcesses
+    ? createShellTool({
+        sessionMode: enableWrites ? "workspace_write" : "read_only",
+        inheritedEnvironment: { ...process.env } as Record<string, string>,
+        runShell: async (request) => {
+          const supervisor = createProcessSupervisor();
+          const outcome = await supervisor.runToCompletion({
+            command: request.command,
+            cwd: request.cwd,
+            timeoutMs: request.timeoutMs,
+          });
+          if (outcome.kind === "failed") {
+            return { kind: "unknown", safeCode: outcome.code };
+          }
+          return outcome.timedOut
+            ? { kind: "timed_out", stdout: outcome.stdout, stderr: outcome.stderr }
+            : {
+                kind: "completed",
+                exitCode: outcome.exitCode,
+                stdout: outcome.stdout,
+                stderr: outcome.stderr,
+              };
+        },
+      })
+    : null;
+
   const delegates: ToolExecutor[] = [readFile, search];
   if (writes !== null) delegates.push(writes);
   if (patch !== null) delegates.push(patch);
   if (mutations !== null) delegates.push(mutations);
+  if (processes !== null) delegates.push(processes);
 
   function resolveDelegate(toolName: string): ToolExecutor | null {
     for (const delegate of delegates) {
