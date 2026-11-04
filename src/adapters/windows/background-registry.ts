@@ -31,6 +31,10 @@ type Entry = {
   executionId: string;
   stdout: StreamState;
   stderr: StreamState;
+  /** Wall-clock deadline; the task is terminated once it passes. */
+  deadlineMs: number;
+  /** Set once the task is deliberately stopped; keeps the state sticky. */
+  stopped: boolean;
 };
 
 export function createBackgroundRegistry(
@@ -42,6 +46,7 @@ export function createBackgroundRegistry(
 ): BackgroundRegistry {
   const supervisor = createProcessSupervisor();
   const entries = new Map<string, Entry>();
+  const timers = new Map<string, NodeJS.Timeout>();
   let counter = 0;
 
   function nextId(prefix: string): string {
@@ -50,6 +55,26 @@ export function createBackgroundRegistry(
   }
 
   function refresh(entry: Entry): BackgroundTask {
+    // Enforce the confirmed timeout at the same points the task is observed, so a
+    // task cannot run indefinitely just because nobody polls it in between.
+    if (Date.now() >= entry.deadlineMs && supervisor.isAlive(entry.processId)) {
+      // Capture whatever was produced before terminating: stopping the job
+      // removes its handles and the capture would otherwise be lost.
+      const { stdout, stderr } = supervisor.readOutput(entry.processId);
+      const partial = [
+        ...appendStream(entry, "stdout", stdout),
+        ...appendStream(entry, "stderr", stderr),
+      ];
+      entry.task = {
+        ...entry.task,
+        records: [...entry.task.records, ...partial],
+        state: "stopped",
+        timedOut: true,
+      };
+      supervisor.stop(entry.processId);
+      return { ...entry.task, exitCode: null, captureComplete: true };
+    }
+
     const alive = supervisor.isAlive(entry.processId);
     const exitCode = supervisor.exitCodeOf(entry.processId);
     const { stdout, stderr } = supervisor.readOutput(entry.processId);
@@ -63,11 +88,11 @@ export function createBackgroundRegistry(
 
     return {
       ...entry.task,
-      state: alive ? "running" : "exited",
+      state: entry.stopped || entry.task.timedOut ? "stopped" : alive ? "running" : "exited",
       exitCode,
       records: [...entry.task.records, ...newRecords],
       captureComplete: true,
-      timedOut: false,
+      timedOut: entry.task.timedOut,
     };
   }
 
@@ -141,9 +166,35 @@ export function createBackgroundRegistry(
         task,
         processId: start.handle.processId,
         executionId,
+        deadlineMs: Date.now() + request.timeoutMs,
+        stopped: false,
         stdout: { capturedBytes: 0, pending: Buffer.alloc(0) },
         stderr: { capturedBytes: 0, pending: Buffer.alloc(0) },
       });
+
+      // Enforce the deadline even when nobody polls: a runaway background task
+      // must not outlive its approved timeout.
+      const timer = setTimeout(() => {
+        const entry = entries.get(taskId);
+        if (entry === undefined) return;
+        if (!supervisor.isAlive(entry.processId)) return;
+        const { stdout, stderr } = supervisor.readOutput(entry.processId);
+        const partial = [
+          ...appendStream(entry, "stdout", stdout),
+          ...appendStream(entry, "stderr", stderr),
+        ];
+        entry.task = {
+          ...entry.task,
+          records: [...entry.task.records, ...partial],
+          state: "stopped",
+          timedOut: true,
+        };
+        supervisor.stop(entry.processId);
+        timers.delete(taskId);
+      }, request.timeoutMs);
+      timer.unref?.();
+      timers.set(taskId, timer);
+
       return { kind: "started", task };
     },
 
@@ -158,15 +209,40 @@ export function createBackgroundRegistry(
     async stopTask(taskId: string): Promise<void> {
       const entry = entries.get(taskId);
       if (entry === undefined) return;
+      clearTimer(taskId);
+
+      // Capture output before stopping: the handles are released on stop.
+      const { stdout, stderr } = supervisor.readOutput(entry.processId);
+      const partial = [
+        ...appendStream(entry, "stdout", stdout),
+        ...appendStream(entry, "stderr", stderr),
+      ];
       supervisor.stop(entry.processId);
-      entry.task = { ...refresh(entry), state: "stopped", exitCode: null };
+      entry.stopped = true;
+      entry.task = {
+        ...entry.task,
+        records: [...entry.task.records, ...partial],
+        state: "stopped",
+        exitCode: null,
+        timedOut: false,
+        captureComplete: true,
+      };
     },
   };
+
+  function clearTimer(taskId: string): void {
+    const timer = timers.get(taskId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timers.delete(taskId);
+    }
+  }
 
   return {
     dependencies,
     liveTaskIds: () => [...entries.keys()],
     disposeAll: () => {
+      for (const taskId of [...timers.keys()]) clearTimer(taskId);
       for (const entry of entries.values()) supervisor.stop(entry.processId);
       entries.clear();
     },
