@@ -76,7 +76,137 @@ export type RunningTask = Readonly<{
   startedAtMs: number;
 }>;
 
+export type RunningHandle = Readonly<{
+  processId: number;
+  stdoutPath: string;
+  stderrPath: string;
+}>;
+
+export type StartHandle =
+  | Readonly<{ ok: true; handle: RunningHandle }>
+  | Readonly<{ ok: false; code: SupervisorFailure }>;
+
+export type SupervisedProcess = Readonly<{
+  processId: number;
+  stdoutPath: string;
+  stderrPath: string;
+}>;
+
 export function createProcessSupervisor() {
+  const running = new Map<
+    number,
+    { job: unknown; process: unknown; stdoutPath: string; stderrPath: string }
+  >();
+
+  /**
+   * Create the job, start the process suspended, assign it, resume it, and hand
+   * back the live handles without waiting. The caller polls `isAlive`, reads the
+   * capture files and eventually calls `stop`.
+   */
+  function start(
+    request: Readonly<{ command: string; cwd: string; executionId: string }>,
+  ): StartHandle {
+    const job = CreateJobObjectW(null, null);
+    if (job === null) return { ok: false, code: "job_create_failed" };
+
+    const limits = buildKillOnCloseLimits();
+    if (
+      !SetInformationJobObject(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, limits, limits.length)
+    ) {
+      CloseHandle(job);
+      return { ok: false, code: "job_configure_failed" };
+    }
+
+    const token = randomBytes(6).toString("hex");
+    const stdoutPath = path.join(tmpdir(), `lycwl-bg-out-${token}.log`);
+    const stderrPath = path.join(tmpdir(), `lycwl-bg-err-${token}.log`);
+    const fullCommand = `cmd.exe /d /s /c "( ${request.command} ) > "${stdoutPath}" 2> "${stderrPath}""`;
+
+    const startupInfo = buildStartupInfo(false);
+    const processInfo = Buffer.alloc(24);
+    const commandLine = commandLineBuffer(fullCommand);
+
+    const created = CreateProcessW(
+      null,
+      commandLine,
+      null,
+      null,
+      false,
+      CREATE_SUSPENDED | CREATE_NO_WINDOW,
+      null,
+      request.cwd,
+      startupInfo,
+      processInfo,
+    );
+    if (!created) {
+      CloseHandle(job);
+      return { ok: false, code: "process_create_failed" };
+    }
+
+    const hProcess = readHandle(processInfo, 0);
+    const hThread = readHandle(processInfo, 8);
+    const processId = readPid(processInfo);
+
+    if (!AssignProcessToJobObject(job, hProcess)) {
+      TerminateJobObject(job, 1);
+      CloseHandle(hThread);
+      CloseHandle(hProcess);
+      CloseHandle(job);
+      return { ok: false, code: "job_assign_failed" };
+    }
+    if (ResumeThread(hThread) === 0xffff_ffff) {
+      TerminateJobObject(job, 1);
+      CloseHandle(hThread);
+      CloseHandle(hProcess);
+      CloseHandle(job);
+      return { ok: false, code: "resume_failed" };
+    }
+    CloseHandle(hThread);
+
+    running.set(processId, { job, process: hProcess, stdoutPath, stderrPath });
+    return { ok: true, handle: { processId, stdoutPath, stderrPath } };
+  }
+
+  /** True while the supervised process has not exited. */
+  function isAlive(processId: number): boolean {
+    const entry = running.get(processId);
+    if (entry === undefined) return false;
+    return WaitForSingleObject(entry.process, 0) === WAIT_TIMEOUT;
+  }
+
+  /** Exit code once the process has exited, or null while it still runs. */
+  function exitCodeOf(processId: number): number | null {
+    const entry = running.get(processId);
+    if (entry === undefined) return null;
+    if (WaitForSingleObject(entry.process, 0) === WAIT_TIMEOUT) return null;
+    const code = [0];
+    return GetExitCodeProcess(entry.process, code) ? (code[0] ?? null) : null;
+  }
+
+  /**
+   * Terminate the whole job tree and release handles. Applied twice it is a
+   * no-op, so a completion notification and a user stop cannot conflict.
+   */
+  function stop(processId: number): void {
+    const entry = running.get(processId);
+    if (entry === undefined) return;
+    TerminateJobObject(entry.job, 1);
+    WaitForSingleObject(entry.process, 5000);
+    CloseHandle(entry.process);
+    CloseHandle(entry.job);
+    running.delete(processId);
+  }
+
+  /** Read the current capture files without removing them. */
+  function readOutput(processId: number): Readonly<{ stdout: string; stderr: string }> {
+    const entry = running.get(processId);
+    if (entry === undefined) return { stdout: "", stderr: "" };
+    return {
+      stdout: readCaptureFile(entry.stdoutPath),
+      stderr: readCaptureFile(entry.stderrPath),
+    };
+  }
+  return { runToCompletion, start, isAlive, exitCodeOf, stop, readOutput };
   /**
    * Run a command to completion under a Job object, terminating the whole tree on
    * timeout. Capture files are removed afterwards.
@@ -177,8 +307,6 @@ export function createProcessSupervisor() {
       processId,
     };
   }
-
-  return { runToCompletion };
 }
 
 export type ProcessSupervisor = ReturnType<typeof createProcessSupervisor>;

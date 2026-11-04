@@ -1,9 +1,11 @@
+import { createBackgroundTools } from "../adapters/tools/background-tools.ts";
 import { createMutationTools } from "../adapters/tools/mutation-tools.ts";
 import { createApplyPatchTool } from "../adapters/tools/patch-tool.ts";
 import { createReadFileTool } from "../adapters/tools/read-file-tool.ts";
 import { createSearchTools, type SearchEntry } from "../adapters/tools/search-tools.ts";
 import { createShellTool } from "../adapters/tools/shell-tool.ts";
 import { createWriteTools } from "../adapters/tools/write-tools.ts";
+import { createBackgroundRegistry } from "../adapters/windows/background-registry.ts";
 import { createProcessSupervisor } from "../adapters/windows/process-supervisor.ts";
 import { createWindowsFileReader } from "../adapters/windows/windows-directory-reader.ts";
 import { createWindowsFsAdapter } from "../adapters/windows/windows-fs-adapter.ts";
@@ -152,11 +154,21 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
       })
     : null;
 
+  const background = enableProcesses
+    ? createBackgroundTools(
+        createBackgroundRegistry({
+          sessionMode: enableWrites ? "workspace_write" : "read_only",
+          inheritedEnvironment: { ...process.env } as Record<string, string>,
+        }).dependencies,
+      )
+    : null;
+
   const delegates: ToolExecutor[] = [readFile, search];
   if (writes !== null) delegates.push(writes);
   if (patch !== null) delegates.push(patch);
   if (mutations !== null) delegates.push(mutations);
   if (processes !== null) delegates.push(processes);
+  if (background !== null) delegates.push(background);
 
   function resolveDelegate(toolName: string): ToolExecutor | null {
     for (const delegate of delegates) {
