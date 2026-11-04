@@ -1,9 +1,11 @@
+import { createMutationTools } from "../adapters/tools/mutation-tools.ts";
 import { createApplyPatchTool } from "../adapters/tools/patch-tool.ts";
 import { createReadFileTool } from "../adapters/tools/read-file-tool.ts";
 import { createSearchTools, type SearchEntry } from "../adapters/tools/search-tools.ts";
 import { createWriteTools } from "../adapters/tools/write-tools.ts";
 import { createWindowsFileReader } from "../adapters/windows/windows-directory-reader.ts";
 import { createWindowsFsAdapter } from "../adapters/windows/windows-fs-adapter.ts";
+import { createWindowsMutationAdapter } from "../adapters/windows/windows-mutation-adapter.ts";
 import { createWindowsWriteAdapter } from "../adapters/windows/windows-write-adapter.ts";
 import type { ApprovalGate } from "../ports/approval-gate.ts";
 import type { IdentifierFactory } from "../ports/identity.ts";
@@ -42,6 +44,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
   const fsAdapter = createWindowsFsAdapter({ workspaceRoot });
   const reader = createWindowsFileReader({ workspaceRoot });
   const writer = createWindowsWriteAdapter({ workspaceRoot });
+  const mutator = createWindowsMutationAdapter({ workspaceRoot });
 
   const readFile = createReadFileTool({
     workspaceRoot,
@@ -106,9 +109,19 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
       })
     : null;
 
+  const mutations = enableWrites
+    ? createMutationTools({
+        inspectDeleteTargets: async (paths) => mutator.inspectDeleteTargets(paths),
+        inspectRename: async (from, to) => mutator.inspectRename(from, to),
+        deletePath: async (target) => mutator.deletePath(target),
+        renamePath: async (from, to) => mutator.renamePath(from, to),
+      })
+    : null;
+
   const delegates: ToolExecutor[] = [readFile, search];
   if (writes !== null) delegates.push(writes);
   if (patch !== null) delegates.push(patch);
+  if (mutations !== null) delegates.push(mutations);
 
   function resolveDelegate(toolName: string): ToolExecutor | null {
     for (const delegate of delegates) {
