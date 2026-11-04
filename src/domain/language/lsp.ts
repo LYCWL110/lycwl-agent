@@ -53,7 +53,150 @@ export function requiresReapproval(instance: LspInstance, liveIdentity: string |
   return instance.executionIdentity === null || instance.executionIdentity !== liveIdentity;
 }
 
-export type Position = Readonly<{ line: number; character: number }>;
+/**
+ * SR04 lease lifecycle (V1_CONTRACT_CLOSURE.md section 5). A spawned process is
+ * not a ready server: only a successful protocol initialization may move a lease
+ * to `running`, a stop request is not a stop, and an unconfirmable cleanup must
+ * not fabricate an exit time.
+ */
+export const LSP_LEASE_STATES = [
+  "starting",
+  "running",
+  "stopping",
+  "stopped",
+  "outcome_unknown",
+] as const;
+export type LspLeaseState = (typeof LSP_LEASE_STATES)[number];
+
+export type LspLease = Readonly<{
+  leaseId: string;
+  instanceId: string;
+  state: LspLeaseState;
+  /** Bound only while running: the actual process execution identity. */
+  processExecutionId: string | null;
+  /** Bound only while running: configuration revision actually launched with. */
+  configurationRevision: number | null;
+  /** Bound only while running: fingerprint of the final filtered environment. */
+  environmentFingerprint: string | null;
+  /** True only after `initialize` succeeded. */
+  protocolReady: boolean;
+}>;
+
+export type LspLeaseFailure =
+  | "invalid_lease_identity"
+  | "invalid_transition"
+  | "terminal_lease_immutable"
+  | "protocol_not_ready"
+  | "snapshot_mismatch";
+
+export type LspLeaseTransition =
+  | Readonly<{ ok: true; value: LspLease }>
+  | Readonly<{ ok: false; code: LspLeaseFailure }>;
+
+const TERMINAL_LEASE_STATES: ReadonlySet<LspLeaseState> = new Set(["stopped", "outcome_unknown"]);
+
+export function beginLspLease(leaseId: string, instanceId: string): LspLeaseTransition {
+  if (leaseId.length === 0 || instanceId.length === 0) {
+    return { ok: false, code: "invalid_lease_identity" };
+  }
+  return {
+    ok: true,
+    value: {
+      leaseId,
+      instanceId,
+      state: "starting",
+      processExecutionId: null,
+      configurationRevision: null,
+      environmentFingerprint: null,
+      protocolReady: false,
+    },
+  };
+}
+
+/**
+ * `starting -> running` requires the protocol to have initialized. Launching a
+ * process is explicitly insufficient.
+ */
+export function markLspProtocolReady(
+  lease: LspLease,
+  binding: Readonly<{
+    processExecutionId: string;
+    configurationRevision: number;
+    environmentFingerprint: string;
+  }>,
+): LspLeaseTransition {
+  if (TERMINAL_LEASE_STATES.has(lease.state)) {
+    return { ok: false, code: "terminal_lease_immutable" };
+  }
+  if (lease.state !== "starting") return { ok: false, code: "invalid_transition" };
+  if (
+    binding.processExecutionId.length === 0 ||
+    binding.environmentFingerprint.length === 0 ||
+    !Number.isSafeInteger(binding.configurationRevision) ||
+    binding.configurationRevision < 0
+  ) {
+    return { ok: false, code: "snapshot_mismatch" };
+  }
+  return {
+    ok: true,
+    value: {
+      ...lease,
+      state: "running",
+      processExecutionId: binding.processExecutionId,
+      configurationRevision: binding.configurationRevision,
+      environmentFingerprint: binding.environmentFingerprint,
+      protocolReady: true,
+    },
+  };
+}
+
+/** A request is only permitted on a running, protocol-ready lease. */
+export function canServeRequests(lease: LspLease): LspLeaseTransition {
+  if (lease.state !== "running" || !lease.protocolReady) {
+    return { ok: false, code: "protocol_not_ready" };
+  }
+  return { ok: true, value: lease };
+}
+
+/** A stop request is a command, never proof of termination. */
+export function requestLspStop(lease: LspLease): LspLeaseTransition {
+  if (TERMINAL_LEASE_STATES.has(lease.state)) {
+    return { ok: false, code: "terminal_lease_immutable" };
+  }
+  if (lease.state === "stopping") return { ok: true, value: lease };
+  return { ok: true, value: { ...lease, state: "stopping" } };
+}
+
+/** Only proven process-tree termination or proof it never started lands here. */
+export function confirmLspStopped(lease: LspLease): LspLeaseTransition {
+  if (TERMINAL_LEASE_STATES.has(lease.state)) {
+    return { ok: false, code: "terminal_lease_immutable" };
+  }
+  if (lease.state !== "stopping" && lease.state !== "starting") {
+    return { ok: false, code: "invalid_transition" };
+  }
+  return { ok: true, value: { ...lease, state: "stopped", protocolReady: false } };
+}
+
+/** Cleanup could not be confirmed. No exit time is invented. */
+export function markLspCleanupUnknown(lease: LspLease): LspLeaseTransition {
+  if (TERMINAL_LEASE_STATES.has(lease.state)) {
+    return { ok: false, code: "terminal_lease_immutable" };
+  }
+  return { ok: true, value: { ...lease, state: "outcome_unknown", protocolReady: false } };
+}
+
+/**
+ * A terminal lease is never reused. A new process needs a new lease identity and
+ * a new approval.
+ */
+export function isLspLeaseTerminal(lease: LspLease): boolean {
+  return TERMINAL_LEASE_STATES.has(lease.state);
+}
+
+export type LspPosition = Readonly<{ line: number; character: number }>;
+
+export type Position = LspPosition;
 
 export function validatePosition(value: unknown): LspResult<Position> {
   if (typeof value !== "object" || value === null) {

@@ -1,4 +1,5 @@
 import { createBackgroundTools } from "../adapters/tools/background-tools.ts";
+import { createLspTools } from "../adapters/tools/lsp-tools.ts";
 import { createMutationTools } from "../adapters/tools/mutation-tools.ts";
 import { createApplyPatchTool } from "../adapters/tools/patch-tool.ts";
 import { createReadFileTool } from "../adapters/tools/read-file-tool.ts";
@@ -6,6 +7,7 @@ import { createSearchTools, type SearchEntry } from "../adapters/tools/search-to
 import { createShellTool } from "../adapters/tools/shell-tool.ts";
 import { createWriteTools } from "../adapters/tools/write-tools.ts";
 import { createBackgroundRegistry } from "../adapters/windows/background-registry.ts";
+import { createLspRegistry } from "../adapters/windows/lsp-registry.ts";
 import { createProcessSupervisor } from "../adapters/windows/process-supervisor.ts";
 import { createWindowsFileReader } from "../adapters/windows/windows-directory-reader.ts";
 import { createWindowsFsAdapter } from "../adapters/windows/windows-fs-adapter.ts";
@@ -40,6 +42,12 @@ export type WorkspaceToolsOptions = Readonly<{
    * false, `shell` and the background tools stay unavailable.
    */
   enableProcesses?: boolean;
+  /**
+   * Set true only where LSP supervision has been validated. A language server
+   * must also be started explicitly with an approved instance; enabling this flag
+   * alone exposes the tools and does not spawn anything.
+   */
+  enableLsp?: boolean;
 }>;
 
 export function createReadOnlyWorkspaceTools(options: WorkspaceToolsOptions): ToolExecutor {
@@ -50,6 +58,10 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
   const { workspaceRoot, approvals, ids } = options;
   const enableWrites = options.enableWrites !== false;
   const enableProcesses = options.enableProcesses === true;
+  const enableLsp = options.enableLsp === true;
+  const lspRegistry = createLspRegistry({
+    inheritedEnvironment: { ...process.env } as Record<string, string>,
+  });
 
   const fsAdapter = createWindowsFsAdapter({ workspaceRoot });
   const reader = createWindowsFileReader({ workspaceRoot });
@@ -169,6 +181,9 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
   if (mutations !== null) delegates.push(mutations);
   if (processes !== null) delegates.push(processes);
   if (background !== null) delegates.push(background);
+  if (enableLsp === true) {
+    delegates.push(createLspTools(lspRegistry.dependencies));
+  }
 
   function resolveDelegate(toolName: string): ToolExecutor | null {
     for (const delegate of delegates) {
