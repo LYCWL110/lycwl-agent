@@ -12,6 +12,12 @@ export const WEB_LIMITS = Object.freeze({
   maxFetchRawBytes: 5 * 1024 * 1024,
   maxFetchModelUnits: 100_000,
   maxHeaderValueBytes: 512,
+  /** Bounded network phases required by the baseline. */
+  connectTimeoutMs: 10_000,
+  firstByteTimeoutMs: 20_000,
+  totalTimeoutMs: 60_000,
+  /** Decompressed size is bounded separately from the wire size. */
+  maxDecodedBytes: 10 * 1024 * 1024,
 });
 
 export type WebFailure =

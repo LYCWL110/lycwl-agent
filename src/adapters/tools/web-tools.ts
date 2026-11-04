@@ -131,6 +131,11 @@ async function executeSearch(
     return { status: "outcome_unknown", safeCode: "search_outcome_unknown" };
   }
   if (run.kind === "unknown") {
+    // A backend that was never configured provably sent nothing, so it is a
+    // definite failure rather than an uncertain charge.
+    if (run.safeCode === "search_backend_not_configured") {
+      return { status: "failed", safeCode: run.safeCode, text: null };
+    }
     return { status: "outcome_unknown", safeCode: run.safeCode };
   }
 

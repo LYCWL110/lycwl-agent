@@ -5,9 +5,12 @@ import { createApplyPatchTool } from "../adapters/tools/patch-tool.ts";
 import { createReadFileTool } from "../adapters/tools/read-file-tool.ts";
 import { createSearchTools, type SearchEntry } from "../adapters/tools/search-tools.ts";
 import { createShellTool } from "../adapters/tools/shell-tool.ts";
+import { createWebTools } from "../adapters/tools/web-tools.ts";
 import { createWriteTools } from "../adapters/tools/write-tools.ts";
 import { createBackgroundRegistry } from "../adapters/windows/background-registry.ts";
+import { resolveWebFetchHost } from "../adapters/windows/dns-resolver.ts";
 import { createLspRegistry } from "../adapters/windows/lsp-registry.ts";
+import { pinnedFetch } from "../adapters/windows/pinned-https-client.ts";
 import { createProcessSupervisor } from "../adapters/windows/process-supervisor.ts";
 import { createWindowsFileReader } from "../adapters/windows/windows-directory-reader.ts";
 import { createWindowsFsAdapter } from "../adapters/windows/windows-fs-adapter.ts";
@@ -31,6 +34,9 @@ import type {
  */
 export const UNAVAILABLE_CODE = "tool_unavailable_in_build";
 
+/** Harness-managed User-Agent; the model never supplies it. */
+const HARNESS_USER_AGENT = "lycwl-agent/0.1";
+
 export type WorkspaceToolsOptions = Readonly<{
   workspaceRoot: string;
   approvals: ApprovalGate;
@@ -48,6 +54,11 @@ export type WorkspaceToolsOptions = Readonly<{
    * alone exposes the tools and does not spawn anything.
    */
   enableLsp?: boolean;
+  /**
+   * Set true to expose WebFetch. WebSearch still refuses because no reviewed fee
+   * snapshot or paid account is configured, and the baseline forbids guessing.
+   */
+  enableWeb?: boolean;
 }>;
 
 export function createReadOnlyWorkspaceTools(options: WorkspaceToolsOptions): ToolExecutor {
@@ -59,6 +70,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
   const enableWrites = options.enableWrites !== false;
   const enableProcesses = options.enableProcesses === true;
   const enableLsp = options.enableLsp === true;
+  const enableWeb = options.enableWeb === true;
   const lspRegistry = createLspRegistry({
     inheritedEnvironment: { ...process.env } as Record<string, string>,
   });
@@ -183,6 +195,49 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
   if (background !== null) delegates.push(background);
   if (enableLsp === true) {
     delegates.push(createLspTools(lspRegistry.dependencies));
+  }
+  if (enableWeb === true) {
+    delegates.push(
+      createWebTools({
+        surchargeRulesReviewed: false,
+        resolveAddresses: async (host) => {
+          const resolved = await resolveWebFetchHost(host);
+          if (!resolved.ok) throw new Error(resolved.code);
+          return resolved.addresses;
+        },
+        runSearch: async () => ({
+          kind: "unknown",
+          safeCode: "search_backend_not_configured",
+        }),
+        runFetch: async (request, approvedAddresses) => {
+          const fetched = await pinnedFetch({
+            url: request.url,
+            host: request.host,
+            scheme: request.scheme,
+            headers: request.headers,
+            approvedAddresses,
+            userAgent: HARNESS_USER_AGENT,
+          });
+          if (!fetched.ok) return { kind: "unknown", safeCode: fetched.code };
+          if (fetched.location !== null) {
+            return {
+              kind: "response",
+              status: fetched.status,
+              location: fetched.location,
+              bodyText: "",
+              rawBytes: fetched.wireBytes,
+            };
+          }
+          return {
+            kind: "response",
+            status: fetched.status,
+            location: null,
+            bodyText: fetched.bodyText,
+            rawBytes: fetched.wireBytes,
+          };
+        },
+      }),
+    );
   }
 
   function resolveDelegate(toolName: string): ToolExecutor | null {
