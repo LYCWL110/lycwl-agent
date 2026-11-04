@@ -1,3 +1,4 @@
+import { tavilySearch, toWebSearchRun } from "../adapters/network/tavily-adapter.ts";
 import { createBackgroundTools } from "../adapters/tools/background-tools.ts";
 import { createLspTools } from "../adapters/tools/lsp-tools.ts";
 import { createMutationTools } from "../adapters/tools/mutation-tools.ts";
@@ -12,6 +13,7 @@ import { resolveWebFetchHost } from "../adapters/windows/dns-resolver.ts";
 import { createLspRegistry } from "../adapters/windows/lsp-registry.ts";
 import { pinnedFetch } from "../adapters/windows/pinned-https-client.ts";
 import { createProcessSupervisor } from "../adapters/windows/process-supervisor.ts";
+import { createSearchLedger, makeReservationId } from "../adapters/windows/search-ledger.ts";
 import { createWindowsFileReader } from "../adapters/windows/windows-directory-reader.ts";
 import { createWindowsFsAdapter } from "../adapters/windows/windows-fs-adapter.ts";
 import { createWindowsMutationAdapter } from "../adapters/windows/windows-mutation-adapter.ts";
@@ -59,6 +61,11 @@ export type WorkspaceToolsOptions = Readonly<{
    * snapshot or paid account is configured, and the baseline forbids guessing.
    */
   enableWeb?: boolean;
+  /** Search ledger directory; defaults to the confirmed LOCALAPPDATA path. */
+  searchLedgerDirectory?: string;
+  /** Identity used for quota accounting; defaults to this process. */
+  sessionId?: string;
+  runId?: string;
 }>;
 
 export function createReadOnlyWorkspaceTools(options: WorkspaceToolsOptions): ToolExecutor {
@@ -71,6 +78,11 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
   const enableProcesses = options.enableProcesses === true;
   const enableLsp = options.enableLsp === true;
   const enableWeb = options.enableWeb === true;
+  const searchLedger = createSearchLedger(
+    options.searchLedgerDirectory === undefined ? {} : { directory: options.searchLedgerDirectory },
+  );
+  const ledgerSessionId = options.sessionId ?? "local-session";
+  const ledgerRunId = options.runId ?? "local-run";
   const lspRegistry = createLspRegistry({
     inheritedEnvironment: { ...process.env } as Record<string, string>,
   });
@@ -205,10 +217,52 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
           if (!resolved.ok) throw new Error(resolved.code);
           return resolved.addresses;
         },
-        runSearch: async () => ({
-          kind: "unknown",
-          safeCode: "search_backend_not_configured",
-        }),
+        runSearch: async (request) => {
+          const apiKey = process.env["TAVILY_API_KEY"] ?? "";
+          if (apiKey.length === 0) {
+            return { kind: "unknown", safeCode: "search_backend_not_configured" };
+          }
+          // C07: a durable reservation must exist before the request is sent.
+          const reservationId = makeReservationId({
+            sessionId: ledgerSessionId,
+            runId: ledgerRunId,
+            toolCallId: request.query,
+            query: request.query,
+          });
+          const recordedAtUtc = new Date().toISOString();
+          const reserved = await searchLedger.reserve({
+            reservationId,
+            utcMonth: recordedAtUtc.slice(0, 7),
+            runId: ledgerRunId,
+            sessionId: ledgerSessionId,
+            recordedAtUtc,
+          });
+          if (!reserved.ok) {
+            return { kind: "unknown", safeCode: `search_${reserved.code}` };
+          }
+
+          const sent = await searchLedger.record({
+            ...reserved.value,
+            kind: "possibly_sent",
+          });
+          if (!sent.ok) {
+            return { kind: "unknown", safeCode: "search_ledger_write_failed" };
+          }
+
+          const result = await tavilySearch({
+            query: request.query,
+            count: request.count,
+            apiKey,
+          });
+
+          await searchLedger.record({
+            ...reserved.value,
+            kind: result.ok ? "reported" : "uncertain",
+            chargeUsd: result.ok ? 0 : null,
+          });
+
+          return toWebSearchRun(result);
+        },
         runFetch: async (request, approvedAddresses) => {
           const fetched = await pinnedFetch({
             url: request.url,

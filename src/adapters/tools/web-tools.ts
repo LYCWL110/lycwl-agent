@@ -68,6 +68,20 @@ export const WEB_FETCH_DEFINITION: ToolDefinition = {
 
 const DEFINITIONS: readonly ToolDefinition[] = [WEB_SEARCH_DEFINITION, WEB_FETCH_DEFINITION];
 
+/**
+ * Search failure codes that prove the request was never sent, so they are
+ * definite failures rather than uncertain charges.
+ */
+const NEVER_SENT_SEARCH_CODES: ReadonlySet<string> = new Set([
+  "search_backend_not_configured",
+  "search_run_limit",
+  "search_monthly_limit",
+  "search_ledger_corrupt",
+  "search_ledger_unreadable",
+  "search_duplicate_reservation",
+  "search_ledger_write_failed",
+]);
+
 export function createWebTools(dependencies: WebToolDependencies): ToolExecutor {
   return {
     getDefinition(toolName: string): ToolDefinition | null {
@@ -131,9 +145,10 @@ async function executeSearch(
     return { status: "outcome_unknown", safeCode: "search_outcome_unknown" };
   }
   if (run.kind === "unknown") {
-    // A backend that was never configured provably sent nothing, so it is a
-    // definite failure rather than an uncertain charge.
-    if (run.safeCode === "search_backend_not_configured") {
+    // Codes that prove nothing was sent are definite failures, not uncertain
+    // charges: a missing backend, an exhausted quota or an unusable ledger all
+    // stopped the request before any network send.
+    if (NEVER_SENT_SEARCH_CODES.has(run.safeCode)) {
       return { status: "failed", safeCode: run.safeCode, text: null };
     }
     return { status: "outcome_unknown", safeCode: run.safeCode };
