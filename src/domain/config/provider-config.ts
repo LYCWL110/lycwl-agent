@@ -10,7 +10,7 @@
  * protocol instead of accepting a value nothing can serve.
  */
 
-export const SUPPORTED_PROTOCOLS = ["anthropic_messages"] as const;
+export const SUPPORTED_PROTOCOLS = ["anthropic_messages", "openai_chat"] as const;
 export type SupportedProtocol = (typeof SUPPORTED_PROTOCOLS)[number];
 
 export const PROVIDER_CONFIG_LIMITS = Object.freeze({
@@ -52,8 +52,15 @@ export type ProviderConfigResult =
   | Readonly<{ ok: false; code: ProviderConfigFailure; field?: string }>;
 
 /** Where the request actually goes, given the protocol. */
+export function protocolEndpoint(baseUrl: string, protocol: SupportedProtocol): string {
+  const base = baseUrl.replace(/\/+$/, "");
+  if (protocol === "openai_chat") return `${base}/v1/chat/completions`;
+  return `${base}/v1/messages`;
+}
+
+/** Kept for the Anthropic call sites that predate the second protocol. */
 export function messagesEndpoint(baseUrl: string): string {
-  return `${baseUrl.replace(/\/+$/, "")}/v1/messages`;
+  return protocolEndpoint(baseUrl, "anthropic_messages");
 }
 
 /**

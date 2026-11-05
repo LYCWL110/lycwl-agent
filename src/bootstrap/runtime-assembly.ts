@@ -2,10 +2,11 @@ import {
   AnthropicProvider,
   type AnthropicToolDefinition,
 } from "../adapters/providers/anthropic-provider.ts";
+import { OpenAiChatProvider } from "../adapters/providers/openai-chat-provider.ts";
 import { createFileVault } from "../adapters/windows/file-credential-vault.ts";
 import {
-  messagesEndpoint,
   type ProviderConfig,
+  protocolEndpoint,
   readProviderConfig,
 } from "../domain/config/provider-config.ts";
 import type { ModelProvider } from "../ports/model-provider.ts";
@@ -97,20 +98,33 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
   }
   warnings.push("credentials are stored unencrypted (ADR-0038)");
 
-  const provider = new AnthropicProvider({
-    // Resolve per call so a rotation applies without rebuilding the Run. A
-    // failure here becomes "not configured", never an empty secret.
-    resolveApiKey: async () => {
-      const read = await vault.read(reference);
-      return read.ok ? read.value : null;
-    },
-    model: config.model,
-    endpoint: messagesEndpoint(config.baseUrl),
-    maxTokens: config.maxOutputTokens,
-    tools: options.toolDefinitions,
-    ...(options.post === undefined ? {} : { post: options.post }),
-    ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
-  });
+  // Resolve per call so a rotation applies without rebuilding the Run. A failure
+  // becomes "not configured", never an empty secret.
+  const resolveApiKey = async () => {
+    const read = await vault.read(reference);
+    return read.ok ? read.value : null;
+  };
+
+  const provider: ModelProvider =
+    config.protocol === "openai_chat"
+      ? new OpenAiChatProvider({
+          resolveApiKey,
+          model: config.model,
+          baseUrl: config.baseUrl,
+          maxTokens: config.maxOutputTokens,
+          tools: options.toolDefinitions,
+          ...(options.post === undefined ? {} : { post: options.post }),
+          ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
+        })
+      : new AnthropicProvider({
+          resolveApiKey,
+          model: config.model,
+          endpoint: protocolEndpoint(config.baseUrl, config.protocol),
+          maxTokens: config.maxOutputTokens,
+          tools: options.toolDefinitions,
+          ...(options.post === undefined ? {} : { post: options.post }),
+          ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
+        });
 
   return { ok: true, provider, config, warnings };
 }
