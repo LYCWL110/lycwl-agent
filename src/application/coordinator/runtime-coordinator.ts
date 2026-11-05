@@ -1,3 +1,5 @@
+import type { RunModelBinding } from "../../domain/model-request/run-binding.ts";
+import { bindAttempt } from "../../domain/model-request/run-binding.ts";
 import { emptyTodoList, replaceTodoList, type TodoList } from "../../domain/planning/todo.ts";
 import {
   type AnswerFailure,
@@ -77,6 +79,18 @@ export type CoordinatorDependencies = Readonly<{
    * instead of rewriting it.
    */
   ownedKeys?: OwnedKeyRegistry;
+  /**
+   * Fixed model route for every Run this coordinator starts (C03). When present it
+   * is recorded once at Run start and the credential revision is bound per
+   * attempt. When absent, no route event is written and no revision is bound.
+   */
+  runBinding?: RunModelBinding;
+  /**
+   * Resolve the current credential revision for the next unsent attempt. A
+   * same-reference rotation applies here; a different reference is refused by
+   * `bindAttempt` before any send.
+   */
+  resolveCredentialRevision?: () => Promise<number | null>;
 }>;
 
 export type QueueInputOutcome =
@@ -195,6 +209,8 @@ type MutableRunContext = {
   checkpointFailure: string | null;
   deliveryBlocked: boolean;
   todoList: TodoList;
+  /** Fixed model route for this Run (C03); null when none was configured. */
+  runBinding: RunModelBinding | null;
 };
 
 export class RuntimeCoordinator {
@@ -463,8 +479,24 @@ export class RuntimeCoordinator {
       checkpointFailure: null,
       deliveryBlocked: false,
       todoList: emptyTodoList(),
+      runBinding: this.#deps.runBinding ?? null,
     };
     await this.#record(context, "run_started", { kind: "run_started", input });
+    const binding = this.#deps.runBinding;
+    if (binding !== undefined) {
+      await this.#record(context, "run_model_binding", {
+        kind: "run_model_binding",
+        providerId: binding.providerId,
+        modelId: binding.modelId,
+        protocolId: binding.protocolId,
+        adapterVersion: binding.adapterVersion,
+        endpointFingerprint: binding.endpointFingerprint,
+        catalogSnapshotId: binding.catalog.snapshotId,
+        capabilitySnapshotId: binding.capabilities.snapshotId,
+        credentialRef: binding.credential.credentialRef,
+        credentialRevision: binding.credential.revision,
+      });
+    }
     this.#activeContext = context;
 
     const result = await this.#loop(context);
@@ -678,12 +710,36 @@ export class RuntimeCoordinator {
       {
         provider: this.#deps.provider,
         sleep: this.#deps.sleep ?? sleep,
-        onRequestStarted: async (requestId, attemptNo) => {
+        ...(this.#deps.resolveCredentialRevision === undefined
+          ? {}
+          : { resolveCredentialRevision: this.#deps.resolveCredentialRevision }),
+        onRequestStarted: async (requestId, attemptNo, credentialRevision) => {
+          // C03: an attempt may only advance the revision of the same credential
+          // reference. A resolver that reports a different reference would mean a
+          // silent identity change inside a Run, which must not be sent.
+          const binding = context.runBinding;
+          if (binding !== null && credentialRevision !== null) {
+            const bound = bindAttempt(binding, {
+              modelRequestId: requestId,
+              attemptNo,
+              credential: {
+                credentialRef: binding.credential.credentialRef,
+                revision: credentialRevision,
+              },
+            });
+            if (!bound.ok) {
+              // Nothing was sent; this is a configuration/identity refusal, not an
+              // unknown outcome and not a retry.
+              return { ok: false as const, safeCode: bound.code };
+            }
+          }
           await this.#record(context, "model_request_started", {
             kind: "model_request_started",
             modelRequestId: requestId,
             attemptNo,
+            ...(credentialRevision === null ? {} : { credentialRevision }),
           });
+          return { ok: true as const };
         },
         onRetryScheduled: async (input) => {
           await this.#record(context, "model_retry_scheduled", {

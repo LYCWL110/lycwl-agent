@@ -19,7 +19,21 @@ export type ModelAttemptOutcome =
 export type ModelAttemptDependencies = Readonly<{
   provider: ModelProvider;
   sleep: (delayMs: number) => Promise<void>;
-  onRequestStarted: (modelRequestId: string, attemptNo: number) => Promise<void>;
+  onRequestStarted: (
+    modelRequestId: string,
+    attemptNo: number,
+    credentialRevision: number | null,
+  ) => Promise<
+    | Readonly<{ ok: true }>
+    /** False stops the request before it is sent; nothing left the process. */
+    | Readonly<{ ok: false; safeCode: string }>
+  >;
+  /**
+   * Resolve the credential revision for a new attempt. Called once per attempt so
+   * a same-provider rotation applies to the next unsent request rather than being
+   * frozen at Run start. Returning null means no credential binding applies.
+   */
+  resolveCredentialRevision?: () => Promise<number | null>;
   onRetryScheduled: (input: {
     modelRequestId: string;
     failedAttemptNo: number;
@@ -40,7 +54,26 @@ export async function completeWithBoundedRetries(
     if (!request.ok) {
       return { kind: "invalid_response", safeCode: request.code };
     }
-    await dependencies.onRequestStarted(modelRequestId, attemptNo);
+    // C03: bind the credential revision at the next not-yet-sent attempt. A
+    // resolver failure must not silently send with an unknown identity, so a
+    // throwing resolver is treated as an invalid response.
+    let credentialRevision: number | null = null;
+    if (dependencies.resolveCredentialRevision !== undefined) {
+      try {
+        credentialRevision = await dependencies.resolveCredentialRevision();
+      } catch {
+        return { kind: "invalid_response", safeCode: "credential_binding_failed" };
+      }
+    }
+    const started = await dependencies.onRequestStarted(
+      modelRequestId,
+      attemptNo,
+      credentialRevision,
+    );
+    if (!started.ok) {
+      // A refused pre-send check is not a transient failure: nothing was sent.
+      return { kind: "invalid_response", safeCode: started.safeCode };
+    }
     const completion = await dependencies.provider.complete({
       modelRequestId,
       attemptNo,

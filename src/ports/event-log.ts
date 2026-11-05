@@ -7,6 +7,19 @@ import type { DigestService, IdentifierFactory } from "./identity.ts";
 export type InternalEventPayload =
   | Readonly<{ kind: "run_started"; input: string }>
   | Readonly<{
+      kind: "run_model_binding";
+      providerId: string;
+      modelId: string;
+      protocolId: string;
+      adapterVersion: string;
+      endpointFingerprint: string;
+      catalogSnapshotId: string;
+      capabilitySnapshotId: string;
+      /** Reference and revision only; never a secret value. */
+      credentialRef: string;
+      credentialRevision: number;
+    }>
+  | Readonly<{
       kind: "run_waiting";
       reason: "configuration" | "approval" | "user_input";
       safeCode: string;
@@ -18,7 +31,13 @@ export type InternalEventPayload =
   | Readonly<{ kind: "run_cancelled"; safeCode: string }>
   | Readonly<{ kind: "run_cancel_requested"; commandId: string }>
   | Readonly<{ kind: "run_resumed" }>
-  | Readonly<{ kind: "model_request_started"; modelRequestId: string; attemptNo: number }>
+  | Readonly<{
+      kind: "model_request_started";
+      modelRequestId: string;
+      attemptNo: number;
+      /** Credential revision actually used for this attempt, if a route is bound. */
+      credentialRevision?: number;
+    }>
   | Readonly<{
       kind: "model_retry_scheduled";
       modelRequestId: string;
