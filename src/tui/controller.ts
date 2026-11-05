@@ -34,6 +34,12 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   let commandCounter = 0;
   let events: readonly InternalEvent[] = [];
   let todo: TodoList = emptyTodoList();
+  /**
+   * The Run promise for the active Run. `coordinator.run` does not resolve while
+   * the Run is suspended, so an approval or question reply must await this rather
+   * than `settle()`, which only covers ResumeRun continuations.
+   */
+  let activeRun: Promise<CoordinatorResult> | null = null;
 
   function applyResult(result: CoordinatorResult): void {
     lastResult = result;
@@ -41,6 +47,19 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     safeCode = result.safeCode;
     events = result.events;
     todo = deriveTodo(todo, result.events);
+  }
+
+  /**
+   * Await the suspended Run after a reply. `settle()` returns null for approval
+   * and question replies because it only resolves ResumeRun continuations, so
+   * relying on it left the view stuck showing the wait after the user acted.
+   */
+  async function settleActiveRun(): Promise<void> {
+    const run = activeRun;
+    if (run === null) return;
+    const result = await run;
+    if (activeRun === run) activeRun = null;
+    applyResult(result);
   }
 
   function view(): TuiViewState {
@@ -65,7 +84,12 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     }
     runStatus = "active";
     safeCode = null;
-    applyResult(await deps.coordinator.run(intent.text));
+    const run = deps.coordinator.run(intent.text);
+    activeRun = run;
+    const result = await run;
+    // Only clear when this is still the active Run: a later Run may have started.
+    if (activeRun === run) activeRun = null;
+    applyResult(result);
   }
 
   async function reply(decision: "approved" | "denied"): Promise<void> {
@@ -79,8 +103,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       requestVersion: pending.requestVersion,
       decision,
     });
-    const settled = await deps.coordinator.settle();
-    if (settled !== null) applyResult(settled);
+    await settleActiveRun();
   }
 
   async function answer(text: string): Promise<void> {
@@ -101,8 +124,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       requestVersion: pending.requestVersion,
       answer: answerPayload,
     });
-    const settled = await deps.coordinator.settle();
-    if (settled !== null) applyResult(settled);
+    await settleActiveRun();
   }
 
   async function declineQuestion(): Promise<void> {
@@ -115,16 +137,14 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       toolCallId: pending.toolCallId,
       requestVersion: pending.requestVersion,
     });
-    const settled = await deps.coordinator.settle();
-    if (settled !== null) applyResult(settled);
+    await settleActiveRun();
   }
 
   async function cancelRun(): Promise<void> {
     if (runStatus !== "active" && runStatus !== "waiting") return;
     commandCounter += 1;
     await deps.coordinator.cancelRun(`tui-cancel-${commandCounter}`);
-    const settled = await deps.coordinator.settle();
-    if (settled !== null) applyResult(settled);
+    await settleActiveRun();
   }
 
   return {
