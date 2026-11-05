@@ -69,9 +69,19 @@ export function createGuidanceLoader(options: Readonly<{ workspaceRoot: string }
       targetPath: string;
       targetIsDirectory: boolean;
     }): Promise<GuidanceLoadResult> {
+      // Tool arguments are usually workspace-relative. Discovery needs an absolute
+      // path, so resolve through the workspace policy first; this also rejects an
+      // escape before any listing happens.
+      const resolvedTarget = resolveWorkspacePath(options.workspaceRoot, input.targetPath);
+      if (!resolvedTarget.ok) return { ok: false, code: "invalid_target_path" };
+      if (!resolvedTarget.value.withinWorkspace) {
+        return { ok: false, code: "target_outside_workspace" };
+      }
+      const absoluteTarget = resolvedTarget.value.absolutePath;
+
       const directories = directoriesOnPath(
         options.workspaceRoot,
-        input.targetPath,
+        absoluteTarget,
         input.targetIsDirectory,
       );
       if (directories === null) return { ok: false, code: "target_outside_workspace" };
@@ -90,7 +100,7 @@ export function createGuidanceLoader(options: Readonly<{ workspaceRoot: string }
 
       const discovered = discoverProjectGuidance({
         workspaceRoot: options.workspaceRoot,
-        targetPath: input.targetPath,
+        targetPath: absoluteTarget,
         targetIsDirectory: input.targetIsDirectory,
         entriesFor: (directory) => listings.get(directory) ?? [],
       });

@@ -1,4 +1,8 @@
-import { createGuidanceLoader, renderGuidanceBlock } from "../adapters/windows/guidance-loader.ts";
+import {
+  createGuidanceLoader,
+  type GuidanceBlock,
+  renderGuidanceBlock,
+} from "../adapters/windows/guidance-loader.ts";
 import type { RuntimeCoordinator } from "../application/coordinator/runtime-coordinator.ts";
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
 import { availableTools } from "../domain/tool-catalog/tool-catalog.ts";
@@ -140,6 +144,30 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
       nowUtc: () => new Date().toISOString(),
       suspendOnApproval: true,
       ...(guidance.block === "" ? {} : { projectContext: guidance.block }),
+      // Scoped refresh: when the Run touches a new path, gap the loader up to that
+      // directory so a subdirectory AGENTS.md is injected too.
+      resolveProjectGuidance: async (touched) => {
+        const loader = createGuidanceLoader({ workspaceRoot: options.workspaceRoot });
+        const seen = new Set<string>();
+        const blocks: GuidanceBlock[] = [];
+        for (const entry of touched) {
+          const loaded = await loader.load({
+            targetPath: entry.path,
+            targetIsDirectory: entry.isDirectory,
+          });
+          if (!loaded.ok) continue;
+          for (const block of loaded.blocks) {
+            if (seen.has(block.path)) continue;
+            seen.add(block.path);
+            blocks.push(block);
+          }
+        }
+        if (blocks.length === 0) return null;
+        return {
+          text: renderGuidanceBlock(blocks),
+          sources: blocks.map((block) => block.path),
+        };
+      },
     }),
     guidance: guidance.summary,
   };

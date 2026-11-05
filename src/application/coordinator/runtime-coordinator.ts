@@ -1,3 +1,8 @@
+import {
+  mergeTouchedPaths,
+  type TouchedPath,
+  touchedPaths,
+} from "../../domain/context/touched-paths.ts";
 import type { RunModelBinding } from "../../domain/model-request/run-binding.ts";
 import { bindAttempt } from "../../domain/model-request/run-binding.ts";
 import { emptyTodoList, replaceTodoList, type TodoList } from "../../domain/planning/todo.ts";
@@ -92,6 +97,17 @@ export type CoordinatorDependencies = Readonly<{
    * configuration. Empty or absent means nothing is injected.
    */
   projectContext?: string;
+  /**
+   * Resolve guidance for paths the Run has touched, before each model request.
+   *
+   * Called at a safe boundary with the accumulated touched paths, so a session that
+   * reads `src/api/handler.ts` can pick up `src/api/AGENTS.md` without restarting.
+   * The result is injected as a sourced untrusted turn, never as a system prompt.
+   * Absent means guidance is fixed at the launch value.
+   */
+  resolveProjectGuidance?: (
+    touched: readonly TouchedPath[],
+  ) => Promise<Readonly<{ text: string; sources: readonly string[] }> | null>;
   /**
    * Fixed model route for every Run this coordinator starts (C03). When present it
    * is recorded once at Run start and the credential revision is bound per
@@ -228,6 +244,12 @@ type MutableRunContext = {
   callHistory: CallRecord[];
   /** True once queued user input was consumed since the last recorded call. */
   newInputSinceLastCall: boolean;
+  /** Paths this Run has touched, for scoped guidance refresh. */
+  touchedPaths: readonly TouchedPath[];
+  /** Guidance sources already injected, so a refresh appends only new ones. */
+  guidanceSources: Set<string>;
+  /** Guidance text currently injected, replaced rather than duplicated. */
+  guidanceText: string | null;
 };
 
 export class RuntimeCoordinator {
@@ -503,6 +525,9 @@ export class RuntimeCoordinator {
       runBinding: this.#deps.runBinding ?? null,
       callHistory: [],
       newInputSinceLastCall: false,
+      touchedPaths: [],
+      guidanceSources: new Set<string>(),
+      guidanceText: projectContext ?? null,
     };
     await this.#record(context, "run_started", { kind: "run_started", input });
     const binding = this.#deps.runBinding;
@@ -581,6 +606,11 @@ export class RuntimeCoordinator {
         const round = addModelRound(context.budget);
         if (!round.ok) return this.#fail(context, round.code);
         context.budget = round.value;
+
+        // Refresh scoped guidance at the request boundary, before any send. A file
+        // touched since the last round may bring a directory's AGENTS.md into scope.
+        await this.#refreshGuidance(context);
+        if (context.cancelRequested) return this.#cancel(context);
 
         const modelRequestId = this.#deps.ids.create();
         context.cancelledDuring = "model_request";
@@ -903,6 +933,45 @@ export class RuntimeCoordinator {
     });
   }
 
+  /**
+   * Replace the injected guidance turn when newly touched paths bring additional
+   * sources into scope.
+   *
+   * The previous guidance turn is replaced in place rather than appended, so the
+   * history does not accumulate a copy per round. A resolver failure keeps the
+   * existing text: guidance is helpful context, and losing it mid-Run would be a
+   * silent behaviour change.
+   */
+  async #refreshGuidance(context: MutableRunContext): Promise<void> {
+    const resolver = this.#deps.resolveProjectGuidance;
+    if (resolver === undefined || context.touchedPaths.length === 0) return;
+
+    let resolved: Readonly<{ text: string; sources: readonly string[] }> | null;
+    try {
+      resolved = await resolver(context.touchedPaths);
+    } catch {
+      return;
+    }
+    if (resolved === null || resolved.text.length === 0) return;
+
+    const hasNewSource = resolved.sources.some((source) => !context.guidanceSources.has(source));
+    if (!hasNewSource) return;
+
+    context.guidanceSources = new Set(resolved.sources);
+    context.guidanceText = resolved.text;
+
+    // Replace the first turn when it is the guidance block; otherwise insert one
+    // before the task so the ordering contract stays "material, then task".
+    const first = context.conversation[0];
+    const isGuidanceTurn =
+      first !== undefined && first.kind === "user" && first.text.includes("[project-guidance]");
+    if (isGuidanceTurn) {
+      context.conversation[0] = { kind: "user", text: resolved.text };
+      return;
+    }
+    context.conversation.unshift({ kind: "user", text: resolved.text });
+  }
+
   async #executeCall(
     context: MutableRunContext,
     call: Parameters<typeof executeToolCall>[1],
@@ -996,6 +1065,10 @@ export class RuntimeCoordinator {
       status: outcome.status,
       failure: null,
     });
+    context.touchedPaths = mergeTouchedPaths(
+      context.touchedPaths,
+      touchedPaths(call.toolName, call.arguments),
+    );
     context.newInputSinceLastCall = false;
     if (context.cancelRequested) {
       return { kind: "stop", result: await this.#cancel(context) };
@@ -1104,6 +1177,10 @@ export class RuntimeCoordinator {
       status: outcome.status,
       failure: null,
     });
+    context.touchedPaths = mergeTouchedPaths(
+      context.touchedPaths,
+      touchedPaths(pending.call.toolName, pending.call.arguments),
+    );
     context.newInputSinceLastCall = false;
     if (context.cancelRequested) {
       return { kind: "stop", result: await this.#cancel(context) };
@@ -1205,6 +1282,10 @@ export class RuntimeCoordinator {
       status: outcome.status,
       failure: null,
     });
+    context.touchedPaths = mergeTouchedPaths(
+      context.touchedPaths,
+      touchedPaths(pending.call.toolName, pending.call.arguments),
+    );
     context.newInputSinceLastCall = false;
     if (context.cancelRequested) {
       return { kind: "stop", result: await this.#cancel(context) };
