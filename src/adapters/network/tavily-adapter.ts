@@ -16,10 +16,15 @@ import { pinnedLookup, resolveWebFetchHost } from "../windows/dns-resolver.ts";
 
 export const TAVILY_ENDPOINT = "https://api.tavily.com/search";
 
+/**
+ * Resolve the search credential at the point of use so a rotation applies to the
+ * next call. Returning null means "not configured": the caller must not send.
+ */
+export type TavilyCredentialResolver = () => Promise<string | null>;
+
 export type TavilySearchRequest = Readonly<{
   query: string;
   count: number;
-  apiKey: string;
   /** Reviewed language/location codes from configuration, not model input. */
   searchDepth?: "basic" | "advanced";
   topic?: "general" | "news";
@@ -50,9 +55,16 @@ const MAX_RESPONSE_BYTES = 1024 * 1024;
 /**
  * Perform one search. A failure that may have reached the vendor is returned as
  * `request_failed`; the caller records an uncertain charge and never retries.
+ *
+ * The key is passed in already resolved by the credential boundary, so the same
+ * value that authorized the quota reservation is the value that is sent. It is
+ * never read from the environment, logged, or placed in an event.
  */
-export async function tavilySearch(request: TavilySearchRequest): Promise<TavilyResult> {
-  if (request.apiKey.length === 0) return { ok: false, code: "not_configured" };
+export async function tavilySearch(
+  request: TavilySearchRequest,
+  apiKey: string,
+): Promise<TavilyResult> {
+  if (apiKey.length === 0) return { ok: false, code: "not_configured" };
 
   const host = new URL(TAVILY_ENDPOINT).hostname;
   const resolved = await resolveWebFetchHost(host);
@@ -88,7 +100,7 @@ export async function tavilySearch(request: TavilySearchRequest): Promise<Tavily
         headers: {
           "content-type": "application/json",
           "content-length": Buffer.byteLength(body),
-          authorization: `Bearer ${request.apiKey}`,
+          authorization: `Bearer ${apiKey}`,
           // Harness-managed; the model never supplies a User-Agent.
           "user-agent": "lycwl-agent/0.1",
         },

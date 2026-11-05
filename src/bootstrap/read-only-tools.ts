@@ -66,6 +66,12 @@ export type WorkspaceToolsOptions = Readonly<{
   /** Identity used for quota accounting; defaults to this process. */
   sessionId?: string;
   runId?: string;
+  /**
+   * Resolve the search API key through the credential boundary. Returning null
+   * means "not configured". A raw environment read is deliberately not offered:
+   * secrets live in Credential Manager behind a purpose-bound reference.
+   */
+  resolveSearchApiKey?: () => Promise<string | null>;
 }>;
 
 export function createReadOnlyWorkspaceTools(options: WorkspaceToolsOptions): ToolExecutor {
@@ -217,16 +223,30 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
           if (!resolved.ok) throw new Error(resolved.code);
           return resolved.addresses;
         },
-        runSearch: async (request) => {
-          const apiKey = process.env["TAVILY_API_KEY"] ?? "";
-          if (apiKey.length === 0) {
+        runSearch: async (request, toolCallId) => {
+          if (options.resolveSearchApiKey === undefined) {
+            // No credential boundary was composed, so there is nothing to
+            // authenticate with. This is a definite non-send, not a charge.
+            return { kind: "unknown", safeCode: "search_backend_not_configured" };
+          }
+          // Resolve the credential BEFORE reserving quota: a missing key means
+          // nothing can be sent, so it must not consume a reservation. The value
+          // is resolved once per call, at the point of use, so a rotation is
+          // honoured by the next call rather than frozen at composition time.
+          let apiKey: string | null;
+          try {
+            apiKey = await options.resolveSearchApiKey();
+          } catch {
+            apiKey = null;
+          }
+          if (apiKey === null || apiKey.length === 0) {
             return { kind: "unknown", safeCode: "search_backend_not_configured" };
           }
           // C07: a durable reservation must exist before the request is sent.
           const reservationId = makeReservationId({
             sessionId: ledgerSessionId,
             runId: ledgerRunId,
-            toolCallId: request.query,
+            toolCallId,
             query: request.query,
           });
           const recordedAtUtc = new Date().toISOString();
@@ -249,11 +269,13 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
             return { kind: "unknown", safeCode: "search_ledger_write_failed" };
           }
 
-          const result = await tavilySearch({
-            query: request.query,
-            count: request.count,
+          const result = await tavilySearch(
+            {
+              query: request.query,
+              count: request.count,
+            },
             apiKey,
-          });
+          );
 
           await searchLedger.record({
             ...reserved.value,

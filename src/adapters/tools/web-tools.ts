@@ -41,8 +41,12 @@ export type WebToolDependencies = Readonly<{
   surchargeRulesReviewed: boolean;
   /** Resolve every A/AAAA candidate before approval is shown. */
   resolveAddresses: (host: string) => Promise<readonly ResolvedAddress[]>;
-  /** Injected search runner; the paid vendor call is not implemented here. */
-  runSearch: (request: WebSearchRequest) => Promise<WebSearchRun>;
+  /**
+   * Injected search runner. `toolCallId` is the real invocation identity, so a
+   * quota reservation is bound to the call rather than to the query text; two
+   * identical queries are still two distinct reservations.
+   */
+  runSearch: (request: WebSearchRequest, toolCallId: string) => Promise<WebSearchRun>;
   /** Injected fetch runner; must not follow redirects automatically. */
   runFetch: (
     request: WebFetchRequest,
@@ -118,7 +122,7 @@ export function createWebTools(dependencies: WebToolDependencies): ToolExecutor 
 
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
       if (request.toolName === WEB_SEARCH_DEFINITION.name) {
-        return executeSearch(dependencies, request.arguments);
+        return executeSearch(dependencies, request.arguments, request.toolCallId);
       }
       if (request.toolName === WEB_FETCH_DEFINITION.name) {
         return executeFetch(dependencies, request.arguments);
@@ -131,6 +135,7 @@ export function createWebTools(dependencies: WebToolDependencies): ToolExecutor 
 async function executeSearch(
   dependencies: WebToolDependencies,
   args: unknown,
+  toolCallId: string,
 ): Promise<ToolExecutionResult> {
   const validated = validateWebSearch(args, {
     surchargeRulesReviewed: dependencies.surchargeRulesReviewed,
@@ -139,7 +144,7 @@ async function executeSearch(
 
   let run: WebSearchRun;
   try {
-    run = await dependencies.runSearch(validated.value);
+    run = await dependencies.runSearch(validated.value, toolCallId);
   } catch {
     // A paid request may already have been sent; keep the charge unknown.
     return { status: "outcome_unknown", safeCode: "search_outcome_unknown" };
