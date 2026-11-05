@@ -173,7 +173,17 @@ export function validateUserAnswer(question: AskUserQuestion, answer: unknown): 
     return { ok: false, code: "invalid_option_count" };
   }
 
-  return { ok: true, text: JSON.stringify({ optionIds }) };
+  // Return both the id and the label. The id alone is opaque to the model: seeing
+  // `["a"]` tells it nothing about what the user chose, so the answer must carry
+  // the text the user actually saw.
+  const selected = optionIds.map((id) => {
+    const option = question.options.find((candidate) => candidate.id === id);
+    return option === undefined ? { id, label: id } : { id, label: option.label };
+  });
+  return {
+    ok: true,
+    text: selected.length === 1 ? (selected[0]?.label ?? "") : JSON.stringify({ selected }),
+  };
 }
 
 function validateFreeText(value: unknown): AnswerValidation {

@@ -6,7 +6,7 @@ import {
 import type { RuntimeCoordinator } from "../application/coordinator/runtime-coordinator.ts";
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.ts";
-import { availableTools } from "../domain/tool-catalog/tool-catalog.ts";
+import { availableTools, COORDINATOR_TOOL_NAMES } from "../domain/tool-catalog/tool-catalog.ts";
 import { createDemoRuntime } from "./demo-runtime.ts";
 import { createWorkspaceTools } from "./read-only-tools.ts";
 import { assembleRuntime, type RuntimeAssemblyFailure } from "./runtime-assembly.ts";
@@ -81,8 +81,11 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
 
   // Advertise only tools this composition actually exposes under the current
   // flags, so the model never sees a schema for something that would fail at call
-  // time with tool_unavailable_in_build.
-  const catalog = availableTools((name) => tools.getDefinition(name) !== null);
+  // time with tool_unavailable_in_build. `ask_user` is answered by the coordinator
+  // rather than a tool executor, so it has no definition and is always available.
+  const catalog = availableTools(
+    (name) => name === COORDINATOR_TOOL_NAMES.ask_user || tools.getDefinition(name) !== null,
+  );
   const toolDefinitions = catalog.map((entry) => ({
     name: entry.name,
     description: entry.description,

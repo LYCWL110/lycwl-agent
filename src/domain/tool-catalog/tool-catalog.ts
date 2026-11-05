@@ -26,6 +26,11 @@ export type CatalogEntry = Readonly<{
   inputSchema: ToolJsonSchema;
 }>;
 
+/** Tools the coordinator answers itself, with no tool executor registered. */
+export const COORDINATOR_TOOL_NAMES = Object.freeze({
+  ask_user: "ask_user",
+} as const);
+
 /** Tools exposed in the current build. Order is stable for deterministic rendering. */
 export const TOOL_CATALOG: readonly CatalogEntry[] = Object.freeze([
   {
@@ -236,6 +241,47 @@ export const TOOL_CATALOG: readonly CatalogEntry[] = Object.freeze([
         },
       },
       required: ["patch"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ask_user",
+    description:
+      "Ask the user one question and wait for the typed answer. This does not approve " +
+      "a tool, does not grant read permission, and is not disclosure consent. Prefer a " +
+      "choice question when the possible answers are known.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "The question to ask." },
+        answerType: {
+          type: "string",
+          enum: ["choice", "text", "confirmation"],
+          description: "How the answer must be provided.",
+        },
+        options: {
+          type: "array",
+          description: "Choices. Required when answerType is choice.",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Identifier returned in the answer." },
+              label: { type: "string", description: "Text shown to the user." },
+            },
+            required: ["id", "label"],
+            additionalProperties: false,
+          },
+        },
+        multiple: {
+          type: "boolean",
+          description: "Allow more than one choice. Defaults to false.",
+        },
+        allowFreeText: {
+          type: "boolean",
+          description: "Allow a typed answer in addition to the choices.",
+        },
+      },
+      required: ["question", "answerType"],
       additionalProperties: false,
     },
   },

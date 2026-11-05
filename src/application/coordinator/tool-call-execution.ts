@@ -123,8 +123,13 @@ export async function executeToolCall(
       toolName: call.toolName,
     });
 
-    const definition = dependencies.tools.getDefinition(call.toolName);
-    if (definition === null) {
+    // `ask_user` is handled by the coordinator itself and has no tool executor, so
+    // it must not be required to register a definition. Checking the definition
+    // first is what previously made the model unable to ask anything: the lookup
+    // returned null and the call failed as `unknown_tool` before this branch ran.
+    const definition =
+      call.toolName === ASK_USER_TOOL ? null : dependencies.tools.getDefinition(call.toolName);
+    if (call.toolName !== ASK_USER_TOOL && definition === null) {
       await dependencies.onEvent("tool_execution_finished", {
         kind: "tool_execution_finished",
         toolCallId,
@@ -187,7 +192,8 @@ export async function executeToolCall(
       };
     }
 
-    if (definition.requiresApproval) {
+    // `ask_user` returned above, so reaching here means the tool has a definition.
+    if (definition?.requiresApproval) {
       const awaiting = transitionToolInvocation(invocation, "awaiting_approval");
       if (!awaiting.ok) return { kind: "invalid", safeCode: awaiting.code };
       invocation = awaiting.value;
