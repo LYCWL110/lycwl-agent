@@ -29,6 +29,12 @@ export type TuiViewState = Readonly<{
   transcript: readonly TranscriptEntry[];
   todo: TodoList | null;
   pendingApproval: PendingApprovalView | null;
+  /**
+   * The exact preview shown to the user for the pending approval. A null preview
+   * means the approval panel cannot honestly describe the operation, so it must
+   * not invite an approval.
+   */
+  pendingApprovalPreview: readonly string[] | null;
   pendingQuestion: PendingQuestionView | null;
   /** Composer text is local draft state, never an accepted command. */
   draft: string;
@@ -45,6 +51,7 @@ export const EMPTY_VIEW: TuiViewState = {
   transcript: [],
   todo: null,
   pendingApproval: null,
+  pendingApprovalPreview: null,
   pendingQuestion: null,
   draft: "",
   canSubmit: true,
@@ -75,11 +82,33 @@ export function deriveView(input: ViewInput): TuiViewState {
     transcript: buildTranscript(input.events),
     todo: input.todo,
     pendingApproval: input.pendingApproval,
+    pendingApprovalPreview: deriveApprovalPreview(input),
     pendingQuestion: input.pendingQuestion,
     draft: input.draft,
     canSubmit: runStatus !== "active" && waitingKind === null,
     queueingInput: runStatus === "active" || waitingKind !== null,
   };
+}
+
+/**
+ * The preview is read from the authoritative `approval_requested` event for the
+ * pending approval, not from local state. The panel must show what the Runtime
+ * actually recorded, so a stale local copy cannot become the thing the user
+ * approves.
+ */
+function deriveApprovalPreview(input: ViewInput): readonly string[] | null {
+  const pending = input.pendingApproval;
+  if (pending === null) return null;
+  for (let index = input.events.length - 1; index >= 0; index -= 1) {
+    const payload = input.events[index]?.payload;
+    if (payload === undefined) continue;
+    if (payload.kind !== "approval_requested") continue;
+    if (payload.approvalId !== pending.approvalId) continue;
+    return payload.safePreview.split("\n");
+  }
+  // No recorded preview: the panel cannot describe the operation, so it offers
+  // no preview rather than inventing one.
+  return null;
 }
 
 function deriveWaitingKind(input: ViewInput): WaitingKind | null {

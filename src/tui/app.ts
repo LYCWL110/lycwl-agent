@@ -150,19 +150,35 @@ function TodoPanel({ view }: Readonly<{ view: TuiViewState }>): ReactElement {
 function ApprovalPanel({ view }: Readonly<{ view: TuiViewState }>): ReactElement {
   const pending = view.pendingApproval;
   if (pending === null) return h(Box, null);
+  const preview = view.pendingApprovalPreview;
   return h(
     Box,
     { flexDirection: "column", marginTop: 1 },
     h(Text, { bold: true, color: "yellow" }, `Approval required: ${pending.toolName}`),
     h(Box, { marginLeft: 2 }, h(Text, { dimColor: true }, `approvalId=${pending.approvalId}`)),
+    ...(preview === null
+      ? [
+          h(
+            Box,
+            { marginLeft: 2, key: "no-preview" },
+            h(Text, { color: "red" }, "preview unavailable: the exact operation is not recorded"),
+          ),
+        ]
+      : preview.map((line, index) =>
+          h(
+            Box,
+            { marginLeft: 2, key: `preview-${index}` },
+            h(Text, null, line.length === 0 ? " " : line),
+          ),
+        )),
     h(
       Box,
-      { marginLeft: 2 },
+      { marginLeft: 2, key: "actions" },
       h(Text, null, 'type "a" then Enter to approve, "d" then Enter to deny'),
     ),
     h(
       Box,
-      { marginLeft: 2 },
+      { marginLeft: 2, key: "hint" },
       h(Text, { dimColor: true }, "closing or ignoring this panel keeps the wait"),
     ),
   );
