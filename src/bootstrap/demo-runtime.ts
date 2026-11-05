@@ -123,7 +123,9 @@ export class DemoCompositeTools implements ToolExecutor {
   constructor(workspaceRoot: string) {
     this.#real = createReadOnlyWorkspaceTools({
       workspaceRoot,
-      approvals: { decide: async () => "approved" },
+      // `read_file` calls this gate for sensitive paths. Denying keeps the read
+      // policy intact; there is no interactive channel wired into this adapter.
+      approvals: { decide: async () => "denied" },
       ids: demoIds,
     });
   }
@@ -188,7 +190,15 @@ export class DemoTools implements ToolExecutor {
       return { status: "succeeded", text: `todo: ${items.length} item(s) planned` };
     }
     if (request.toolName === "write_note") {
-      return { status: "succeeded", text: "write_note: demo write accepted (no file touched)" };
+      // The demo runtime has no filesystem adapter, so this tool cannot write.
+      // Reporting success here would break the approve -> execute -> verify chain:
+      // the user would approve a write, be told it succeeded, and find the file
+      // untouched. A definite failure keeps that chain honest.
+      return {
+        status: "failed",
+        safeCode: "demo_tool_does_not_write",
+        text: null,
+      };
     }
     return { status: "failed", safeCode: "unknown_tool", text: null };
   }
@@ -207,7 +217,12 @@ export function createDemoRuntime(workspaceRoot: string): DemoRuntime {
   const coordinator = new RuntimeCoordinator({
     provider,
     tools: new DemoCompositeTools(workspaceRoot),
-    approvals: { decide: async () => "approved" },
+    // This gate answers inline requests that do not go through the coordinator's
+    // suspend path. `read_file` uses it for sensitive paths (`.env`, `.git`, paths
+    // outside the workspace). Approving that silently would defeat the read policy,
+    // and there is no interactive channel wired to this gate here, so it denies.
+    // Approvals for tools that require one still suspend and reach the TUI.
+    approvals: { decide: async () => "denied" },
     eventLog,
     ids: demoIds,
     nowUtc: () => new Date().toISOString(),
