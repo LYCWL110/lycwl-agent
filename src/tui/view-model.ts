@@ -122,7 +122,8 @@ function deriveWaitingKind(input: ViewInput): WaitingKind | null {
       if (payload.reason === "user_input") return "question";
       if (payload.reason === "configuration") return "configuration";
       return "other";
-    }    if (
+    }
+    if (
       payload.kind === "run_completed" ||
       payload.kind === "run_failed" ||
       payload.kind === "run_cancelled" ||
