@@ -77,7 +77,10 @@ export async function completeWithBoundedRetries(
     const completion = await dependencies.provider.complete({
       modelRequestId,
       attemptNo,
-      conversation,
+      // Snapshot the conversation: the Run keeps appending to its own array, and a
+      // provider that held the live reference would observe later turns inside a
+      // request it already sent. A retry must also see exactly what was sent.
+      conversation: [...conversation],
     });
 
     if (completion.kind === "completed") {

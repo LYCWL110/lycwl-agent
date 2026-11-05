@@ -14,8 +14,27 @@ export type ProviderCompletion =
   | Readonly<{ kind: "authentication_failure"; safeCode: string }>
   | Readonly<{ kind: "invalid_response"; safeCode: string }>;
 
+/**
+ * Provider-neutral conversation item (V1_BEHAVIOR_CONTRAINTS section 8).
+ *
+ * The authoritative history records neutral user input, assistant-visible output,
+ * normalized tool calls and results, and execution facts. Adapter-private data
+ * (reasoning text, signatures, opaque items) never appears here: it lives in a
+ * separately bound private block, because it is only valid for the routing that
+ * produced it.
+ */
 export type ProviderConversationItem =
   | Readonly<{ kind: "user"; text: string }>
+  | Readonly<{
+      kind: "assistant";
+      text: string | null;
+      /**
+       * Tool calls the assistant requested. Present because a protocol history
+       * that omitted them would be invalid: the following tool_result items must
+       * answer calls the assistant actually made.
+       */
+      toolCalls: readonly ProviderToolCall[];
+    }>
   | Readonly<{
       kind: "tool_result";
       providerToolCallId: string;

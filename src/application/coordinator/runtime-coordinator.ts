@@ -618,6 +618,36 @@ export class RuntimeCoordinator {
           text: guardedCompletionText,
         });
 
+        // Section 8: the assistant turn belongs in the history. Without it the
+        // following tool results answer calls the model never made, which is an
+        // invalid protocol history and, with a strict adapter, a rejected request.
+        context.conversation.push({
+          kind: "assistant",
+          text: guardedCompletionText,
+          toolCalls: completion.toolCalls.map((call) => ({
+            providerToolCallId: call.providerToolCallId,
+            toolName: call.toolName,
+            arguments: call.arguments,
+          })),
+        });
+
+        // A pending queued input supersedes every undispatched call in this
+        // response. The cancelled results must close the tool-call pairs *before*
+        // the new user message is appended, otherwise the history would answer a
+        // call after a new turn and become an illegal protocol sequence.
+        const hasPendingInput = context.inputQueue.items.length > 0;
+        if (hasPendingInput && completion.toolCalls.length > 0) {
+          for (const call of completion.toolCalls) {
+            context.conversation.push({
+              kind: "tool_result",
+              providerToolCallId: call.providerToolCallId,
+              toolName: call.toolName,
+              status: "cancelled",
+              text: null,
+            });
+          }
+        }
+
         const superseded = await this.#consumeQueuedInput(context);
         if (context.cancelRequested) return this.#cancel(context);
         if (superseded) {
