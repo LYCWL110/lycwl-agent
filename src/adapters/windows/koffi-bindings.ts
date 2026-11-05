@@ -12,6 +12,7 @@ const kernel32 = koffi.load("kernel32.dll");
 
 export const CREATE_SUSPENDED = 0x0000_0004;
 export const CREATE_NO_WINDOW = 0x0800_0000;
+export const CREATE_UNICODE_ENVIRONMENT = 0x0000_0400;
 export const STARTF_USESTDHANDLES = 0x0000_0100;
 
 export const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x0000_2000;
@@ -79,4 +80,39 @@ export function buildStartupInfo(useStandardHandles: boolean): Buffer {
 /** UTF-16LE, NUL-terminated command line buffer. */
 export function commandLineBuffer(command: string): Buffer {
   return Buffer.from(`${command}\0`, "utf16le");
+}
+
+/**
+ * Build a Windows environment block from an explicit name/value map.
+ *
+ * Format: NUL-terminated UTF-16LE `NAME=VALUE` strings, sorted by name, then one
+ * extra NUL to terminate the block.
+ *
+ * Why this exists: passing `null` as `lpEnvironment` makes the child inherit the
+ * entire parent environment, which silently defeated the confirmed C09 filter.
+ * The filter result is now the *only* environment the child sees.
+ *
+ * Known limitation: Node's `process.env` does not expose the hidden per-drive
+ * current-directory variables (`=C:=C:\...`). A child launched from an explicit
+ * block therefore has no per-drive current directory until it changes one. This
+ * affects relative path resolution on drives other than the working directory's;
+ * it does not affect the working directory passed to CreateProcessW itself.
+ */
+export function buildEnvironmentBlock(environment: Readonly<Record<string, string>>): Buffer {
+  // Windows requires case-insensitive alphabetical order by name.
+  const names = Object.keys(environment).sort((left, right) => {
+    const a = left.toUpperCase();
+    const b = right.toUpperCase();
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+  let block = "";
+  for (const name of names) {
+    block += `${name}=${environment[name] ?? ""}\0`;
+  }
+  // An empty environment still needs the terminating NUL, otherwise
+  // CreateProcessW would read past the buffer.
+  block += "\0";
+  return Buffer.from(block, "utf16le");
 }

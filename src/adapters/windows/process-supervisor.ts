@@ -6,11 +6,13 @@ import path from "node:path";
 
 import {
   AssignProcessToJobObject,
+  buildEnvironmentBlock,
   buildKillOnCloseLimits,
   buildStartupInfo,
   CloseHandle,
   CREATE_NO_WINDOW,
   CREATE_SUSPENDED,
+  CREATE_UNICODE_ENVIRONMENT,
   CreateJobObjectW,
   CreateProcessW,
   commandLineBuffer,
@@ -55,6 +57,12 @@ export type SpawnRequest = Readonly<{
   command: string;
   cwd: string;
   timeoutMs: number;
+  /**
+   * The already-filtered environment. This becomes the child's entire
+   * environment, so a filtered credential cannot be inherited back in from the
+   * parent. Required: there is no inherit-everything default.
+   */
+  environment: Readonly<Record<string, string>>;
 }>;
 
 export type SpawnOutcome =
@@ -104,7 +112,12 @@ export function createProcessSupervisor() {
    * capture files and eventually calls `stop`.
    */
   function start(
-    request: Readonly<{ command: string; cwd: string; executionId: string }>,
+    request: Readonly<{
+      command: string;
+      cwd: string;
+      executionId: string;
+      environment: Readonly<Record<string, string>>;
+    }>,
   ): StartHandle {
     const job = CreateJobObjectW(null, null);
     if (job === null) return { ok: false, code: "job_create_failed" };
@@ -125,6 +138,7 @@ export function createProcessSupervisor() {
     const startupInfo = buildStartupInfo(false);
     const processInfo = Buffer.alloc(24);
     const commandLine = commandLineBuffer(fullCommand);
+    const environmentBlock = buildEnvironmentBlock(request.environment);
 
     const created = CreateProcessW(
       null,
@@ -132,8 +146,8 @@ export function createProcessSupervisor() {
       null,
       null,
       false,
-      CREATE_SUSPENDED | CREATE_NO_WINDOW,
-      null,
+      CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+      environmentBlock,
       request.cwd,
       startupInfo,
       processInfo,
@@ -233,6 +247,7 @@ export function createProcessSupervisor() {
     const startupInfo = buildStartupInfo(false);
     const processInfo = Buffer.alloc(24);
     const commandLine = commandLineBuffer(fullCommand);
+    const environmentBlock = buildEnvironmentBlock(request.environment);
 
     const created = CreateProcessW(
       null,
@@ -240,8 +255,8 @@ export function createProcessSupervisor() {
       null,
       null,
       false,
-      CREATE_SUSPENDED | CREATE_NO_WINDOW,
-      null,
+      CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+      environmentBlock,
       request.cwd,
       startupInfo,
       processInfo,

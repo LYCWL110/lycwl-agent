@@ -174,12 +174,13 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     ? createShellTool({
         sessionMode: enableWrites ? "workspace_write" : "read_only",
         inheritedEnvironment: { ...process.env } as Record<string, string>,
-        runShell: async (request) => {
+        runShell: async (request, environment) => {
           const supervisor = createProcessSupervisor();
           const outcome = await supervisor.runToCompletion({
             command: request.command,
             cwd: request.cwd,
             timeoutMs: request.timeoutMs,
+            environment,
           });
           if (outcome.kind === "failed") {
             return { kind: "unknown", safeCode: outcome.code };

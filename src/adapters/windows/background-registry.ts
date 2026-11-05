@@ -142,13 +142,14 @@ export function createBackgroundRegistry(
       ? {}
       : { providerCredentialNames: options.providerCredentialNames }),
 
-    async startProcess(request: ShellRequest, _environment, label) {
+    async startProcess(request: ShellRequest, environment, label) {
       const taskId = nextId("task");
       const executionId = nextId("exec");
       const start = supervisor.start({
         command: request.command,
         cwd: request.cwd,
         executionId,
+        environment,
       });
       if (!start.ok) return { kind: "unknown", safeCode: start.code };
 
