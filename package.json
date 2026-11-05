@@ -20,7 +20,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome format --write .",
-    "verify": "pnpm run lint && pnpm run typecheck && pnpm run test:architecture && pnpm run test && pnpm run test:tui"
+    "check:tests-present": "node tools/require-tests.mjs",
+    "verify": "pnpm run lint && pnpm run typecheck && pnpm run check:tests-present && pnpm run test:architecture && pnpm run test && pnpm run test:tui"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.4",
