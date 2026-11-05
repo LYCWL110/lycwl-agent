@@ -3,7 +3,7 @@
  *
  * This is the model behind the TUI setup screen: which provider, protocol,
  * endpoint, model and credential reference a Run will use. It decides nothing
- * about network access or credentials — it validates a draft and produces the
+ * about network access or credentials 閳?it validates a draft and produces the
  * values the composition root needs.
  *
  * Deliberately narrow: one protocol is implemented, so the model rejects any other
@@ -28,6 +28,12 @@ export type ProviderConfig = Readonly<{
   /** Vault reference, never the key itself. */
   credentialRef: string;
   maxOutputTokens: number;
+  /**
+   * Verified context window, or null when the user did not supply one. A null
+   * window disables budgeting and compaction rather than substituting a guess:
+   * C04 says an unknown window is model_context_unknown.
+   */
+  contextWindow: number | null;
 }>;
 
 export type ProviderConfigFailure =
@@ -38,6 +44,7 @@ export type ProviderConfigFailure =
   | "invalid_model"
   | "invalid_credential_ref"
   | "invalid_output_tokens"
+  | "invalid_context_window"
   | "missing_field";
 
 export type ProviderConfigResult =
@@ -62,6 +69,7 @@ export function validateProviderConfig(input: {
   model: unknown;
   credentialRef: unknown;
   maxOutputTokens?: unknown;
+  contextWindow?: unknown;
 }): ProviderConfigResult {
   if (typeof input.protocol !== "string" || input.protocol.length === 0) {
     return { ok: false, code: "invalid_protocol", field: "protocol" };
@@ -112,6 +120,23 @@ export function validateProviderConfig(input: {
     return { ok: false, code: "invalid_credential_ref", field: "credentialRef" };
   }
 
+  // A context window is optional. When absent, budgeting and compaction are
+  // skipped entirely: C04 says an unknown window is `model_context_unknown`, and
+  // guessing one would produce a budget the model does not actually have.
+  const rawWindow = input.contextWindow;
+  let contextWindow: number | null = null;
+  if (rawWindow !== undefined) {
+    if (
+      typeof rawWindow !== "number" ||
+      !Number.isSafeInteger(rawWindow) ||
+      rawWindow < 8_192 ||
+      rawWindow > 4_000_000
+    ) {
+      return { ok: false, code: "invalid_context_window", field: "contextWindow" };
+    }
+    contextWindow = rawWindow;
+  }
+
   const rawTokens = input.maxOutputTokens;
   const maxOutputTokens =
     rawTokens === undefined ? PROVIDER_CONFIG_LIMITS.defaultMaxOutputTokens : rawTokens;
@@ -132,6 +157,7 @@ export function validateProviderConfig(input: {
       model: input.model.trim(),
       credentialRef: input.credentialRef,
       maxOutputTokens,
+      contextWindow,
     },
   };
 }

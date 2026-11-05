@@ -5,6 +5,7 @@ import {
 } from "../adapters/windows/guidance-loader.ts";
 import type { RuntimeCoordinator } from "../application/coordinator/runtime-coordinator.ts";
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
+import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.ts";
 import { availableTools } from "../domain/tool-catalog/tool-catalog.ts";
 import { createDemoRuntime } from "./demo-runtime.ts";
 import { createWorkspaceTools } from "./read-only-tools.ts";
@@ -113,6 +114,22 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   const { RuntimeCoordinator } = await import("../application/coordinator/runtime-coordinator.ts");
   const { InMemoryEventLog } = await import("../application/coordinator/event-log.ts");
 
+  // Compute the C04 budget only from a verified window. A capacity failure leaves
+  // budgeting off rather than substituting a guess.
+  const computed = computeContextBudget({
+    window: assembly.config.contextWindow,
+    modelMaxOutput: assembly.config.maxOutputTokens,
+    userMaxOutput: assembly.config.maxOutputTokens,
+    // The fixed part is the guidance block plus the tool schemas; both are sent
+    // every request and are not reducible by summarisation.
+    fixed: conservativeEstimate(estimateFixedTokens(guidance.block, toolDefinitions)),
+  });
+  const contextBudget = computed.ok ? computed.value : null;
+  const budgetWarning =
+    computed.ok || computed.code === "model_context_unknown"
+      ? null
+      : `context budgeting disabled (${computed.code})`;
+
   const ids = { create: () => crypto.randomUUID() };
   const digests = {
     async sha256Canonical(value: unknown): Promise<string> {
@@ -126,7 +143,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     kind: "real",
     config: assembly.config,
     enableWrites,
-    warnings: assembly.warnings,
+    warnings: budgetWarning === null ? assembly.warnings : [...assembly.warnings, budgetWarning],
     coordinator: new RuntimeCoordinator({
       provider: assembly.provider,
       tools: createWorkspaceTools({
@@ -144,6 +161,10 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
       nowUtc: () => new Date().toISOString(),
       suspendOnApproval: true,
       ...(guidance.block === "" ? {} : { projectContext: guidance.block }),
+      // Budgeting applies only when a verified window was configured. Without one,
+      // no compaction runs and an oversized prompt fails at the provider instead of
+      // being silently truncated.
+      ...(contextBudget === null ? {} : { contextBudget }),
       // Scoped refresh: when the Run touches a new path, gap the loader up to that
       // directory so a subdirectory AGENTS.md is injected too.
       resolveProjectGuidance: async (touched) => {
@@ -236,4 +257,14 @@ async function loadGuidance(
       bytes: loaded.totalBytes,
     },
   };
+}
+
+/** Estimated tokens of the parts sent on every request and never summarised. */
+function estimateFixedTokens(
+  guidanceBlock: string,
+  tools: readonly Readonly<{ description: string }>[],
+): number {
+  let total = Math.ceil(guidanceBlock.length / 4);
+  for (const tool of tools) total += Math.ceil(tool.description.length / 4) + 50;
+  return total;
 }

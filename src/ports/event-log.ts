@@ -32,6 +32,25 @@ export type InternalEventPayload =
   | Readonly<{ kind: "run_cancel_requested"; commandId: string }>
   | Readonly<{ kind: "run_resumed" }>
   | Readonly<{
+      kind: "context_compacted";
+      /** Hash of the artifact that replaced the summarised groups. */
+      artifactSha256: string;
+      /** Groups replaced by this artifact. */
+      summarizedGroupIds: readonly string[];
+      /** Groups kept verbatim after the summary. */
+      recentSuffixGroupIds: readonly string[];
+      /** Highest authoritative seq this compaction covered. */
+      sourceHighWaterSeq: number;
+      estimatedAuxiliaryTokens: number;
+      /** Version of the summary artifact shape. */
+      artifactVersion: number;
+    }>
+  | Readonly<{
+      kind: "context_compaction_rejected";
+      reason: "capacity_insufficient" | "invalid_artifact" | "attempts_exhausted";
+      detail: string;
+    }>
+  | Readonly<{
       kind: "no_progress_detected";
       decision: "warn" | "block";
       detail: string;

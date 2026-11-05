@@ -1,3 +1,9 @@
+import type { CompactionArtifact } from "../../domain/context/compaction.ts";
+import {
+  type ContextBudget,
+  conservativeEstimate,
+  decideRequestFit,
+} from "../../domain/context/context-budget.ts";
 import {
   mergeTouchedPaths,
   type TouchedPath,
@@ -25,7 +31,7 @@ import {
   checkIdenticalCall,
   type ProgressDecision,
 } from "../../domain/run/no-progress.ts";
-import { addModelRound, createRunBudget } from "../../domain/run/run-budget.ts";
+import { addCompaction, addModelRound, createRunBudget } from "../../domain/run/run-budget.ts";
 import { finishRun, type Run, resumeRun, startRun, waitRun } from "../../domain/run/run-state.ts";
 import type { OwnedKeyRegistry } from "../../domain/security/owned-key-guard.ts";
 import type { ApprovalGate } from "../../ports/approval-gate.ts";
@@ -37,6 +43,12 @@ import type {
 } from "../../ports/model-provider.ts";
 import type { ToolExecutionRequest, ToolExecutor } from "../../ports/tool-executor.ts";
 import { guardText, guardToolResultText } from "../../services/security/guarded-delivery.ts";
+import {
+  estimateArtifactTokens,
+  parseCompactionArtifact,
+  prepareCompaction,
+  validateArtifact,
+} from "./compaction-service.ts";
 import type { EventInput, EventLog } from "./event-log.ts";
 import type { InternalEvent } from "./internal-events.ts";
 import { completeWithBoundedRetries } from "./model-attempts.ts";
@@ -108,6 +120,12 @@ export type CoordinatorDependencies = Readonly<{
   resolveProjectGuidance?: (
     touched: readonly TouchedPath[],
   ) => Promise<Readonly<{ text: string; sources: readonly string[] }> | null>;
+  /**
+   * Context budget for this Run. When present, the coordinator estimates the prompt
+   * before each request and compacts when it exceeds the trigger. When absent, no
+   * budgeting or compaction happens.
+   */
+  contextBudget?: ContextBudget;
   /**
    * Fixed model route for every Run this coordinator starts (C03). When present it
    * is recorded once at Run start and the credential revision is bound per
@@ -612,6 +630,11 @@ export class RuntimeCoordinator {
         await this.#refreshGuidance(context);
         if (context.cancelRequested) return this.#cancel(context);
 
+        // Budget and compaction happen at the same boundary: both must precede the
+        // request, and a compaction that fails must leave the old context usable.
+        const compaction = await this.#maybeCompact(context);
+        if (compaction.kind === "stop") return compaction.result;
+
         const modelRequestId = this.#deps.ids.create();
         context.cancelledDuring = "model_request";
         const completion = await this.#completeWithRetries(context, modelRequestId);
@@ -781,6 +804,8 @@ export class RuntimeCoordinator {
   async #completeWithRetries(
     context: MutableRunContext,
     modelRequestId: string,
+    /** Overrides the conversation; used by the auxiliary compaction request. */
+    overrideConversation?: readonly ProviderConversationItem[],
   ): Promise<
     | Readonly<{
         kind: "completed";
@@ -835,7 +860,7 @@ export class RuntimeCoordinator {
         },
       },
       modelRequestId,
-      context.conversation,
+      overrideConversation ?? context.conversation,
     );
 
     if (outcome.kind === "completed") return outcome;
@@ -970,6 +995,146 @@ export class RuntimeCoordinator {
       return;
     }
     context.conversation.unshift({ kind: "user", text: resolved.text });
+  }
+
+  /**
+   * Estimate the prompt and compact when it exceeds the trigger.
+   *
+   * Rules this respects:
+   * - above the trigger but within P, an irreducible context is still sent;
+   * - above P, nothing is sent;
+   * - at most one regeneration per compaction, then fail;
+   * - a failed compaction keeps the old context and does not fail the Run by itself.
+   */
+  async #maybeCompact(
+    context: MutableRunContext,
+  ): Promise<
+    Readonly<{ kind: "continue" }> | Readonly<{ kind: "stop"; result: CoordinatorResult }>
+  > {
+    const budget = this.#deps.contextBudget;
+    if (budget === undefined) return { kind: "continue" };
+
+    const estimate = conservativeEstimate(estimateConversationTokens(context.conversation));
+    const fit = decideRequestFit({
+      budget,
+      promptSize: estimate,
+      historyIsReducible: context.conversation.length > 2,
+    });
+
+    if (fit.outcome === "send") return { kind: "continue" };
+    if (fit.outcome === "cannot_send") {
+      // Over P: refuse rather than send something oversized.
+      return { kind: "stop", result: await this.#fail(context, "context_capacity_insufficient") };
+    }
+
+    // compact_first: at most two auxiliary attempts, matching C05.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const prepared = prepareCompaction({
+        conversation: context.conversation,
+        fixedTokens: budget.fixed,
+        auxiliaryBudgetTokens: budget.promptBudget - budget.output,
+        recentBudget: budget.recentBudget,
+        compactionsUsed: context.budget.compactions,
+      });
+      if (!prepared.ok) {
+        await this.#record(context, "context_compaction_rejected", {
+          kind: "context_compaction_rejected",
+          reason:
+            prepared.reason === "capacity_insufficient"
+              ? "capacity_insufficient"
+              : "invalid_artifact",
+          detail: prepared.detail,
+        });
+        // Capacity failure is terminal for this request: sending the uncompacted
+        // prompt would exceed the budget it just failed to fit.
+        if (prepared.reason === "capacity_insufficient") {
+          return {
+            kind: "stop",
+            result: await this.#fail(context, "context_capacity_insufficient"),
+          };
+        }
+        return { kind: "continue" };
+      }
+
+      const planned = prepared.value.plan;
+      const auxiliary = await this.#completeWithRetries(context, this.#deps.ids.create(), [
+        { kind: "user", text: prepared.value.prompt },
+      ]);
+      if (auxiliary.kind !== "completed") {
+        await this.#record(context, "context_compaction_rejected", {
+          kind: "context_compaction_rejected",
+          reason: "invalid_artifact",
+          detail: "auxiliary request failed",
+        });
+        continue;
+      }
+
+      const parsed = parseCompactionArtifact(auxiliary.text);
+      if (!parsed.ok) {
+        await this.#record(context, "context_compaction_rejected", {
+          kind: "context_compaction_rejected",
+          reason: "invalid_artifact",
+          detail: parsed.detail,
+        });
+        continue;
+      }
+      // The artifact must declare the groups it covered, or a caller cannot tell
+      // what it replaced.
+      const withSources: typeof parsed.artifact = {
+        ...parsed.artifact,
+        sourceMessageIds:
+          parsed.artifact.sourceMessageIds.length === 0
+            ? planned.summarizedGroupIds
+            : parsed.artifact.sourceMessageIds,
+      };
+
+      const validated = validateArtifact({
+        artifact: withSources,
+        plan: planned,
+        outputBudgetTokens: budget.summaryBudget,
+        estimatedOutputTokens: estimateArtifactTokens(withSources),
+        requiredSourceIds: planned.summarizedGroupIds,
+        requiredConstraintIds: [],
+      });
+      if (!validated.ok) {
+        await this.#record(context, "context_compaction_rejected", {
+          kind: "context_compaction_rejected",
+          reason: "invalid_artifact",
+          detail: validated.detail,
+        });
+        continue;
+      }
+
+      // Publish: replace the summarised prefix with the artifact as a sourced turn.
+      const recent = context.conversation.slice(-planned.recentSuffixGroupIds.length);
+      const artifactText = renderArtifact(validated.artifact);
+      context.conversation = [
+        { kind: "user", text: artifactText },
+        ...(recent.length === 0 ? [] : recent),
+      ];
+      const round = addCompaction(context.budget);
+      if (round.ok) context.budget = round.value;
+
+      await this.#record(context, "context_compacted", {
+        kind: "context_compacted",
+        artifactSha256: hashText(JSON.stringify(validated.artifact)),
+        summarizedGroupIds: planned.summarizedGroupIds,
+        recentSuffixGroupIds: planned.recentSuffixGroupIds,
+        sourceHighWaterSeq: planned.sourceHighWaterSeq,
+        estimatedAuxiliaryTokens: planned.estimatedAuxiliaryTokens,
+        artifactVersion: validated.artifact.schemaVersion,
+      });
+      return { kind: "continue" };
+    }
+
+    await this.#record(context, "context_compaction_rejected", {
+      kind: "context_compaction_rejected",
+      reason: "attempts_exhausted",
+      detail: "two auxiliary attempts failed validation",
+    });
+    // Old context is retained; the request is attempted as-is so the Run is not
+    // failed solely because summarisation did not work.
+    return { kind: "continue" };
   }
 
   async #executeCall(
@@ -1418,4 +1583,59 @@ function stableStringify(value: unknown): string {
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record).sort();
   return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
+}
+
+/** Rough conversation size, matching the per-message estimator used elsewhere. */
+function estimateConversationTokens(conversation: readonly ProviderConversationItem[]): number {
+  let total = 0;
+  for (const item of conversation) {
+    if (item.kind === "user") {
+      total += Math.ceil(item.text.length / 4);
+      continue;
+    }
+    if (item.kind === "assistant") {
+      total += Math.ceil((item.text ?? "").length / 4);
+      for (const call of item.toolCalls) {
+        total += Math.ceil(JSON.stringify(call.arguments ?? {}).length / 4);
+      }
+      continue;
+    }
+    total += Math.ceil((item.text ?? "").length / 4);
+  }
+  return total;
+}
+
+/**
+ * Render the artifact as the replacement turn.
+ *
+ * The text is labelled as a summary so the model can distinguish it from the
+ * original messages, and evidence-free claims are marked unverified rather than
+ * presented as established facts.
+ */
+function renderArtifact(artifact: CompactionArtifact): string {
+  const lines = [
+    "[context-summary]",
+    "note=this replaces earlier turns; claims without evidence are unverified",
+    `coverage=${artifact.coverage.fromSeq}..${artifact.coverage.toSeq}`,
+    `goal=${artifact.goal}`,
+  ];
+  for (const claim of artifact.completedClaims) {
+    const verified = claim.evidenceRefs.length > 0 ? "verified" : "unverified";
+    lines.push(`- claim(${verified}): ${claim.text}`);
+  }
+  for (const reason of artifact.blockedReasons) lines.push(`- blocked: ${reason}`);
+  for (const action of artifact.nextActions) lines.push(`- next: ${action}`);
+  for (const file of artifact.fileReferences) lines.push(`- file: ${file}`);
+  return lines.join("\n");
+}
+
+function hashText(text: string): string {
+  // Deterministic, non-cryptographic digest for event correlation only. The
+  // authoritative integrity check is the event hash chain, not this value.
+  let hash = 2_166_136_261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0").repeat(8).slice(0, 64);
 }
