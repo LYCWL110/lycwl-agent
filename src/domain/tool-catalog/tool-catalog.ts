@@ -174,6 +174,71 @@ export const TOOL_CATALOG: readonly CatalogEntry[] = Object.freeze([
       additionalProperties: false,
     },
   },
+  {
+    name: "create_file",
+    description:
+      "Create a new file. Fails if the target already exists; use edit_file or " +
+      "apply_patch to change an existing file. Requires user approval.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Workspace-relative path of the file to create.",
+        },
+        content: { type: "string", description: "Full file content." },
+        encoding: {
+          type: "string",
+          description: "Text encoding. Omit for utf8.",
+        },
+        lineEnding: {
+          type: "string",
+          enum: ["lf", "crlf"],
+          description: "Line ending for new content. Omit for LF.",
+        },
+      },
+      required: ["path", "content"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "edit_file",
+    description:
+      "Replace one unique occurrence of oldText with newText in an existing file. " +
+      "Fails when the match is absent or ambiguous, and when the file changed since " +
+      "it was read. Requires user approval.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Workspace-relative path of the file." },
+        oldText: {
+          type: "string",
+          description: "Exact text to replace. Must occur exactly once.",
+        },
+        newText: { type: "string", description: "Replacement text." },
+      },
+      required: ["path", "oldText", "newText"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "apply_patch",
+    description:
+      "Apply a unified diff across one or more files. Targets are preflighted, then " +
+      "written serially; the first failure or unknown result stops the remaining " +
+      "targets, so a partial application is reported per file. Requires user approval.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        patch: {
+          type: "string",
+          description: "Unified diff text with ---/+++ headers and @@ hunks.",
+        },
+      },
+      required: ["patch"],
+      additionalProperties: false,
+    },
+  },
 ]);
 
 /**

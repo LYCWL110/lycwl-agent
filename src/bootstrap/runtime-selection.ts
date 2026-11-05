@@ -22,6 +22,8 @@ export type RuntimeSelection =
       kind: "real";
       coordinator: RuntimeCoordinator;
       config: ProviderConfig;
+      /** Whether filesystem mutation tools are exposed for this session. */
+      enableWrites: boolean;
       warnings: readonly string[];
     }>
   | Readonly<{
@@ -37,6 +39,12 @@ export type SelectRuntimeOptions = Readonly<{
   settings: unknown;
   /** True when a settings document exists at all. */
   hasSettings: boolean;
+  /**
+   * Enable filesystem mutation tools. Off by default so a session cannot write
+   * unless the caller explicitly opts in; every write still requires one-shot
+   * approval through the coordinator's suspend path.
+   */
+  enableWrites?: boolean;
   post?: Parameters<typeof assembleRuntime>[0]["post"];
   trustedCaPem?: string;
 }>;
@@ -50,11 +58,16 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     };
   }
 
+  const enableWrites = options.enableWrites === true;
   const tools = createWorkspaceTools({
     workspaceRoot: options.workspaceRoot,
+    // This gate answers inline requests that do not go through the suspend path,
+    // such as a sensitive read_file. There is no interactive channel attached to
+    // it, so it denies. Mutating tools require approval and therefore suspend
+    // instead, reaching the TUI.
     approvals: { decide: async () => "denied" },
     ids: { create: () => "probe" },
-    enableWrites: false,
+    enableWrites,
     enableProcesses: false,
   });
 
@@ -100,6 +113,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   return {
     kind: "real",
     config: assembly.config,
+    enableWrites,
     warnings: assembly.warnings,
     coordinator: new RuntimeCoordinator({
       provider: assembly.provider,
@@ -109,7 +123,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
         // that require approval still suspend and reach the TUI.
         approvals: { decide: async () => "denied" },
         ids,
-        enableWrites: false,
+        enableWrites,
         enableProcesses: false,
       }),
       approvals: { decide: async () => "denied" },
@@ -128,6 +142,7 @@ export function describeSelection(selection: RuntimeSelection): readonly string[
       `mode: real provider`,
       `model: ${selection.config.model}`,
       `endpoint: ${selection.config.baseUrl}`,
+      `writes: ${selection.enableWrites ? "enabled (every write requires approval)" : "disabled"}`,
       ...selection.warnings.map((warning) => `warning: ${warning}`),
     ];
   }
