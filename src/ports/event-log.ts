@@ -21,7 +21,7 @@ export type InternalEventPayload =
     }>
   | Readonly<{
       kind: "run_waiting";
-      reason: "configuration" | "approval" | "user_input";
+      reason: "configuration" | "approval" | "user_input" | "recovery" | "external_dependency";
       safeCode: string;
       waitToken: string;
       requestVersion: number;
@@ -31,6 +31,12 @@ export type InternalEventPayload =
   | Readonly<{ kind: "run_cancelled"; safeCode: string }>
   | Readonly<{ kind: "run_cancel_requested"; commandId: string }>
   | Readonly<{ kind: "run_resumed" }>
+  | Readonly<{
+      kind: "no_progress_detected";
+      decision: "warn" | "block";
+      detail: string;
+      toolName: string;
+    }>
   | Readonly<{
       kind: "model_request_started";
       modelRequestId: string;

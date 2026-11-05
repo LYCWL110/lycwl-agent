@@ -14,6 +14,12 @@ import {
   queueRunInput,
   type RunInputQueue,
 } from "../../domain/run/input-queue.ts";
+import {
+  type CallFingerprint,
+  type CallRecord,
+  checkIdenticalCall,
+  type ProgressDecision,
+} from "../../domain/run/no-progress.ts";
 import { addModelRound, createRunBudget } from "../../domain/run/run-budget.ts";
 import { finishRun, type Run, resumeRun, startRun, waitRun } from "../../domain/run/run-state.ts";
 import type { OwnedKeyRegistry } from "../../domain/security/owned-key-guard.ts";
@@ -211,6 +217,10 @@ type MutableRunContext = {
   todoList: TodoList;
   /** Fixed model route for this Run (C03); null when none was configured. */
   runBinding: RunModelBinding | null;
+  /** Tool call fingerprints for no-progress detection, oldest first. */
+  callHistory: CallRecord[];
+  /** True once queued user input was consumed since the last recorded call. */
+  newInputSinceLastCall: boolean;
 };
 
 export class RuntimeCoordinator {
@@ -480,6 +490,8 @@ export class RuntimeCoordinator {
       deliveryBlocked: false,
       todoList: emptyTodoList(),
       runBinding: this.#deps.runBinding ?? null,
+      callHistory: [],
+      newInputSinceLastCall: false,
     };
     await this.#record(context, "run_started", { kind: "run_started", input });
     const binding = this.#deps.runBinding;
@@ -689,6 +701,9 @@ export class RuntimeCoordinator {
     for (const item of pending) {
       context.conversation.push({ kind: "user", text: item.text });
     }
+    // New user input is progress: it resets the identical-call counter for the
+    // next call without touching accumulated failure history.
+    context.newInputSinceLastCall = true;
     return true;
   }
 
@@ -822,6 +837,31 @@ export class RuntimeCoordinator {
     };
   }
 
+  /**
+   * Compare this call against recorded identical calls. Fingerprints are built
+   * from the tool name/version, the canonicalized input and the resource version,
+   * never from free error text or a regenerated id.
+   */
+  #checkProgress(
+    context: MutableRunContext,
+    call: Parameters<typeof executeToolCall>[1],
+  ): ProgressDecision {
+    const fingerprint: CallFingerprint = {
+      toolName: call.toolName,
+      toolVersion: this.#deps.tools.getDefinition(call.toolName)?.version ?? "unknown",
+      normalizedInput: canonicalizeInput(call.arguments),
+      // The coordinator does not read resources, so it cannot assert a version.
+      // A null version means "unknown", which is stricter: the same input counts
+      // as identical rather than being excused by a guess.
+      resourceVersion: null,
+    };
+    return checkIdenticalCall({
+      fingerprint,
+      history: context.callHistory,
+      hasNewUserInput: context.newInputSinceLastCall,
+    });
+  }
+
   async #executeCall(
     context: MutableRunContext,
     call: Parameters<typeof executeToolCall>[1],
@@ -834,6 +874,45 @@ export class RuntimeCoordinator {
     if (context.cancelRequested) {
       return { kind: "stop", result: await this.#cancel(context) };
     }
+
+    // No-progress check happens before dispatch: a blocked call is never executed,
+    // so this cannot replay a side effect or exempt any budget.
+    const progress = this.#checkProgress(context, call);
+    if (progress.kind === "block") {
+      const waitToken = this.#deps.ids.create();
+      const waiting = waitRun(context.run, "recovery_review", waitToken, 1);
+      if (!waiting.ok) {
+        return { kind: "stop", result: await this.#fail(context, waiting.code) };
+      }
+      context.run = waiting.value;
+      await this.#record(context, "no_progress_detected", {
+        kind: "no_progress_detected",
+        decision: "block",
+        detail: progress.detail,
+        toolName: call.toolName,
+      });
+      await this.#record(context, "run_waiting", {
+        kind: "run_waiting",
+        reason: "recovery",
+        safeCode: "no_progress",
+        waitToken,
+        requestVersion: 1,
+      });
+      return {
+        kind: "stop",
+        result: this.#result(context, "waiting", null, "no_progress"),
+      };
+    }
+    if (progress.kind === "warn") {
+      // Feedback only: the call still proceeds under its normal approval policy.
+      await this.#record(context, "no_progress_detected", {
+        kind: "no_progress_detected",
+        decision: "warn",
+        detail: progress.detail,
+        toolName: call.toolName,
+      });
+    }
+
     context.cancelledDuring = "tool_execution";
     const outcome = await executeToolCall(
       {
@@ -864,6 +943,19 @@ export class RuntimeCoordinator {
       return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
     }
     this.#appendToolResult(context, call, outcome.status, outcome.text);
+    // Record the fingerprint after the fact so the next identical call is compared
+    // against a real result rather than an intention.
+    context.callHistory.push({
+      fingerprint: {
+        toolName: call.toolName,
+        toolVersion: this.#deps.tools.getDefinition(call.toolName)?.version ?? "unknown",
+        normalizedInput: canonicalizeInput(call.arguments),
+        resourceVersion: null,
+      },
+      status: outcome.status,
+      failure: null,
+    });
+    context.newInputSinceLastCall = false;
     if (context.cancelRequested) {
       return { kind: "stop", result: await this.#cancel(context) };
     }
@@ -961,6 +1053,17 @@ export class RuntimeCoordinator {
       return { kind: "stop", result: await this.#fail(context, "approval_wait_repeated") };
     }
     this.#appendToolResult(context, pending.call, outcome.status, outcome.text);
+    context.callHistory.push({
+      fingerprint: {
+        toolName: pending.call.toolName,
+        toolVersion: this.#deps.tools.getDefinition(pending.call.toolName)?.version ?? "unknown",
+        normalizedInput: canonicalizeInput(pending.call.arguments),
+        resourceVersion: null,
+      },
+      status: outcome.status,
+      failure: null,
+    });
+    context.newInputSinceLastCall = false;
     if (context.cancelRequested) {
       return { kind: "stop", result: await this.#cancel(context) };
     }
@@ -1051,6 +1154,17 @@ export class RuntimeCoordinator {
       return { kind: "stop", result: await this.#fail(context, "question_wait_repeated") };
     }
     this.#appendToolResult(context, pending.call, outcome.status, outcome.text);
+    context.callHistory.push({
+      fingerprint: {
+        toolName: pending.call.toolName,
+        toolVersion: this.#deps.tools.getDefinition(pending.call.toolName)?.version ?? "unknown",
+        normalizedInput: canonicalizeInput(pending.call.arguments),
+        resourceVersion: null,
+      },
+      status: outcome.status,
+      failure: null,
+    });
+    context.newInputSinceLastCall = false;
     if (context.cancelRequested) {
       return { kind: "stop", result: await this.#cancel(context) };
     }
@@ -1165,4 +1279,21 @@ function sleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, delayMs);
   });
+}
+
+/**
+ * Canonicalize tool arguments for fingerprinting: object keys are sorted so key
+ * order cannot make two identical calls look different. This is a comparison
+ * canonicalization, not a validation.
+ */
+function canonicalizeInput(value: unknown): string {
+  return stableStringify(value);
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
 }
