@@ -35,6 +35,8 @@ export type TuiViewState = Readonly<{
    * not invite an approval.
    */
   pendingApprovalPreview: readonly string[] | null;
+  /** Why the last question answer was rejected; null when there is no error. */
+  answerError: string | null;
   pendingQuestion: PendingQuestionView | null;
   /** Composer text is local draft state, never an accepted command. */
   draft: string;
@@ -52,6 +54,7 @@ export const EMPTY_VIEW: TuiViewState = {
   todo: null,
   pendingApproval: null,
   pendingApprovalPreview: null,
+  answerError: null,
   pendingQuestion: null,
   draft: "",
   canSubmit: true,
@@ -65,6 +68,8 @@ export type ViewInput = Readonly<{
   todo: TodoList | null;
   pendingApproval: PendingApprovalView | null;
   pendingQuestion: PendingQuestionView | null;
+  /** Set by the controller when an answer could not be resolved. */
+  answerError?: string | null;
   draft: string;
 }>;
 
@@ -83,6 +88,7 @@ export function deriveView(input: ViewInput): TuiViewState {
     todo: input.todo,
     pendingApproval: input.pendingApproval,
     pendingApprovalPreview: deriveApprovalPreview(input),
+    answerError: input.answerError ?? null,
     pendingQuestion: input.pendingQuestion,
     draft: input.draft,
     canSubmit: runStatus !== "active" && waitingKind === null,

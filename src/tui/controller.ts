@@ -5,6 +5,7 @@ import type {
 import type { TodoList } from "../domain/planning/todo.ts";
 import { emptyTodoList, replaceTodoList } from "../domain/planning/todo.ts";
 import type { InternalEvent } from "../ports/event-log.ts";
+import { resolveAnswer } from "./answer-input.ts";
 import { deriveView, interpretComposer, type TuiViewState } from "./view-model.ts";
 
 /**
@@ -40,6 +41,8 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
    * than `settle()`, which only covers ResumeRun continuations.
    */
   let activeRun: Promise<CoordinatorResult> | null = null;
+  /** Why the last answer was rejected, shown in the question panel. */
+  let answerError: string | null = null;
 
   function applyResult(result: CoordinatorResult): void {
     lastResult = result;
@@ -70,6 +73,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       todo: todo.items.length === 0 ? null : todo,
       pendingApproval: deps.coordinator.pendingApprovalView(),
       pendingQuestion: deps.coordinator.pendingQuestionView(),
+      answerError,
       draft,
     });
   }
@@ -111,12 +115,23 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     if (pending === null) return;
     draft = "";
     commandCounter += 1;
-    const answerPayload =
-      pending.answerType === "choice"
-        ? { kind: "choice" as const, optionIds: [text] }
-        : pending.answerType === "confirmation"
-          ? { kind: "confirmation" as const, confirmed: text.toLowerCase() === "yes" }
-          : { kind: "text" as const, text };
+    // Accept an option id or the label the panel showed. A rejected answer keeps
+    // the question open and reports why, instead of failing silently.
+    const resolved = resolveAnswer(
+      {
+        answerType: pending.answerType,
+        multiple: pending.multiple,
+        allowFreeText: pending.allowFreeText,
+        options: pending.options,
+      },
+      text,
+    );
+    if (!resolved.ok) {
+      answerError = resolved.detail;
+      return;
+    }
+    answerError = null;
+    const answerPayload = resolved.answer;
     await deps.coordinator.submitUserInput({
       commandId: `tui-question-${commandCounter}`,
       questionId: pending.questionId,

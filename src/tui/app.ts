@@ -187,6 +187,14 @@ function ApprovalPanel({ view }: Readonly<{ view: TuiViewState }>): ReactElement
 function QuestionPanel({ view }: Readonly<{ view: TuiViewState }>): ReactElement {
   const pending = view.pendingQuestion;
   if (pending === null) return h(Box, null);
+  const hint =
+    pending.answerType === "confirmation"
+      ? 'type "yes" or "no", then Enter'
+      : pending.answerType === "text"
+        ? "type an answer, then Enter"
+        : pending.multiple
+          ? "type one or more ids or labels separated by commas, then Enter"
+          : "type an option id or its label, then Enter";
   return h(
     Box,
     { flexDirection: "column", marginTop: 1 },
@@ -194,11 +202,10 @@ function QuestionPanel({ view }: Readonly<{ view: TuiViewState }>): ReactElement
     ...pending.options.map((option) =>
       h(Box, { key: option.id, marginLeft: 2 }, h(Text, null, `${option.id}) ${option.label}`)),
     ),
-    h(
-      Box,
-      { marginLeft: 2 },
-      h(Text, { dimColor: true }, "type an answer in the composer and press Enter"),
-    ),
+    h(Box, { marginLeft: 2 }, h(Text, { dimColor: true }, hint)),
+    view.answerError === null
+      ? null
+      : h(Box, { marginLeft: 2 }, h(Text, { color: "red" }, `not accepted: ${view.answerError}`)),
     h(
       Box,
       { marginLeft: 2 },
