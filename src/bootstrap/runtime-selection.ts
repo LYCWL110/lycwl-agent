@@ -1,3 +1,4 @@
+import { createGuidanceLoader, renderGuidanceBlock } from "../adapters/windows/guidance-loader.ts";
 import type { RuntimeCoordinator } from "../application/coordinator/runtime-coordinator.ts";
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
 import { availableTools } from "../domain/tool-catalog/tool-catalog.ts";
@@ -24,6 +25,8 @@ export type RuntimeSelection =
       config: ProviderConfig;
       /** Whether filesystem mutation tools are exposed for this session. */
       enableWrites: boolean;
+      /** Project guidance that was injected, for the launch summary. */
+      guidance: GuidanceSummary;
       warnings: readonly string[];
     }>
   | Readonly<{
@@ -89,6 +92,11 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
   });
 
+  // Project guidance is loaded once at Run setup and injected as sourced,
+  // untrusted material before the task. A load failure is reported and guidance is
+  // omitted rather than silently dropping a project rule.
+  const guidance = await loadGuidance(options.workspaceRoot);
+
   if (!assembly.ok) {
     return {
       kind: "demo",
@@ -131,7 +139,9 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
       ids,
       nowUtc: () => new Date().toISOString(),
       suspendOnApproval: true,
+      ...(guidance.block === "" ? {} : { projectContext: guidance.block }),
     }),
+    guidance: guidance.summary,
   };
 }
 
@@ -143,6 +153,13 @@ export function describeSelection(selection: RuntimeSelection): readonly string[
       `model: ${selection.config.model}`,
       `endpoint: ${selection.config.baseUrl}`,
       `writes: ${selection.enableWrites ? "enabled (every write requires approval)" : "disabled"}`,
+      ...(selection.guidance.kind === "loaded"
+        ? [
+            `guidance: ${selection.guidance.files.length} file(s), ${selection.guidance.bytes} bytes`,
+          ]
+        : selection.guidance.kind === "failed"
+          ? [`guidance: not loaded (${selection.guidance.code})`]
+          : ["guidance: none"]),
       ...selection.warnings.map((warning) => `warning: ${warning}`),
     ];
   }
@@ -158,4 +175,37 @@ export function describeSelection(selection: RuntimeSelection): readonly string[
     `reason: the saved Provider configuration is unusable (${selection.reason}${selection.detail === undefined ? "" : `: ${selection.detail}`})`,
     "run lycwl --setup to inspect the configuration",
   ];
+}
+
+export type GuidanceSummary =
+  | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "loaded"; files: readonly string[]; bytes: number }>
+  | Readonly<{ kind: "failed"; code: string }>;
+
+/**
+ * Load project guidance for the workspace root.
+ *
+ * The target is the workspace root itself, so discovery covers the root and any
+ * intermediate directories on the path to it, which is the correct scope for a
+ * session that has not yet read a specific file.
+ */
+async function loadGuidance(
+  workspaceRoot: string,
+): Promise<Readonly<{ block: string; summary: GuidanceSummary }>> {
+  const loader = createGuidanceLoader({ workspaceRoot });
+  const loaded = await loader.load({ targetPath: workspaceRoot, targetIsDirectory: true });
+  if (!loaded.ok) {
+    return { block: "", summary: { kind: "failed", code: loaded.code } };
+  }
+  if (loaded.blocks.length === 0) {
+    return { block: "", summary: { kind: "none" } };
+  }
+  return {
+    block: renderGuidanceBlock(loaded.blocks),
+    summary: {
+      kind: "loaded",
+      files: loaded.blocks.map((b) => b.path),
+      bytes: loaded.totalBytes,
+    },
+  };
 }

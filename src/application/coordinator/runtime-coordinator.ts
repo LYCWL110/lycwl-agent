@@ -86,6 +86,13 @@ export type CoordinatorDependencies = Readonly<{
    */
   ownedKeys?: OwnedKeyRegistry;
   /**
+   * Sourced, untrusted material placed before the user's task, such as project
+   * guidance. It is a separate user turn, never merged into the system prompt: a
+   * repository document must not acquire the authority of application
+   * configuration. Empty or absent means nothing is injected.
+   */
+  projectContext?: string;
+  /**
    * Fixed model route for every Run this coordinator starts (C03). When present it
    * is recorded once at Run start and the credential revision is bound per
    * attempt. When absent, no route event is written and no revision is bound.
@@ -467,6 +474,7 @@ export class RuntimeCoordinator {
   }
 
   async run(input: string): Promise<CoordinatorResult> {
+    const projectContext = this.#deps.projectContext;
     const context: MutableRunContext = {
       run: startRun(),
       sessionId: this.#deps.ids.create(),
@@ -475,7 +483,10 @@ export class RuntimeCoordinator {
       events: [],
       budget: createRunBudget(),
       lastEventId: null,
-      conversation: [{ kind: "user", text: input }],
+      conversation: [
+        ...(projectContext === undefined ? [] : [{ kind: "user" as const, text: projectContext }]),
+        { kind: "user", text: input },
+      ],
       inputQueue: emptyRunInputQueue(),
       nextAcceptedSeq: 1,
       taskRevision: 1,
