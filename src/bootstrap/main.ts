@@ -6,6 +6,7 @@ import { readProviderConfig } from "../domain/config/provider-config.ts";
 import { createTuiController } from "../tui/controller.ts";
 import { startTui } from "../tui/main.ts";
 import { describeSelection, selectRuntime } from "./runtime-selection.ts";
+import { needsSetup, startSetupFlow } from "./setup-flow.ts";
 
 /**
  * `lycwl` entry point.
@@ -60,6 +61,36 @@ if (!process.stdin.isTTY) {
     ].join("\n"),
   );
   process.exit(1);
+}
+
+// First-time setup: when no Provider is configured there is nothing to run, so the
+// setup screen is shown instead of a demo session that would look like a working
+// agent. `hasProvider` reads the document rather than guessing from file presence.
+const configureFirst = await needsSetup(configStore);
+
+if (configureFirst) {
+  process.stderr.write(
+    [
+      "mode: setup",
+      "no Provider is configured yet",
+      "enter an endpoint, model and API key, then press enter to save",
+      "",
+    ].join("\n"),
+  );
+  const flow = startSetupFlow({
+    configStore,
+    vault,
+    workspaceRoot: process.cwd(),
+    dataDirectory,
+    onReady: (lines) => {
+      process.stderr.write(`${lines.join("\n")}\n\n`);
+    },
+    onDiscard: () => {
+      process.stderr.write("setup discarded; nothing was written\n");
+    },
+  });
+  await flow.done;
+  process.exit(0);
 }
 
 const loaded = await configStore.load();
