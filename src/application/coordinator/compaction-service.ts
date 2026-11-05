@@ -65,6 +65,12 @@ export function buildGroups(
       // Absorb every following tool_result that answers one of this turn's calls.
       const members: GroupMember[] = [];
       let tokens = estimateTokens(item.text ?? "");
+      // The assistant's own text is a member too. Without it the group's body would
+      // consist only of call/result pairs and the summariser would never see what
+      // the model said, which is exactly the kind of content compaction is for.
+      if (item.text !== null && item.text.length > 0) {
+        members.push({ id: `m${seq}`, kind: "message", status: null });
+      }
       const openCalls = new Set(item.toolCalls.map((call) => call.providerToolCallId));
       for (const call of item.toolCalls) {
         members.push({ id: call.providerToolCallId, kind: "tool_call", status: null });
@@ -181,7 +187,7 @@ export function prepareCompaction(input: {
     // nothing else, so the model cannot claim to have read it.
     if (representation.representation === "reference_only") continue;
     parts.push(`--- ${group.groupId} (seq ${group.seq}) ---`);
-    parts.push(renderGroupBodies(input.conversation, group));
+    parts.push(renderGroupBodies(input.conversation, group, representation.representation));
     parts.push("");
   }
 
@@ -209,21 +215,147 @@ export function prepareCompaction(input: {
   return { ok: true, value: { prompt: parts.join("\n"), plan: plan.value } };
 }
 
+/**
+ * Render a group's body for the summarisation request.
+ *
+ * `full` sends the actual text the model originally saw, `excerpt` sends a bounded
+ * head and tail with an explicit marker, and `reference_only` contributes nothing
+ * because the skeleton already states the body never entered. Rendering the member
+ * list instead of the text -- the earlier behaviour -- made `full` a lie: the
+ * summariser was told a group was fully available while receiving only ids.
+ */
 function renderGroupBodies(
   conversation: readonly ProviderConversationItem[],
   group: ContextGroup,
+  representation: "full" | "excerpt" | "reference_only",
 ): string {
-  void conversation;
-  // Body text was already measured into the group; rendering it again would be a
-  // second source of truth. The plan's representation is what the model is told.
-  return group.members
-    .map(
-      (member) =>
-        `${member.kind}:${member.id}${member.status === null ? "" : ` (${member.status})`}`,
-    )
-    .join("\n");
+  if (representation === "reference_only") return "";
+
+  const parts: string[] = [];
+  for (const member of group.members) {
+    if (member.kind === "tool_call") {
+      const call = findCall(conversation, member.id);
+      if (call === undefined) {
+        parts.push(`tool_call:${member.id} (arguments unavailable)`);
+        continue;
+      }
+      parts.push(`tool_call:${member.id} ${call.toolName} ${JSON.stringify(call.arguments ?? {})}`);
+      continue;
+    }
+    if (member.kind === "tool_result") {
+      const result = findToolResult(conversation, member.id);
+      const status = member.status ?? "unknown";
+      if (result === undefined || result.text === null) {
+        parts.push(`tool_result:${member.id} (${status})`);
+        continue;
+      }
+      parts.push(`tool_result:${member.id} (${status}): ${clip(result.text, representation)}`);
+      continue;
+    }
+    const message = messageTextFor(conversation, group);
+    parts.push(message === null ? `message:${member.id}` : clip(message, representation));
+  }
+  return parts.join("\n");
 }
 
+const EXCERPT_HEAD = 400;
+const EXCERPT_TAIL = 200;
+
+/**
+ * Apply the representation's clipping rule.
+ *
+ * The marker names the fact that text was removed, so a summariser cannot present
+ * an excerpt as if it were the whole body.
+ */
+function clip(text: string, representation: "full" | "excerpt" | "reference_only"): string {
+  if (representation === "full") return text;
+  if (text.length <= EXCERPT_HEAD + EXCERPT_TAIL) return text;
+  const removed = text.length - EXCERPT_HEAD - EXCERPT_TAIL;
+  return `${text.slice(0, EXCERPT_HEAD)}\n[truncated ${removed} unit(s)]\n${text.slice(-EXCERPT_TAIL)}`;
+}
+
+function findCall(
+  conversation: readonly ProviderConversationItem[],
+  callId: string,
+): Extract<ProviderConversationItem, { kind: "assistant" }>["toolCalls"][number] | undefined {
+  for (const item of conversation) {
+    if (item.kind !== "assistant") continue;
+    const call = item.toolCalls.find((candidate) => candidate.providerToolCallId === callId);
+    if (call !== undefined) return call;
+  }
+  return undefined;
+}
+
+function findToolResult(
+  conversation: readonly ProviderConversationItem[],
+  callId: string,
+): Extract<ProviderConversationItem, { kind: "tool_result" }> | undefined {
+  for (const item of conversation) {
+    if (item.kind === "tool_result" && item.providerToolCallId === callId) return item;
+  }
+  return undefined;
+}
+
+/**
+ * Text for the message member of a group.
+ *
+ * The assistant text is returned for an assistant group; a user group returns the
+ * first user text. Groups built from a single message have exactly one candidate,
+ * so this does not need to trust the member id.
+ */
+/**
+ * Text for the message member of a group.
+ *
+ * Position is taken from the group kind rather than the member id: an assistant
+ * group yields assistant text, a user group yields user text. Groups are built in
+ * conversation order, so the seq disambiguates repeated turns of the same kind.
+ */
+function messageTextFor(
+  conversation: readonly ProviderConversationItem[],
+  group: ContextGroup,
+): string | null {
+  if (group.kind === "user_input") {
+    // Count how many user turns precede this group's seq, so the right one is used
+    // when a Run has several user messages.
+    let remaining = Math.max(1, countKindBefore(conversation, group.seq, "user"));
+    for (const item of conversation) {
+      if (item.kind !== "user") continue;
+      remaining -= 1;
+      if (remaining <= 0) return item.text;
+    }
+    return null;
+  }
+  let remaining = Math.max(1, countKindBefore(conversation, group.seq, "assistant"));
+  for (const item of conversation) {
+    if (item.kind !== "assistant" || item.text === null) continue;
+    remaining -= 1;
+    if (remaining <= 0) return item.text;
+  }
+  return null;
+}
+
+/**
+ * How many items of `kind` appear before the group whose seq is `seq`.
+ *
+ * Seq numbering follows group order, and every group consumes at least one
+ * conversation item, so this is a stable positional index.
+ */
+function countKindBefore(
+  conversation: readonly ProviderConversationItem[],
+  seq: number,
+  kind: "user" | "assistant",
+): number {
+  let count = 0;
+  let groupIndex = 0;
+  for (const item of conversation) {
+    if (item.kind === kind) count += 1;
+    // Each group starts at a user or assistant item; advance the group counter when
+    // a new group boundary passes.
+    if (item.kind === kind || item.kind === "assistant") groupIndex += 1;
+    if (groupIndex > seq) break;
+  }
+  return count;
+}
 export type ArtifactParseResult =
   | Readonly<{ ok: true; artifact: CompactionArtifact }>
   | Readonly<{ ok: false; reason: "invalid_artifact"; detail: string }>;
