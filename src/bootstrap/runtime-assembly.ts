@@ -9,7 +9,6 @@ import {
   readProviderConfig,
 } from "../domain/config/provider-config.ts";
 import type { ModelProvider } from "../ports/model-provider.ts";
-import type { ToolDefinition } from "../ports/tool-executor.ts";
 
 /**
  * Real runtime composition.
@@ -46,11 +45,15 @@ export type AssembleOptions = Readonly<{
   settings: unknown;
   /** Application data directory; the vault lives inside it. */
   dataDirectory: string;
-  /** Tool definitions exposed to the model for this Run. */
-  tools: (definitions: readonly ToolDefinition[]) => readonly AnthropicToolDefinition[];
-  toolDefinitions: readonly ToolDefinition[];
+  /**
+   * Tool schemas the model may call. Passed in rather than derived here, so the
+   * catalog stays the single owner of descriptions and parameter shapes.
+   */
+  toolDefinitions: readonly AnthropicToolDefinition[];
   /** Injected for tests. */
   post?: ConstructorParameters<typeof AnthropicProvider>[0]["post"];
+  /** Trust a specific CA; used only by tests against a local self-signed server. */
+  trustedCaPem?: string;
 }>;
 
 /**
@@ -104,8 +107,9 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
     model: config.model,
     endpoint: messagesEndpoint(config.baseUrl),
     maxTokens: config.maxOutputTokens,
-    tools: options.tools(options.toolDefinitions),
+    tools: options.toolDefinitions,
     ...(options.post === undefined ? {} : { post: options.post }),
+    ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
   });
 
   return { ok: true, provider, config, warnings };

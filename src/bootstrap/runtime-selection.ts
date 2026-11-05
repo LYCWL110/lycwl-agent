@@ -1,6 +1,6 @@
 import type { RuntimeCoordinator } from "../application/coordinator/runtime-coordinator.ts";
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
-import type { ToolDefinition } from "../ports/tool-executor.ts";
+import { availableTools } from "../domain/tool-catalog/tool-catalog.ts";
 import { createDemoRuntime } from "./demo-runtime.ts";
 import { createWorkspaceTools } from "./read-only-tools.ts";
 import { assembleRuntime, type RuntimeAssemblyFailure } from "./runtime-assembly.ts";
@@ -38,6 +38,7 @@ export type SelectRuntimeOptions = Readonly<{
   /** True when a settings document exists at all. */
   hasSettings: boolean;
   post?: Parameters<typeof assembleRuntime>[0]["post"];
+  trustedCaPem?: string;
 }>;
 
 export async function selectRuntime(options: SelectRuntimeOptions): Promise<RuntimeSelection> {
@@ -49,16 +50,30 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     };
   }
 
-  const toolDefinitions = collectToolDefinitions(options.workspaceRoot);
+  const tools = createWorkspaceTools({
+    workspaceRoot: options.workspaceRoot,
+    approvals: { decide: async () => "denied" },
+    ids: { create: () => "probe" },
+    enableWrites: false,
+    enableProcesses: false,
+  });
+
+  // Advertise only tools this composition actually exposes under the current
+  // flags, so the model never sees a schema for something that would fail at call
+  // time with tool_unavailable_in_build.
+  const catalog = availableTools((name) => tools.getDefinition(name) !== null);
+  const toolDefinitions = catalog.map((entry) => ({
+    name: entry.name,
+    description: entry.description,
+    inputSchema: entry.inputSchema as unknown as Readonly<Record<string, unknown>>,
+  }));
+
   const assembly = await assembleRuntime({
     settings: options.settings,
     dataDirectory: options.dataDirectory,
-    // The model-facing tool schema is owned by the prompt layer, which is not
-    // wired yet. Declaring tools here would advertise capabilities without
-    // descriptions, so this stays empty rather than inventing a schema shape.
     toolDefinitions,
-    tools: () => [],
     ...(options.post === undefined ? {} : { post: options.post }),
+    ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
   });
 
   if (!assembly.ok) {
@@ -104,23 +119,6 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
       suspendOnApproval: true,
     }),
   };
-}
-
-function collectToolDefinitions(workspaceRoot: string): readonly ToolDefinition[] {
-  const tools = createWorkspaceTools({
-    workspaceRoot,
-    approvals: { decide: async () => "denied" },
-    ids: { create: () => "probe" },
-    enableWrites: false,
-    enableProcesses: false,
-  });
-  const names = ["read_file", "glob", "grep", "list_dir"];
-  const definitions: ToolDefinition[] = [];
-  for (const name of names) {
-    const definition = tools.getDefinition(name);
-    if (definition !== null) definitions.push(definition);
-  }
-  return definitions;
 }
 
 /** Human-readable launch summary, printed before the TUI takes the screen. */

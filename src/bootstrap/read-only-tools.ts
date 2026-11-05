@@ -6,6 +6,7 @@ import { createApplyPatchTool } from "../adapters/tools/patch-tool.ts";
 import { createReadFileTool } from "../adapters/tools/read-file-tool.ts";
 import { createSearchTools, type SearchEntry } from "../adapters/tools/search-tools.ts";
 import { createShellTool } from "../adapters/tools/shell-tool.ts";
+import { createTodoTool } from "../adapters/tools/todo-tool.ts";
 import { createWebTools } from "../adapters/tools/web-tools.ts";
 import { createWriteTools } from "../adapters/tools/write-tools.ts";
 import { createBackgroundRegistry } from "../adapters/windows/background-registry.ts";
@@ -18,6 +19,7 @@ import { createWindowsFileReader } from "../adapters/windows/windows-directory-r
 import { createWindowsFsAdapter } from "../adapters/windows/windows-fs-adapter.ts";
 import { createWindowsMutationAdapter } from "../adapters/windows/windows-mutation-adapter.ts";
 import { createWindowsWriteAdapter } from "../adapters/windows/windows-write-adapter.ts";
+import { emptyTodoList } from "../domain/planning/todo.ts";
 import type { ApprovalGate } from "../ports/approval-gate.ts";
 import type { IdentifierFactory } from "../ports/identity.ts";
 import type {
@@ -207,6 +209,13 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     : null;
 
   const delegates: ToolExecutor[] = [readFile, search];
+  // Todo is a planning tool with no side effects. Its list is held by the caller so
+  // a restart restores it from events rather than trusting the model.
+  const todoTool = createTodoTool({
+    getList: () => emptyTodoList(),
+    setList: () => undefined,
+  });
+  delegates.push(todoTool);
   if (writes !== null) delegates.push(writes);
   if (patch !== null) delegates.push(patch);
   if (mutations !== null) delegates.push(mutations);
