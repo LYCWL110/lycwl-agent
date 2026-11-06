@@ -32,6 +32,8 @@ export type RuntimeSelection =
       config: ProviderConfig;
       /** Whether filesystem mutation tools are exposed for this session. */
       enableWrites: boolean;
+      /** Skill catalog state, for the launch summary. */
+      skills: SkillsSummary;
       /** Rebuilt history, for the launch summary. */
       prior: PriorSummary;
       /** Project guidance that was injected, for the launch summary. */
@@ -57,6 +59,12 @@ export type SelectRuntimeOptions = Readonly<{
    * approval through the coordinator's suspend path.
    */
   enableWrites?: boolean;
+  /**
+   * Enable the workspace document Skill catalog. Off by default: the confirmed
+   * design gives each Session its own switch, and enabling it grants no read
+   * permission beyond ordinary file access.
+   */
+  enableSkills?: boolean;
   /**
    * Fixed Session identity so successive launches share one durable log.
    * Absent means a fresh Session per Run, appropriate only for tests.
@@ -114,6 +122,11 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   // omitted rather than silently dropping a project rule.
   const guidance = await loadGuidance(options.workspaceRoot);
 
+  // Skills are off unless the Session opts in, matching the confirmed design.
+  // Enabling the switch is not permission to read anything sensitive; the catalog
+  // is untrusted metadata and bodies are read through ordinary read_file.
+  const skills = await loadSkills(options.workspaceRoot, options.enableSkills === true);
+
   if (!assembly.ok) {
     return {
       kind: "demo",
@@ -122,6 +135,10 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
       ...(assembly.detail === undefined ? {} : { detail: assembly.detail }),
     };
   }
+
+  // One sourced block holds guidance and the skill catalog, guidance first so a
+  // skill description cannot appear to override project rules.
+  const contextBlock = [guidance.block, skills.block].filter((part) => part !== "").join("\n\n");
 
   const { RuntimeCoordinator } = await import("../application/coordinator/runtime-coordinator.ts");
   const { JsonlEventLog } = await import("../adapters/persistence/jsonl-event-log.ts");
@@ -189,7 +206,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
       suspendOnApproval: true,
       ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
       ...(prior.conversation.length === 0 ? {} : { priorConversation: prior.conversation }),
-      ...(guidance.block === "" ? {} : { projectContext: guidance.block }),
+      ...(contextBlock === "" ? {} : { projectContext: contextBlock }),
       // Budgeting applies only when a verified window was configured. Without one,
       // no compaction runs and an oversized prompt fails at the provider instead of
       // being silently truncated.
@@ -221,6 +238,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     }),
     guidance: guidance.summary,
     prior: prior.summary,
+    skills: skills.summary,
   };
 }
 
@@ -232,6 +250,13 @@ export function describeSelection(selection: RuntimeSelection): readonly string[
       `model: ${selection.config.model}`,
       `endpoint: ${selection.config.baseUrl}`,
       `writes: ${selection.enableWrites ? "enabled (every write requires approval)" : "disabled"}`,
+      ...(selection.skills.kind === "loaded"
+        ? [`skills: ${selection.skills.count} catalogued (~${selection.skills.tokens} tokens)`]
+        : selection.skills.kind === "failed"
+          ? [`skills: not loaded (${selection.skills.code})`]
+          : selection.skills.kind === "disabled"
+            ? ["skills: disabled"]
+            : ["skills: none"]),
       ...(selection.prior.kind === "rebuilt"
         ? [`history: ${selection.prior.runs} run(s), ${selection.prior.items} item(s)`]
         : selection.prior.kind === "failed"
@@ -347,4 +372,41 @@ async function rebuildPriorConversation(
   } catch {
     return { conversation: [], summary: { kind: "failed", code: "rebuild_failed" } };
   }
+}
+
+export type SkillsSummary =
+  | Readonly<{ kind: "disabled" }>
+  | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "loaded"; count: number; tokens: number }>
+  | Readonly<{ kind: "failed"; code: string }>;
+
+/**
+ * Load the Skill catalog when the Session enabled it.
+ *
+ * A discovery failure is reported rather than hidden: a broken SKILL.md would
+ * otherwise look like a skill that simply is not there.
+ */
+async function loadSkills(
+  workspaceRoot: string,
+  enabled: boolean,
+): Promise<Readonly<{ block: string; summary: SkillsSummary }>> {
+  if (!enabled) return { block: "", summary: { kind: "disabled" } };
+  const { createSkillDiscovery } = await import("../adapters/windows/skill-discovery.ts");
+  const discovery = createSkillDiscovery({ workspaceRoot });
+  const result = await discovery.discover({ enabled: true });
+  if (!result.ok) {
+    if (result.code === "not_found") return { block: "", summary: { kind: "none" } };
+    return { block: "", summary: { kind: "failed", code: result.code } };
+  }
+  if (result.catalog.skills.length === 0) {
+    return { block: "", summary: { kind: "none" } };
+  }
+  return {
+    block: result.block,
+    summary: {
+      kind: "loaded",
+      count: result.catalog.skills.length,
+      tokens: result.catalog.estimatedTokens,
+    },
+  };
 }
