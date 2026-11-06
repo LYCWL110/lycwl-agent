@@ -127,6 +127,13 @@ export type CoordinatorDependencies = Readonly<{
    */
   contextBudget?: ContextBudget;
   /**
+   * Fixed Session identity. When present, every Run this coordinator starts
+   * appends to the same Session event log, so a restart can replay the history.
+   * Absent means each Run gets a fresh Session, which is only appropriate for
+   * tests and the demo runtime.
+   */
+  sessionId?: string;
+  /**
    * Fixed model route for every Run this coordinator starts (C03). When present it
    * is recorded once at Run start and the credential revision is bound per
    * attempt. When absent, no route event is written and no revision is bound.
@@ -517,7 +524,7 @@ export class RuntimeCoordinator {
     const projectContext = this.#deps.projectContext;
     const context: MutableRunContext = {
       run: startRun(),
-      sessionId: this.#deps.ids.create(),
+      sessionId: this.#deps.sessionId ?? this.#deps.ids.create(),
       runId: this.#deps.ids.create(),
       correlationId: this.#deps.ids.create(),
       events: [],

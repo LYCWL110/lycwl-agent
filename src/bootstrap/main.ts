@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { createHash } from "node:crypto";
+import path from "node:path";
 import { createConfigStore, defaultConfigDirectory } from "../adapters/windows/config-store.ts";
 import { createFileVault } from "../adapters/windows/file-credential-vault.ts";
 import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
@@ -99,13 +101,25 @@ if (configureFirst) {
 
 const loaded = await configStore.load();
 const settings = loaded.ok ? parseSettings(loaded.value.text) : null;
+
+// A stable Session per workspace, so launching again in the same project
+// continues the same durable log instead of starting from nothing.
+const sessionId = workspaceSessionId(process.cwd());
 const selection = await selectRuntime({
   workspaceRoot: process.cwd(),
   dataDirectory,
   settings,
   hasSettings: loaded.ok,
   enableWrites: args.includes("--write"),
+  sessionId,
 });
+
+// Report whether an earlier session exists, so the user knows the history is
+// being continued rather than silently reused.
+const priorEvents = await readPriorEventCount(sessionId);
+if (priorEvents > 0) {
+  process.stderr.write(`continuing session ${sessionId} (${priorEvents} recorded event(s))\n`);
+}
 
 process.stderr.write(`${describeSelection(selection).join("\n")}\n\n`);
 
@@ -133,4 +147,34 @@ async function describeConfiguration(
 function parseSettings(text: string): unknown {
   const parsed = parseJsonc(text);
   return parsed.ok ? toPlainValue(parsed.value) : {};
+}
+
+/**
+ * Derive a stable Session id from the workspace path.
+ *
+ * The id must be filesystem-safe and stable across launches, so a hash of the
+ * normalised path is used rather than a random id. Case and trailing separators are
+ * normalised because Windows paths are case-insensitive.
+ */
+function workspaceSessionId(workspaceRoot: string): string {
+  const normalized = workspaceRoot.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return `ws-${createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 16)}`;
+}
+
+/** Count events already recorded for a Session, so a resumed launch can say so. */
+async function readPriorEventCount(sessionId: string): Promise<number> {
+  const { JsonlEventLog } = await import("../adapters/persistence/jsonl-event-log.ts");
+  const digests = {
+    async sha256Canonical(value: unknown): Promise<string> {
+      return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    },
+  };
+  const ids = { create: () => crypto.randomUUID() };
+  const log = new JsonlEventLog(path.join(dataDirectory, "sessions"), ids, digests);
+  try {
+    const result = await log.readWithRecovery(sessionId);
+    return result.ok ? result.events.length : 0;
+  } catch {
+    return 0;
+  }
 }

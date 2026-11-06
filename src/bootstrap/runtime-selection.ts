@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
   createGuidanceLoader,
   type GuidanceBlock,
@@ -53,6 +54,11 @@ export type SelectRuntimeOptions = Readonly<{
    * approval through the coordinator's suspend path.
    */
   enableWrites?: boolean;
+  /**
+   * Fixed Session identity so successive launches share one durable log.
+   * Absent means a fresh Session per Run, appropriate only for tests.
+   */
+  sessionId?: string;
   post?: Parameters<typeof assembleRuntime>[0]["post"];
   trustedCaPem?: string;
 }>;
@@ -115,7 +121,25 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   }
 
   const { RuntimeCoordinator } = await import("../application/coordinator/runtime-coordinator.ts");
-  const { InMemoryEventLog } = await import("../application/coordinator/event-log.ts");
+  const { JsonlEventLog } = await import("../adapters/persistence/jsonl-event-log.ts");
+  const { JsonlCheckpointStore } = await import(
+    "../adapters/persistence/jsonl-checkpoint-store.ts"
+  );
+
+  const ids = { create: () => crypto.randomUUID() };
+  const digests = {
+    async sha256Canonical(value: unknown): Promise<string> {
+      const data = new TextEncoder().encode(JSON.stringify(value));
+      const hash = await crypto.subtle.digest("SHA-256", data);
+      return Buffer.from(hash).toString("hex");
+    },
+  };
+
+  // Durable Session log. Without it every launch starts with no history, which
+  // makes the product unusable for anything spanning more than one sitting.
+  const sessionRoot = path.join(options.dataDirectory, "sessions");
+  const eventLog = new JsonlEventLog(sessionRoot, ids, digests);
+  const checkpoints = new JsonlCheckpointStore(sessionRoot, digests);
 
   // Compute the C04 budget only from a verified window. A capacity failure leaves
   // budgeting off rather than substituting a guess.
@@ -132,15 +156,6 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     computed.ok || computed.code === "model_context_unknown"
       ? null
       : `context budgeting disabled (${computed.code})`;
-
-  const ids = { create: () => crypto.randomUUID() };
-  const digests = {
-    async sha256Canonical(value: unknown): Promise<string> {
-      const data = new TextEncoder().encode(JSON.stringify(value));
-      const hash = await crypto.subtle.digest("SHA-256", data);
-      return Buffer.from(hash).toString("hex");
-    },
-  };
 
   return {
     kind: "real",
@@ -159,10 +174,12 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
         enableProcesses: false,
       }),
       approvals: { decide: async () => "denied" },
-      eventLog: new InMemoryEventLog(ids, digests),
+      eventLog,
+      checkpoints,
       ids,
       nowUtc: () => new Date().toISOString(),
       suspendOnApproval: true,
+      ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
       ...(guidance.block === "" ? {} : { projectContext: guidance.block }),
       // Budgeting applies only when a verified window was configured. Without one,
       // no compaction runs and an oversized prompt fails at the provider instead of
