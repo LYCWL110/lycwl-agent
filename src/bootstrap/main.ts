@@ -7,8 +7,8 @@ import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
 import { readProviderConfig } from "../domain/config/provider-config.ts";
 import { createTuiController } from "../tui/controller.ts";
 import { startTui } from "../tui/main.ts";
+import { hasProvider, startConfigFlow } from "./config-flow.ts";
 import { describeSelection, selectRuntime } from "./runtime-selection.ts";
-import { needsSetup, startSetupFlow } from "./setup-flow.ts";
 
 /**
  * `lycwl` entry point.
@@ -80,7 +80,7 @@ if (!process.stdin.isTTY) {
 // First-time setup: when no Provider is configured there is nothing to run, so the
 // setup screen is shown instead of a demo session that would look like a working
 // agent. `hasProvider` reads the document rather than guessing from file presence.
-const configureFirst = await needsSetup(configStore);
+const configureFirst = !(await hasProvider(configStore));
 
 if (configureFirst) {
   process.stderr.write(
@@ -91,7 +91,7 @@ if (configureFirst) {
       "",
     ].join("\n"),
   );
-  const flow = startSetupFlow({
+  const flow = startConfigFlow({
     configStore,
     vault,
     workspaceRoot: process.cwd(),
@@ -107,23 +107,9 @@ if (configureFirst) {
   process.exit(0);
 }
 
-const loaded = await configStore.load();
-const settings = loaded.ok ? parseSettings(loaded.value.text) : null;
-
 // A stable Session per workspace, so launching again in the same project
 // continues the same durable log instead of starting from nothing.
 const sessionId = workspaceSessionId(process.cwd());
-const selection = await selectRuntime({
-  workspaceRoot: process.cwd(),
-  dataDirectory,
-  settings,
-  hasSettings: loaded.ok,
-  // A read-only Session refuses Shell by design, so --shell implies write mode.
-  enableWrites: args.includes("--write") || args.includes("--shell"),
-  enableSkills: args.includes("--skills"),
-  enableProcesses: args.includes("--shell"),
-  sessionId,
-});
 
 // Report whether an earlier session exists, so the user knows the history is
 // being continued rather than silently reused.
@@ -132,9 +118,44 @@ if (priorEvents > 0) {
   process.stderr.write(`continuing session ${sessionId} (${priorEvents} recorded event(s))\n`);
 }
 
-process.stderr.write(`${describeSelection(selection).join("\n")}\n\n`);
+// Reopen configuration from inside the Session. The browser replaces the app,
+// so the app is unmounted first and the flow starts a fresh Session afterwards.
+function openConfig(): void {
+  const flow = startConfigFlow({
+    configStore,
+    vault,
+    workspaceRoot: process.cwd(),
+    dataDirectory,
+    onReady: (lines) => {
+      process.stderr.write(`${lines.join("\n")}\n\n`);
+      startSession();
+    },
+    onDiscard: () => {
+      process.stderr.write("configuration unchanged\n");
+      startSession();
+    },
+  });
+  void flow.done;
+}
 
-startTui(createTuiController({ coordinator: selection.coordinator }));
+async function startSession(): Promise<void> {
+  const loadedNow = await configStore.load();
+  const current = loadedNow.ok ? parseSettings(loadedNow.value.text) : null;
+  const chosen = await selectRuntime({
+    workspaceRoot: process.cwd(),
+    dataDirectory,
+    settings: current,
+    hasSettings: loadedNow.ok,
+    enableWrites: args.includes("--write") || args.includes("--shell"),
+    enableSkills: args.includes("--skills"),
+    enableProcesses: args.includes("--shell"),
+    sessionId,
+  });
+  process.stderr.write(`${describeSelection(chosen).join("\n")}\n\n`);
+  startTui(createTuiController({ coordinator: chosen.coordinator }), openConfig);
+}
+
+void startSession();
 
 async function describeConfiguration(
   state: Awaited<ReturnType<typeof configStore.load>>,

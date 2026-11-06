@@ -8,14 +8,27 @@ import type { TuiController } from "./controller.ts";
  * Mount the TUI. A caller must supply a controller wired to a real coordinator;
  * this module performs no tool, network or credential work itself.
  */
-export function startTui(controller: TuiController): { unmount: () => void } {
+export function startTui(
+  controller: TuiController,
+  /** Called when the composer asked to open configuration. */
+  onConfigRequest?: () => void,
+): { unmount: () => void } {
   let instance: Instance | null = null;
 
   const element = (): ReactElement =>
     createElement(App, {
       view: controller.view(),
       onSubmit: (text) => {
-        void controller.submit(text).then(refresh);
+        void controller.submit(text).then(() => {
+          // A /config request must be consumed before the view is redrawn, so
+          // the browser mounts instead of the stale app.
+          if (controller.takeConfigRequest()) {
+            instance?.unmount();
+            onConfigRequest?.();
+            return;
+          }
+          refresh();
+        });
       },
       onApprove: () => {
         void controller.approve().then(refresh);

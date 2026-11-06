@@ -61,6 +61,26 @@ export type ProviderHttpResult =
   | Readonly<{ ok: false; code: ProviderHttpFailure }>;
 
 export async function providerHttpsPost(input: ProviderHttpRequest): Promise<ProviderHttpResult> {
+  return providerHttpsRequest("POST", input);
+}
+
+/**
+ * Bounded HTTPS GET, for read-only provider endpoints such as a model list.
+ *
+ * Same guarantees as the POST path: HTTPS only, no proxy inheritance, no redirect
+ * following, bounded connect/total time and bounded response size. A GET carries no
+ * body, so `bodyText` is ignored.
+ */
+export async function providerHttpsGet(
+  input: Omit<ProviderHttpRequest, "bodyText"> & { bodyText?: string },
+): Promise<ProviderHttpResult> {
+  return providerHttpsRequest("GET", { ...input, bodyText: "" });
+}
+
+async function providerHttpsRequest(
+  method: "GET" | "POST",
+  input: ProviderHttpRequest,
+): Promise<ProviderHttpResult> {
   let parsed: URL;
   try {
     parsed = new URL(input.url);
@@ -102,7 +122,7 @@ export async function providerHttpsPost(input: ProviderHttpRequest): Promise<Pro
     try {
       request = httpsRequest(
         {
-          method: "POST",
+          method,
           host: parsed.hostname,
           port: parsed.port.length === 0 ? 443 : Number(parsed.port),
           path: `${parsed.pathname}${parsed.search}`,
@@ -114,7 +134,9 @@ export async function providerHttpsPost(input: ProviderHttpRequest): Promise<Pro
           ...(input.trustedCaPem === undefined ? {} : { ca: input.trustedCaPem }),
           headers: {
             ...input.headers,
-            "content-length": Buffer.byteLength(input.bodyText, "utf8").toString(),
+            ...(method === "POST"
+              ? { "content-length": Buffer.byteLength(input.bodyText, "utf8").toString() }
+              : {}),
           },
           timeout: connectTimeoutMs,
         },
