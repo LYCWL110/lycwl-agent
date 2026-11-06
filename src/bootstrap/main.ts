@@ -178,7 +178,10 @@ async function startSession(): Promise<void> {
     sessionId,
   });
   process.stderr.write(`${describeSelection(chosen).join("\n")}\n\n`);
-  startTui(createTuiController({ coordinator: chosen.coordinator }), openConfig);
+  startTui(createTuiController({ coordinator: chosen.coordinator }), {
+    ...(chosen.kind === "real" ? { modelLabel: chosen.config.model } : {}),
+    onConfigRequest: openConfig,
+  });
 }
 
 void startSession();
