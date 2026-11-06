@@ -10,6 +10,7 @@ import {
   visibleWindow,
 } from "./config-browser.ts";
 import { type Capabilities, colorFor, rowStyle } from "./palette.ts";
+import { TextInput } from "./text-input.ts";
 
 export type ConfigBrowserProps = Readonly<{
   state: BrowserState;
@@ -137,15 +138,27 @@ export function ConfigBrowser(props: ConfigBrowserProps): ReactElement {
       h(Text, colorProps(colorFor("faint", capabilities)), "─".repeat(width)),
       state.modelInput !== null
         ? h(
-            Text,
-            colorProps(colorFor("primary", capabilities)),
-            `Model id: ${clipText(state.modelInput, Math.max(1, width - 11))}▏`,
+            Box,
+            null,
+            h(Text, colorProps(colorFor("primary", capabilities)), "Model id: "),
+            h(TextInput, {
+              value: state.modelInput,
+              cursor: state.modelCursor,
+              width: Math.max(1, width - 10),
+              color: colorFor("primary", capabilities),
+            }),
           )
         : state.filterMode
           ? h(
-              Text,
-              colorProps(colorFor("primary", capabilities)),
-              `Filter: ${clipText(state.filter, Math.max(1, width - 9))}▏`,
+              Box,
+              null,
+              h(Text, colorProps(colorFor("primary", capabilities)), "Filter: "),
+              h(TextInput, {
+                value: state.filter,
+                cursor: state.filterCursor,
+                width: Math.max(1, width - 8),
+                color: colorFor("primary", capabilities),
+              }),
             )
           : null,
       state.status === null
@@ -223,9 +236,14 @@ function translateKey(
     delete?: boolean;
     ctrl?: boolean;
     meta?: boolean;
+    home?: boolean;
+    end?: boolean;
   },
 ): BrowserKey | null {
   if (key.ctrl === true && input === "z") return "undo";
+  if (key.ctrl === true && input === "u") return "clear";
+  if (key.home === true) return "home";
+  if (key.end === true) return "end";
   if (key.leftArrow === true) return "left";
   if (key.rightArrow === true) return "right";
   if (key.upArrow === true) return "up";

@@ -2,6 +2,8 @@ import { Box, Text, useInput } from "ink";
 import { createElement, type ReactElement, useState } from "react";
 import { Brand, clipText, colorProps, useViewport, type Viewport, wrapText } from "./chrome.ts";
 import { type Capabilities, colorFor, detectCapabilities } from "./palette.ts";
+import { editText, type TextEdit } from "./text-edit.ts";
+import { TextInput } from "./text-input.ts";
 import type { TuiViewState } from "./view-model.ts";
 
 /**
@@ -41,7 +43,8 @@ export type AppProps = Readonly<{
 
 export function App(props: AppProps): ReactElement {
   const { view } = props;
-  const [draft, setDraft] = useState("");
+  const [editor, setEditor] = useState<TextEdit>({ value: "", cursor: 0 });
+  const draft = editor.value;
   const [scroll, setScroll] = useState(0);
   const viewport = useViewport(props.viewport);
   const width = Math.max(1, viewport.columns - 4);
@@ -73,13 +76,9 @@ export function App(props: AppProps): ReactElement {
       setScroll((current) => Math.max(0, current - Math.max(1, bodyRows - 1)));
       return;
     }
-    if (key.end) {
-      setScroll(0);
-      return;
-    }
     if (key.return) {
       const text = draft.trim();
-      setDraft("");
+      setEditor({ value: "", cursor: 0 });
       setScroll(0);
       if (text.length === 0) return;
       if (view.pendingQuestion !== null) props.onAnswer(text);
@@ -89,11 +88,7 @@ export function App(props: AppProps): ReactElement {
       } else props.onSubmit(text);
       return;
     }
-    if (key.backspace || key.delete) {
-      setDraft((current) => [...current].slice(0, -1).join(""));
-      return;
-    }
-    if (input.length > 0 && !key.ctrl && !key.meta) setDraft((current) => current + input);
+    setEditor((current) => editText(current, input, key));
   });
 
   const lobby = view.runStatus === "idle" && view.transcript.length === 0 && view.todo === null;
@@ -117,7 +112,7 @@ export function App(props: AppProps): ReactElement {
       h(
         Box,
         { width: lobbyWidth, flexDirection: "column", marginTop: 1 },
-        h(Composer, { view, draft, capabilities, width: lobbyWidth }),
+        h(Composer, { view, editor, capabilities, width: lobbyWidth }),
         h(Footer, {
           view,
           capabilities,
@@ -168,7 +163,7 @@ export function App(props: AppProps): ReactElement {
         ? `${start + 1}–${Math.min(start + bodyRows, lines.length)} / ${lines.length}  ·  PgUp / PgDn`
         : "─".repeat(width),
     ),
-    h(Composer, { view, draft, capabilities, width }),
+    h(Composer, { view, editor, capabilities, width }),
     h(Footer, {
       view,
       capabilities,
@@ -286,11 +281,11 @@ function marker(state: string): string {
  */
 function Composer(props: {
   view: TuiViewState;
-  draft: string;
+  editor: TextEdit;
   capabilities: Capabilities;
   width: number;
 }): ReactElement {
-  const { view, draft, capabilities } = props;
+  const { view, editor, capabilities } = props;
   const accent = colorFor(view.queueingInput ? "secondary" : "primary", capabilities);
   const hint =
     view.pendingApproval !== null
@@ -313,17 +308,12 @@ function Composer(props: {
       h(Text, colorProps(accent), "▌ "),
       h(Text, colorProps(accent), view.queueingInput ? "queue" : "task"),
       h(Text, null, " › "),
-      h(
-        Text,
-        null,
-        draft.length === 0
-          ? ""
-          : clipText(
-              [...draft].slice(-Math.max(1, props.width - 12)).join(""),
-              Math.max(1, props.width - 11),
-            ),
-      ),
-      h(Text, colorProps(accent), "_"),
+      h(TextInput, {
+        value: editor.value,
+        cursor: editor.cursor,
+        width: Math.max(1, props.width - (view.queueingInput ? 10 : 9)),
+        color: accent,
+      }),
     ),
     h(
       Box,

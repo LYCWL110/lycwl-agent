@@ -10,6 +10,8 @@
  * without a terminal. The renderer reads this state; it does not own it.
  */
 
+import { characters, editText } from "./text-edit.ts";
+
 export const BROWSER_LIMITS = Object.freeze({
   /** Rows visible per column; scrolling keeps the cursor inside the window. */
   visibleRows: 8,
@@ -39,7 +41,9 @@ export type BrowserState = Readonly<{
   scroll: Readonly<Record<Column, number>>;
   filter: string;
   filterMode: boolean;
+  filterCursor: number;
   modelInput: string | null;
+  modelCursor: number;
   status: Readonly<{ text: string; isError: boolean }> | null;
   /** A snapshot taken before a destructive action, for a single-step undo. */
   undo: BrowserState | null;
@@ -70,7 +74,9 @@ export function createBrowserState(seed: BrowserSeed): BrowserState {
     scroll: { provider: 0, protocol: 0, model: 0 },
     filter: "",
     filterMode: false,
+    filterCursor: 0,
     modelInput: null,
+    modelCursor: 0,
     status: null,
     undo: null,
   };
@@ -87,6 +93,9 @@ export type BrowserKey =
   | "backspace"
   | "delete"
   | "undo"
+  | "home"
+  | "end"
+  | "clear"
   | { kind: "text"; value: string };
 
 export type BrowserOutcome = Readonly<{
@@ -104,40 +113,70 @@ export type BrowserOutcome = Readonly<{
  * accidentally move the cursor or commit.
  */
 export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
+  if (
+    (state.modelInput !== null || state.filterMode) &&
+    !["enter", "escape", "tab", "up", "down", "undo"].includes(typeof key === "string" ? key : "")
+  ) {
+    const model = state.modelInput !== null;
+    const edited = editText(
+      {
+        value: model ? (state.modelInput ?? "") : state.filter,
+        cursor: model ? state.modelCursor : state.filterCursor,
+      },
+      typeof key === "object" ? key.value : key === "clear" ? "u" : "",
+      typeof key === "object"
+        ? {}
+        : {
+            leftArrow: key === "left",
+            rightArrow: key === "right",
+            home: key === "home",
+            end: key === "end",
+            backspace: key === "backspace",
+            delete: key === "delete",
+            ctrl: key === "clear",
+          },
+    );
+    if (model && edited.value.length > BROWSER_LIMITS.maxModelLength)
+      return {
+        state: withStatus(state, "model name is too long", true),
+        commit: null,
+        cancel: false,
+      };
+    return {
+      state: model
+        ? { ...state, modelInput: edited.value, modelCursor: edited.cursor }
+        : {
+            ...state,
+            filter: edited.value,
+            filterCursor: edited.cursor,
+            modelIndex: 0,
+            scroll: { ...state.scroll, model: 0 },
+          },
+      commit: null,
+      cancel: false,
+    };
+  }
   if (typeof key === "object") {
-    if (state.modelInput !== null) {
+    if (key.value === "/") {
       return {
         state: {
           ...state,
-          modelInput: (state.modelInput + key.value).slice(0, BROWSER_LIMITS.maxModelLength),
+          filterMode: true,
+          filterCursor: characters(state.filter).length,
+          activeColumn: "model",
         },
         commit: null,
         cancel: false,
       };
     }
-    if (!state.filterMode) {
-      if (key.value === "/") {
-        return {
-          state: { ...state, filterMode: true, activeColumn: "model" },
-          commit: null,
-          cancel: false,
-        };
-      }
-      if (key.value === "a" && state.activeColumn === "model") {
-        return { state: { ...state, modelInput: "", status: null }, commit: null, cancel: false };
-      }
-      return { state, commit: null, cancel: false };
+    if (key.value === "a" && state.activeColumn === "model") {
+      return {
+        state: { ...state, modelInput: "", modelCursor: 0, status: null },
+        commit: null,
+        cancel: false,
+      };
     }
-    return {
-      state: {
-        ...state,
-        filter: state.filter + key.value,
-        modelIndex: 0,
-        scroll: { ...state.scroll, model: 0 },
-      },
-      commit: null,
-      cancel: false,
-    };
+    return { state, commit: null, cancel: false };
   }
 
   if (key === "escape") {
@@ -169,6 +208,8 @@ export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
   }
 
   if (key === "undo") {
+    if (state.modelInput !== null || state.filterMode)
+      return { state, commit: null, cancel: false };
     if (state.undo === null) {
       return {
         state: withStatus(state, "nothing to undo", false),
@@ -215,27 +256,6 @@ export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
         protocol: state.protocols[state.protocolIndex] ?? "",
         model: model.id,
       },
-      cancel: false,
-    };
-  }
-
-  if (key === "backspace") {
-    if (state.modelInput !== null) {
-      return {
-        state: { ...state, modelInput: [...state.modelInput].slice(0, -1).join("") },
-        commit: null,
-        cancel: false,
-      };
-    }
-    if (!state.filterMode) return { state, commit: null, cancel: false };
-    return {
-      state: {
-        ...state,
-        filter: [...state.filter].slice(0, -1).join(""),
-        modelIndex: 0,
-        scroll: { ...state.scroll, model: 0 },
-      },
-      commit: null,
       cancel: false,
     };
   }

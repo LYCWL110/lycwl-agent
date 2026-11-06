@@ -4,6 +4,7 @@ import type { ConfigDocument, ConfigStore } from "../adapters/windows/config-sto
 import type { FileVault } from "../adapters/windows/file-credential-vault.ts";
 import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
 import {
+  type ProviderConfig,
   readProviderConfig,
   SUPPORTED_PROTOCOLS,
   type SupportedProtocol,
@@ -75,6 +76,7 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
     apiKey: "",
   };
   let baseDocument: ConfigDocument | null = null;
+  let savedConfig: ProviderConfig | null = null;
   let hasStoredCredential = false;
   let error: Readonly<{ field: SetupField; code: string }> | null = null;
   let saveError: string | null = null;
@@ -103,6 +105,22 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
         error,
         saveError,
         warnings: ["credentials are stored unencrypted"],
+        onBrowse: (value: SetupDraft) => {
+          if (busy || closed) return;
+          draft = value;
+          phase = {
+            kind: "browser",
+            state: createBrowserState({
+              providerLabel: providerLabel(value.baseUrl),
+              protocols: SUPPORTED_PROTOCOLS,
+              currentProtocol: value.protocol ?? "anthropic_messages",
+              models: value.model ? [value.model] : [],
+              currentModel: value.model,
+            }),
+          };
+          redraw();
+          void fetchModels(value.protocol ?? "anthropic_messages");
+        },
         onSave: (value: SetupDraft) => {
           void persist(value);
         },
@@ -145,7 +163,6 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
           ...draft,
           protocol: value.protocol as SupportedProtocol,
           model: value.model,
-          apiKey: "",
         });
       },
       onCancel: () => {
@@ -203,6 +220,25 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
 
   async function fetchModels(protocol: SupportedProtocol): Promise<void> {
     if (options.fetchModels === undefined || busy || closed) return;
+    // Browsing a draft must not disclose a stored key to an unsaved destination.
+    if (
+      savedConfig === null ||
+      draft.baseUrl !== savedConfig.baseUrl ||
+      draft.credentialRef !== savedConfig.credentialRef ||
+      draft.apiKey !== ""
+    ) {
+      if (phase.kind === "browser") {
+        phase = {
+          kind: "browser",
+          state: {
+            ...phase.state,
+            status: { text: "Save connection before refreshing models", isError: false },
+          },
+        };
+        redraw();
+      }
+      return;
+    }
     const version = ++fetchVersion;
     const key = await options.vault.read({
       reference: draft.credentialRef,
@@ -237,6 +273,7 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
         const parsed = parseJsonc(loaded.value.text);
         const config = readProviderConfig(parsed.ok ? toPlainValue(parsed.value) : {});
         if (config.ok) {
+          savedConfig = config.value;
           draft = { ...config.value, apiKey: "" };
           const key = await options.vault.read({
             reference: config.value.credentialRef,
@@ -245,18 +282,6 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
           });
           if (closed) return;
           hasStoredCredential = key.ok;
-          if (key.ok) {
-            phase = {
-              kind: "browser",
-              state: createBrowserState({
-                providerLabel: new URL(config.value.baseUrl).hostname,
-                protocols: SUPPORTED_PROTOCOLS,
-                currentProtocol: config.value.protocol,
-                models: [config.value.model],
-                currentModel: config.value.model,
-              }),
-            };
-          }
         }
       } else if (loaded.code !== "config_missing") {
         saveError = loaded.code;
@@ -266,11 +291,18 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
     }
     if (closed) return;
     instance = (options.mount ?? render)(element());
-    if (phase.kind === "browser") void fetchModels(draft.protocol ?? "anthropic_messages");
   }
 
   void initialize();
   return { done, unmount: () => close("discarded") };
+}
+
+function providerLabel(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).hostname;
+  } catch {
+    return "Provider";
+  }
 }
 
 export async function hasProvider(configStore: ConfigStore): Promise<boolean> {
