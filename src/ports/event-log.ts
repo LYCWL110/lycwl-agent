@@ -44,6 +44,12 @@ export type InternalEventPayload =
       estimatedAuxiliaryTokens: number;
       /** Version of the summary artifact shape. */
       artifactVersion: number;
+      /**
+       * The rendered summary that replaced the summarised groups. Recorded so a
+       * rebuilt Session can present the summary rather than replaying the
+       * original turns it was meant to replace.
+       */
+      summaryText: string;
     }>
   | Readonly<{
       kind: "context_compaction_rejected";

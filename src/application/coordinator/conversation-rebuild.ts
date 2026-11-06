@@ -58,10 +58,21 @@ export function rebuildConversation(events: readonly InternalEvent[]): RebuildRe
     }
   >();
   let runTerminal = false;
+  /**
+   * Summary text applied by a compaction in this Run, or null. When set, the
+   * turns that preceded it are replaced by this summary: replaying them would
+   * undo the compaction the Run actually performed.
+   */
+  let compactionSummary: string | null = null;
 
   const flush = (): void => {
     if (!runTerminal) return;
-    if (pendingUser !== null) conversation.push({ kind: "user", text: pendingUser });
+    if (compactionSummary !== null) {
+      // A compacted Run contributes its summary and its post-compaction turns.
+      conversation.push({ kind: "user", text: compactionSummary });
+    } else if (pendingUser !== null) {
+      conversation.push({ kind: "user", text: pendingUser });
+    }
 
     if (assistantSeen) {
       conversation.push({
@@ -91,6 +102,7 @@ export function rebuildConversation(events: readonly InternalEvent[]): RebuildRe
 
     runs += 1;
     pendingUser = null;
+    compactionSummary = null;
     assistantText = null;
     assistantSeen = false;
     callingTurnText = null;
@@ -146,6 +158,11 @@ export function rebuildConversation(events: readonly InternalEvent[]): RebuildRe
           text: null,
           toolName: event.payload.toolName,
         });
+        break;
+      case "context_compacted":
+        // The Run replaced its earlier turns with this summary. Rebuilding the
+        // originals would present a history the model no longer holds.
+        compactionSummary = event.payload.summaryText;
         break;
       case "run_completed":
       case "run_failed":

@@ -1137,6 +1137,7 @@ export class RuntimeCoordinator {
         sourceHighWaterSeq: planned.sourceHighWaterSeq,
         estimatedAuxiliaryTokens: planned.estimatedAuxiliaryTokens,
         artifactVersion: validated.artifact.schemaVersion,
+        summaryText: artifactText,
       });
       return { kind: "continue" };
     }
