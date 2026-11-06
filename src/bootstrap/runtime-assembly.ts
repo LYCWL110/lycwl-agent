@@ -113,6 +113,9 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
           model: config.model,
           baseUrl: config.baseUrl,
           maxOutputTokens: config.maxOutputTokens,
+          ...(config.reasoningEffort === undefined
+            ? {}
+            : { reasoningEffort: config.reasoningEffort }),
           tools: options.toolDefinitions,
           ...(options.post === undefined ? {} : { post: options.post }),
           ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
@@ -123,6 +126,9 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
             model: config.model,
             baseUrl: config.baseUrl,
             maxTokens: config.maxOutputTokens,
+            ...(config.reasoningEffort === undefined
+              ? {}
+              : { reasoningEffort: config.reasoningEffort }),
             tools: options.toolDefinitions,
             ...(options.post === undefined ? {} : { post: options.post }),
             ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),

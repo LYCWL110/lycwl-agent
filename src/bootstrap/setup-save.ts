@@ -5,6 +5,7 @@ import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
 import { insertTopLevelValue, replaceTopLevelValue } from "../domain/config/jsonc-edit.ts";
 import {
   type ProviderConfigResult,
+  type ReasoningEffort,
   readProviderConfig,
   validateProviderConfig,
 } from "../domain/config/provider-config.ts";
@@ -34,6 +35,7 @@ export type SaveSetupResult =
         model: string;
         credentialRef: string;
         maxOutputTokens: number;
+        reasoningEffort?: ReasoningEffort;
       }>;
       credentialWritten: boolean;
       document: ConfigDocument | null;
@@ -66,13 +68,21 @@ export async function saveSetup(input: {
   const base =
     input.baseDocument === undefined ? (current.ok ? current.value : null) : input.baseDocument;
   const existing = readProviderConfig(base === null ? {} : parseSettings(base.text));
+  const protocol =
+    input.draft.protocol ?? (existing.ok ? existing.value.protocol : "anthropic_messages");
   const validated = validateProviderConfig({
-    protocol:
-      input.draft.protocol ?? (existing.ok ? existing.value.protocol : "anthropic_messages"),
+    protocol,
     baseUrl: input.draft.baseUrl,
     model: input.draft.model,
     credentialRef: input.draft.credentialRef,
     ...(existing.ok ? { maxOutputTokens: existing.value.maxOutputTokens } : {}),
+    reasoningEffort:
+      input.draft.reasoningEffort ??
+      (protocol === "anthropic_messages"
+        ? "default"
+        : existing.ok
+          ? existing.value.reasoningEffort
+          : undefined),
   });
   if (!validated.ok) {
     const field = mapField(validated.field);
@@ -90,6 +100,7 @@ export async function saveSetup(input: {
     model: config.model,
     credentialRef: config.credentialRef,
     maxOutputTokens: config.maxOutputTokens,
+    ...(config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
   });
   if (!withProvider.ok) {
     return { ok: false, code: "config_write_failed", detail: withProvider.code };
@@ -165,6 +176,9 @@ export async function saveSetup(input: {
       model: reread.value.model,
       credentialRef: reread.value.credentialRef,
       maxOutputTokens: reread.value.maxOutputTokens,
+      ...(reread.value.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: reread.value.reasoningEffort }),
     },
     credentialWritten,
     document: saved.value,
@@ -177,6 +191,7 @@ type ProviderBlock = Readonly<{
   model: string;
   credentialRef: string;
   maxOutputTokens: number;
+  reasoningEffort?: ReasoningEffort;
 }>;
 
 /**
@@ -233,6 +248,9 @@ function serializeObjectLiteral(block: ProviderBlock): string {
     `"model": ${JSON.stringify(block.model)}`,
     `"credentialRef": ${JSON.stringify(block.credentialRef)}`,
     `"maxOutputTokens": ${block.maxOutputTokens}`,
+    ...(block.reasoningEffort === undefined
+      ? []
+      : [`"reasoningEffort": ${JSON.stringify(block.reasoningEffort)}`]),
   ].join(",\n    ");
   return `{\n    ${inner}\n  }`;
 }
@@ -276,6 +294,7 @@ function mapField(field: string | undefined): SetupField | undefined {
   if (field === "baseUrl") return "baseUrl";
   if (field === "model") return "model";
   if (field === "credentialRef") return "credentialRef";
+  if (field === "reasoningEffort") return "reasoningEffort";
   return undefined;
 }
 

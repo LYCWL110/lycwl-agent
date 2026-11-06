@@ -1,10 +1,11 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, usePaste } from "ink";
 import { createElement, type ReactElement, useState } from "react";
 import { Brand, clipText, colorProps, useViewport, type Viewport, wrapText } from "./chrome.ts";
 import { type Capabilities, colorFor, detectCapabilities } from "./palette.ts";
+import { useTerminalWheel } from "./terminal-wheel.ts";
 import { editText, type TextEdit } from "./text-edit.ts";
 import { TextInput } from "./text-input.ts";
-import type { TuiViewState } from "./view-model.ts";
+import { COMPOSER_COMMANDS, type TuiViewState } from "./view-model.ts";
 
 /**
  * Main TUI layout, following the Miyu reference's structure.
@@ -45,10 +46,34 @@ export function App(props: AppProps): ReactElement {
   const { view } = props;
   const [editor, setEditor] = useState<TextEdit>({ value: "", cursor: 0 });
   const draft = editor.value;
-  const [scroll, setScroll] = useState(0);
+  const [scroll, setScroll] = useState<number | null>(null);
+  const [commandIndex, setCommandIndex] = useState(0);
+  const [dismissedCommands, setDismissedCommands] = useState(false);
   const viewport = useViewport(props.viewport);
   const width = Math.max(1, viewport.columns - 4);
-  const bodyRows = Math.max(3, viewport.rows - 9);
+  const lobby = view.runStatus === "idle" && view.transcript.length === 0 && view.todo === null;
+  const lobbyWidth = Math.max(1, Math.min(84, Math.max(50, Math.floor((width * 2) / 3)), width));
+  const composerWidth = lobby ? lobbyWidth : width;
+  const commands =
+    !dismissedCommands &&
+    view.pendingApproval === null &&
+    view.pendingQuestion === null &&
+    draft.startsWith("/")
+      ? COMPOSER_COMMANDS.filter((command) => command.name.startsWith(draft))
+      : [];
+  const selectedCommand = Math.min(commandIndex, Math.max(0, commands.length - 1));
+  const commandLines = commands.flatMap((command, index) =>
+    wrapText(
+      `${index === selectedCommand ? "> " : "  "}${command.name}  ${command.description}${
+        view.canSubmit ? "" : " Available after the current run ends."
+      }`,
+      composerWidth,
+    ),
+  );
+  const bodyRows = Math.max(1, viewport.rows - 9 - commandLines.length);
+  const lines = documentLines(view, width);
+  const maxStart = Math.max(0, lines.length - bodyRows);
+  const start = scroll === null ? maxStart : Math.min(scroll, maxStart);
   const capabilities =
     props.capabilities ??
     detectCapabilities({
@@ -59,27 +84,67 @@ export function App(props: AppProps): ReactElement {
       windowsTerminal: process.env["WT_SESSION"] !== undefined,
     });
 
+  function scrollBy(delta: number): void {
+    setScroll((current) => {
+      const top = current === null ? maxStart : Math.min(current, maxStart);
+      const next = Math.max(0, Math.min(maxStart, top + delta));
+      return next === maxStart ? null : next;
+    });
+  }
+
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
       props.onCancelRun();
       return;
     }
     if (key.escape) {
+      if (commands.length > 0) {
+        setDismissedCommands(true);
+        return;
+      }
       props.onQuit();
       return;
     }
     if (key.pageUp) {
-      setScroll((current) => current + Math.max(1, bodyRows - 1));
+      scrollBy(-Math.max(1, bodyRows - 1));
       return;
     }
     if (key.pageDown) {
-      setScroll((current) => Math.max(0, current - Math.max(1, bodyRows - 1)));
+      scrollBy(Math.max(1, bodyRows - 1));
       return;
+    }
+    if (key.ctrl && key.home) {
+      setScroll(0);
+      return;
+    }
+    if (key.ctrl && key.end) {
+      setScroll(null);
+      return;
+    }
+    if (commands.length > 0) {
+      if (key.upArrow || key.downArrow) {
+        setCommandIndex(
+          (selectedCommand + (key.upArrow ? -1 : 1) + commands.length) % commands.length,
+        );
+        return;
+      }
+      const command = commands[selectedCommand];
+      if (key.tab && command !== undefined) {
+        setEditor({ value: command.name, cursor: command.name.length });
+        return;
+      }
+      if (key.return && !view.canSubmit) return;
+      if (key.return && command !== undefined) {
+        setEditor({ value: "", cursor: 0 });
+        setScroll(null);
+        props.onSubmit(command.name);
+        return;
+      }
     }
     if (key.return) {
       const text = draft.trim();
       setEditor({ value: "", cursor: 0 });
-      setScroll(0);
+      setScroll(null);
       if (text.length === 0) return;
       if (view.pendingQuestion !== null) props.onAnswer(text);
       else if (view.pendingApproval !== null) {
@@ -88,20 +153,33 @@ export function App(props: AppProps): ReactElement {
       } else props.onSubmit(text);
       return;
     }
+    setCommandIndex(0);
+    setDismissedCommands(false);
     setEditor((current) => editText(current, input, key));
   });
 
-  const lobby = view.runStatus === "idle" && view.transcript.length === 0 && view.todo === null;
+  usePaste((text) => {
+    setCommandIndex(0);
+    setDismissedCommands(false);
+    setEditor((current) => editText(current, text, {}));
+  });
+
+  useTerminalWheel((event) => {
+    if (!lobby && event.row >= 3 && event.row < 3 + bodyRows && event.column <= viewport.columns) {
+      scrollBy(event.direction === "up" ? -3 : 3);
+    }
+  });
+
   if (lobby) {
-    const lobbyWidth = Math.max(1, Math.min(84, Math.max(50, Math.floor((width * 2) / 3)), width));
     return h(
       Box,
       {
         width: viewport.columns,
-        minHeight: Math.max(1, viewport.rows - 1),
+        height: Math.max(1, viewport.rows - 1),
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
+        overflow: "hidden",
       },
       h(Brand, {
         capabilities,
@@ -112,7 +190,7 @@ export function App(props: AppProps): ReactElement {
       h(
         Box,
         { width: lobbyWidth, flexDirection: "column", marginTop: 1 },
-        h(Composer, { view, editor, capabilities, width: lobbyWidth }),
+        h(Composer, { view, editor, capabilities, width: lobbyWidth, commandLines }),
         h(Footer, {
           view,
           capabilities,
@@ -121,23 +199,23 @@ export function App(props: AppProps): ReactElement {
           width: lobbyWidth,
         }),
       ),
-      h(
-        Box,
-        { marginTop: 1 },
-        h(Text, colorProps(colorFor("dim", capabilities)), "lycwl  ·  0.1.0"),
-      ),
+      viewport.rows < 16
+        ? null
+        : h(
+            Box,
+            { marginTop: 1 },
+            h(Text, colorProps(colorFor("dim", capabilities)), "lycwl  ·  0.1.0"),
+          ),
     );
   }
-  const lines = documentLines(view, width);
-  const offset = Math.min(scroll, Math.max(0, lines.length - bodyRows));
-  const start = Math.max(0, lines.length - bodyRows - offset);
   return h(
     Box,
     {
       flexDirection: "column",
       width: viewport.columns,
-      minHeight: Math.max(1, viewport.rows - 1),
+      height: Math.max(1, viewport.rows - 1),
       paddingX: 2,
+      overflow: "hidden",
     },
     h(TitleBar, { view, capabilities }),
     h(Text, colorProps(colorFor("faint", capabilities)), "─".repeat(width)),
@@ -160,10 +238,13 @@ export function App(props: AppProps): ReactElement {
       Text,
       colorProps(colorFor("faint", capabilities)),
       lines.length > bodyRows
-        ? `${start + 1}–${Math.min(start + bodyRows, lines.length)} / ${lines.length}  ·  PgUp / PgDn`
+        ? clipText(
+            `${start + 1}–${Math.min(start + bodyRows, lines.length)} / ${lines.length}  ·  Scroll / PgUp / PgDn`,
+            width,
+          )
         : "─".repeat(width),
     ),
-    h(Composer, { view, editor, capabilities, width }),
+    h(Composer, { view, editor, capabilities, width, commandLines }),
     h(Footer, {
       view,
       capabilities,
@@ -284,6 +365,7 @@ function Composer(props: {
   editor: TextEdit;
   capabilities: Capabilities;
   width: number;
+  commandLines: readonly string[];
 }): ReactElement {
   const { view, editor, capabilities } = props;
   const accent = colorFor(view.queueingInput ? "secondary" : "primary", capabilities);
@@ -301,7 +383,17 @@ function Composer(props: {
             : "run is busy";
   return h(
     Box,
-    { flexDirection: "column", marginTop: 1 },
+    { flexDirection: "column", marginTop: 1, flexShrink: 0 },
+    ...props.commandLines.map((line, index) =>
+      h(
+        Text,
+        {
+          key: index,
+          ...colorProps(colorFor(view.canSubmit ? "secondary" : "faint", capabilities)),
+        },
+        line,
+      ),
+    ),
     h(
       Box,
       null,

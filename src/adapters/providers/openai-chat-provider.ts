@@ -1,3 +1,4 @@
+import { protocolEndpoint, type ReasoningEffort } from "../../domain/config/provider-config.ts";
 import type {
   ModelProvider,
   ProviderCompletion,
@@ -53,6 +54,7 @@ export type OpenAiChatAdapterOptions = Readonly<{
   /** Base URL without the protocol path, for example `https://api.openai.com`. */
   baseUrl: string;
   maxTokens?: number;
+  reasoningEffort?: ReasoningEffort;
   tools?: readonly OpenAiToolDefinition[];
   /** Trusted Harness rules only; never project text. */
   system?: string;
@@ -76,7 +78,7 @@ export class OpenAiChatProvider implements ModelProvider {
     }
 
     const posted = await this.#post({
-      url: `${this.#options.baseUrl.replace(/\/+$/, "")}${OPENAI_CHAT_DEFAULTS.path}`,
+      url: protocolEndpoint(this.#options.baseUrl, "openai_chat"),
       headers: {
         "content-type": "application/json",
         accept: "application/json",
@@ -118,7 +120,12 @@ export function buildChatRequestBody(
 ): Readonly<Record<string, unknown>> {
   return {
     model: options.model,
-    max_tokens: options.maxTokens ?? OPENAI_CHAT_DEFAULTS.maxTokens,
+    ...(options.reasoningEffort === undefined || options.reasoningEffort === "default"
+      ? { max_tokens: options.maxTokens ?? OPENAI_CHAT_DEFAULTS.maxTokens }
+      : {
+          max_completion_tokens: options.maxTokens ?? OPENAI_CHAT_DEFAULTS.maxTokens,
+          reasoning_effort: options.reasoningEffort,
+        }),
     messages: toChatMessages(conversation, options.system),
     ...(options.tools === undefined || options.tools.length === 0
       ? {}

@@ -211,12 +211,6 @@ function buildTranscript(events: readonly InternalEvent[]): readonly TranscriptE
         });
         break;
       case "run_completed":
-        entries.push({
-          id: event.eventId,
-          kind: "system",
-          text: `run completed${payload.text === null ? "" : `: ${payload.text}`}`,
-          status: "completed",
-        });
         break;
       case "run_failed":
         entries.push({
@@ -253,6 +247,10 @@ export type ComposerIntent =
   | Readonly<{ kind: "open_config" }>
   | Readonly<{ kind: "reject"; reason: "empty" | "run_active" }>;
 
+export const COMPOSER_COMMANDS = [
+  { name: "/config", description: "Configure provider, protocol, model and API key." },
+] as const;
+
 export function interpretComposer(
   view: TuiViewState,
   text: string,
@@ -262,7 +260,7 @@ export function interpretComposer(
   if (trimmed.length === 0) return { kind: "reject", reason: "empty" };
   // A configuration change selects the next Run, so it must not be issued while one
   // is in flight: changing the route mid-Run would break the C03 binding.
-  if (trimmed === "/config") {
+  if (trimmed === COMPOSER_COMMANDS[0].name) {
     if (view.runStatus === "active" || view.waitingKind !== null) {
       return { kind: "reject", reason: "run_active" };
     }

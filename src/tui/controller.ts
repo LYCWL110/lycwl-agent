@@ -51,11 +51,17 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   /** Set when the composer asked to open the provider browser. */
   let configRequested = false;
 
+  function rememberEvents(incoming: readonly InternalEvent[]): readonly InternalEvent[] {
+    const known = new Set(events.map((event) => event.eventId));
+    events = [...events, ...incoming.filter((event) => !known.has(event.eventId))];
+    return events;
+  }
+
   function applyResult(result: CoordinatorResult): void {
     lastResult = result;
     runStatus = result.status;
     safeCode = result.safeCode;
-    events = result.events;
+    rememberEvents(result.events);
     todo = deriveTodo(todo, result.events);
   }
 
@@ -77,7 +83,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     return deriveView({
       runStatus: live?.status ?? runStatus,
       safeCode,
-      events: live?.events ?? events,
+      events: live === null ? events : rememberEvents(live.events),
       todo: todo.items.length === 0 ? null : todo,
       pendingApproval: deps.coordinator.pendingApprovalView(),
       pendingQuestion: deps.coordinator.pendingQuestionView(),

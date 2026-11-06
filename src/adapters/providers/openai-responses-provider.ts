@@ -1,3 +1,4 @@
+import { protocolEndpoint, type ReasoningEffort } from "../../domain/config/provider-config.ts";
 import type {
   ModelProvider,
   ProviderCompletion,
@@ -52,6 +53,7 @@ export type OpenAiResponsesAdapterOptions = Readonly<{
   model: string;
   baseUrl: string;
   maxOutputTokens?: number;
+  reasoningEffort?: ReasoningEffort;
   tools?: readonly OpenAiResponsesToolDefinition[];
   /** Trusted Harness rules only; never project text. */
   instructions?: string;
@@ -75,7 +77,7 @@ export class OpenAiResponsesProvider implements ModelProvider {
     }
 
     const posted = await this.#post({
-      url: `${this.#options.baseUrl.replace(/\/+$/, "")}${OPENAI_RESPONSES_DEFAULTS.path}`,
+      url: protocolEndpoint(this.#options.baseUrl, "openai_responses"),
       headers: {
         "content-type": "application/json",
         accept: "application/json",
@@ -118,6 +120,9 @@ export function buildResponsesRequestBody(
   return {
     model: options.model,
     max_output_tokens: options.maxOutputTokens ?? OPENAI_RESPONSES_DEFAULTS.maxOutputTokens,
+    ...(options.reasoningEffort === undefined || options.reasoningEffort === "default"
+      ? {}
+      : { reasoning: { effort: options.reasoningEffort } }),
     ...(options.instructions === undefined ? {} : { instructions: options.instructions }),
     input: toResponsesInput(conversation),
     ...(options.tools === undefined || options.tools.length === 0

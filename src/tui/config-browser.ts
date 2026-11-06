@@ -10,6 +10,7 @@
  * without a terminal. The renderer reads this state; it does not own it.
  */
 
+import { REASONING_EFFORTS, type ReasoningEffort } from "../domain/config/provider-config.ts";
 import { characters, editText } from "./text-edit.ts";
 
 export const BROWSER_LIMITS = Object.freeze({
@@ -34,6 +35,7 @@ export type BrowserState = Readonly<{
   providerLabel: string;
   protocols: readonly string[];
   protocolIndex: number;
+  reasoningEffort: ReasoningEffort;
   models: readonly ModelEntry[];
   modelIndex: number;
   activeColumn: Column;
@@ -55,6 +57,7 @@ export type BrowserSeed = Readonly<{
   currentProtocol: string;
   models: readonly string[];
   currentModel: string;
+  reasoningEffort?: ReasoningEffort;
 }>;
 
 export function createBrowserState(seed: BrowserSeed): BrowserState {
@@ -68,6 +71,7 @@ export function createBrowserState(seed: BrowserSeed): BrowserState {
     providerLabel: seed.providerLabel,
     protocols: seed.protocols,
     protocolIndex,
+    reasoningEffort: seed.reasoningEffort ?? "default",
     models,
     modelIndex,
     activeColumn: "protocol",
@@ -101,7 +105,7 @@ export type BrowserKey =
 export type BrowserOutcome = Readonly<{
   state: BrowserState;
   /** Set when the browser should close and apply this configuration. */
-  commit: Readonly<{ protocol: string; model: string }> | null;
+  commit: Readonly<{ protocol: string; model: string; reasoningEffort?: ReasoningEffort }> | null;
   /** Set when the browser should close without applying. */
   cancel: boolean;
 }>;
@@ -157,6 +161,23 @@ export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
     };
   }
   if (typeof key === "object") {
+    if (key.value === "r") {
+      if (state.protocols[state.protocolIndex] === "anthropic_messages")
+        return {
+          state: withStatus(state, "Reasoning effort is unavailable for this protocol", false),
+          commit: null,
+          cancel: false,
+        };
+      const index = REASONING_EFFORTS.indexOf(state.reasoningEffort);
+      return {
+        state: {
+          ...state,
+          reasoningEffort: REASONING_EFFORTS[(index + 1) % REASONING_EFFORTS.length] ?? "default",
+        },
+        commit: null,
+        cancel: false,
+      };
+    }
     if (key.value === "/") {
       return {
         state: {
@@ -255,6 +276,7 @@ export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
       commit: {
         protocol: state.protocols[state.protocolIndex] ?? "",
         model: model.id,
+        ...(state.reasoningEffort === "default" ? {} : { reasoningEffort: state.reasoningEffort }),
       },
       cancel: false,
     };
@@ -284,6 +306,9 @@ export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
         state: {
           ...state,
           protocolIndex: next,
+          ...(state.protocols[next] === "anthropic_messages"
+            ? { reasoningEffort: "default" as const }
+            : {}),
           ...(next === state.protocolIndex
             ? {}
             : {

@@ -144,23 +144,19 @@ function openConfig(): void {
  * Fetch the provider's model list for the configuration browser.
  *
  * This is the one place a configuration-time network request happens. A failure
- * returns an empty list so the browser stays usable with a hand-typed name.
+ * returns a typed failure so the browser can distinguish it from an empty list.
  */
 async function fetchModelsForBrowser(input: {
   protocol: string;
   baseUrl: string;
   apiKey: string;
-}): Promise<readonly string[]> {
+}): Promise<readonly string[] | Readonly<{ ok: false; code: string }>> {
   const result = await fetchModelList({
     protocol: input.protocol as never,
     baseUrl: input.baseUrl,
     apiKey: input.apiKey,
   });
-  if (!result.ok) {
-    process.stderr.write(`model list unavailable (${result.code}); type a model name\n`);
-    return [];
-  }
-  return result.models;
+  return result.ok ? result.models : result;
 }
 
 async function startSession(): Promise<void> {

@@ -1,4 +1,4 @@
-import { type Instance, render } from "ink";
+import { type Instance, type RenderOptions, render } from "ink";
 import { createElement, type ReactElement } from "react";
 
 import { App } from "./app.ts";
@@ -14,6 +14,8 @@ export type StartTuiOptions = Readonly<{
   modeLabel?: string;
   /** Called when the composer asked to open configuration. */
   onConfigRequest?: () => void;
+  /** Injected terminal streams/mount for lifecycle verification. */
+  mount?: (element: ReactElement, options: RenderOptions) => Pick<Instance, "rerender" | "unmount">;
 }>;
 
 export function startTui(
@@ -21,12 +23,13 @@ export function startTui(
   options: StartTuiOptions = {},
 ): { unmount: () => void } {
   const { modelLabel, modeLabel, onConfigRequest } = options;
-  let instance: Instance | null = null;
+  let instance: Pick<Instance, "rerender" | "unmount"> | null = null;
   let lastProjection = "";
   let stopped = false;
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
   function unmount(): void {
+    if (stopped) return;
     stopped = true;
     if (refreshTimer !== null) clearInterval(refreshTimer);
     instance?.unmount();
@@ -78,7 +81,10 @@ export function startTui(
     instance?.rerender(element());
   }
 
-  instance = render(element(), { exitOnCtrlC: false });
+  instance = (options.mount ?? render)(element(), {
+    exitOnCtrlC: false,
+    alternateScreen: true,
+  });
   // A suspended Run promise has not settled yet; its recorded waits still need
   // to reach the screen so the user can answer or approve.
   refreshTimer = setInterval(refresh, 100);

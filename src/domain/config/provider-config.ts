@@ -16,6 +16,17 @@ export const SUPPORTED_PROTOCOLS = [
 ] as const;
 export type SupportedProtocol = (typeof SUPPORTED_PROTOCOLS)[number];
 
+export const REASONING_EFFORTS = [
+  "default",
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
 export const PROVIDER_CONFIG_LIMITS = Object.freeze({
   maxModelLength: 200,
   maxBaseUrlLength: 2_048,
@@ -31,6 +42,8 @@ export type ProviderConfig = Readonly<{
   /** Vault reference, never the key itself. */
   credentialRef: string;
   maxOutputTokens: number;
+  /** Omitted/default leaves the model's own reasoning setting unchanged. */
+  reasoningEffort?: ReasoningEffort;
   /**
    * Verified context window, or null when the user did not supply one. A null
    * window disables budgeting and compaction rather than substituting a guess:
@@ -48,6 +61,7 @@ export type ProviderConfigFailure =
   | "invalid_credential_ref"
   | "invalid_output_tokens"
   | "invalid_context_window"
+  | "invalid_reasoning_effort"
   | "missing_field";
 
 export type ProviderConfigResult =
@@ -89,6 +103,7 @@ export function validateProviderConfig(input: {
   credentialRef: unknown;
   maxOutputTokens?: unknown;
   contextWindow?: unknown;
+  reasoningEffort?: unknown;
 }): ProviderConfigResult {
   if (typeof input.protocol !== "string" || input.protocol.length === 0) {
     return { ok: false, code: "invalid_protocol", field: "protocol" };
@@ -96,6 +111,15 @@ export function validateProviderConfig(input: {
   if (!(SUPPORTED_PROTOCOLS as readonly string[]).includes(input.protocol)) {
     // Not "unknown protocol": this build genuinely cannot serve it.
     return { ok: false, code: "unsupported_protocol", field: "protocol" };
+  }
+
+  if (
+    input.reasoningEffort !== undefined &&
+    (typeof input.reasoningEffort !== "string" ||
+      !(REASONING_EFFORTS as readonly string[]).includes(input.reasoningEffort) ||
+      (input.protocol === "anthropic_messages" && input.reasoningEffort !== "default"))
+  ) {
+    return { ok: false, code: "invalid_reasoning_effort", field: "reasoningEffort" };
   }
 
   if (typeof input.baseUrl !== "string" || input.baseUrl.length === 0) {
@@ -177,6 +201,9 @@ export function validateProviderConfig(input: {
       credentialRef: input.credentialRef,
       maxOutputTokens,
       contextWindow,
+      ...(input.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: input.reasoningEffort as ReasoningEffort }),
     },
   };
 }
@@ -202,6 +229,7 @@ export function readProviderConfig(settings: unknown): ProviderConfigResult {
     model: record["model"],
     credentialRef: record["credentialRef"],
     maxOutputTokens: record["maxOutputTokens"],
+    reasoningEffort: record["reasoningEffort"],
   });
 }
 

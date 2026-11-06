@@ -112,7 +112,7 @@ export type CoordinatorDependencies = Readonly<{
   /**
    * Conversation rebuilt from earlier Runs in this Session. It is prepended to the
    * new task so a resumed Session continues with its history instead of starting
-   * blank. Absent means the Run begins with only its own input.
+   * blank. Later Runs inherit the previous terminal Run's current conversation.
    */
   priorConversation?: readonly ProviderConversationItem[];
   /**
@@ -135,8 +135,7 @@ export type CoordinatorDependencies = Readonly<{
   /**
    * Fixed Session identity. When present, every Run this coordinator starts
    * appends to the same Session event log, so a restart can replay the history.
-   * Absent means each Run gets a fresh Session, which is only appropriate for
-   * tests and the demo runtime.
+   * Absent means this coordinator creates one Session identity for its lifetime.
    */
   sessionId?: string;
   /**
@@ -285,10 +284,14 @@ type MutableRunContext = {
 
 export class RuntimeCoordinator {
   readonly #deps: CoordinatorDependencies;
+  readonly #sessionId: string;
+  #conversation: readonly ProviderConversationItem[];
   #activeContext: MutableRunContext | null = null;
 
   constructor(dependencies: CoordinatorDependencies) {
     this.#deps = dependencies;
+    this.#sessionId = dependencies.sessionId ?? dependencies.ids.create();
+    this.#conversation = [...(dependencies.priorConversation ?? [])];
   }
 
   /**
@@ -538,7 +541,7 @@ export class RuntimeCoordinator {
     const projectContext = this.#deps.projectContext;
     const context: MutableRunContext = {
       run: startRun(),
-      sessionId: this.#deps.sessionId ?? this.#deps.ids.create(),
+      sessionId: this.#sessionId,
       runId: this.#deps.ids.create(),
       correlationId: this.#deps.ids.create(),
       events: [],
@@ -546,7 +549,7 @@ export class RuntimeCoordinator {
       lastEventId: null,
       conversation: [
         ...(projectContext === undefined ? [] : [{ kind: "user" as const, text: projectContext }]),
-        ...(this.#deps.priorConversation ?? []),
+        ...this.#conversation,
         { kind: "user", text: input },
       ],
       inputQueue: emptyRunInputQueue(),
@@ -1575,6 +1578,17 @@ export class RuntimeCoordinator {
     text: string | null,
     safeCode: string | null,
   ): CoordinatorResult {
+    if (status !== "waiting") {
+      // Carry the actual conversation, including tool pairs and compaction.
+      // Current project guidance is injected afresh at the next Run boundary.
+      const [first, ...rest] = context.conversation;
+      this.#conversation =
+        first?.kind === "user" &&
+        context.guidanceText !== null &&
+        first.text === context.guidanceText
+          ? rest
+          : [...context.conversation];
+    }
     return {
       status,
       run: context.run,

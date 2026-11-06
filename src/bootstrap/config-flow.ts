@@ -1,4 +1,4 @@
-import { type Instance, render } from "ink";
+import { type Instance, type RenderOptions, render } from "ink";
 import { createElement, type ReactElement } from "react";
 import type { ConfigDocument, ConfigStore } from "../adapters/windows/config-store.ts";
 import type { FileVault } from "../adapters/windows/file-credential-vault.ts";
@@ -8,6 +8,7 @@ import {
   readProviderConfig,
   SUPPORTED_PROTOCOLS,
   type SupportedProtocol,
+  validateProviderConfig,
 } from "../domain/config/provider-config.ts";
 import {
   addCustomModel,
@@ -32,12 +33,12 @@ export type ConfigFlowOptions = Readonly<{
   save?: typeof saveSetup;
   capabilities?: Capabilities;
   /** Mount boundary for exercising the real save flow without a terminal. */
-  mount?: (element: ReactElement) => Pick<Instance, "rerender" | "unmount">;
+  mount?: (element: ReactElement, options: RenderOptions) => Pick<Instance, "rerender" | "unmount">;
   fetchModels?: (input: {
     protocol: SupportedProtocol;
     baseUrl: string;
     apiKey: string;
-  }) => Promise<readonly string[]>;
+  }) => Promise<readonly string[] | Readonly<{ ok: false; code: string }>>;
 }>;
 
 export type ConfigFlow = Readonly<{
@@ -116,6 +117,7 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
               currentProtocol: value.protocol ?? "anthropic_messages",
               models: value.model ? [value.model] : [],
               currentModel: value.model,
+              reasoningEffort: value.reasoningEffort ?? "default",
             }),
           };
           redraw();
@@ -149,6 +151,7 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
           ...draft,
           protocol: phase.state.protocols[phase.state.protocolIndex] as SupportedProtocol,
           model: filteredModels(phase.state)[phase.state.modelIndex]?.id ?? draft.model,
+          reasoningEffort: phase.state.reasoningEffort,
         };
         fetchVersion += 1;
         phase = { kind: "setup" };
@@ -163,6 +166,9 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
           ...draft,
           protocol: value.protocol as SupportedProtocol,
           model: value.model,
+          reasoningEffort:
+            value.reasoningEffort ??
+            (phase.kind === "browser" ? phase.state.reasoningEffort : "default"),
         });
       },
       onCancel: () => {
@@ -174,6 +180,7 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
   async function persist(value: SetupDraft): Promise<void> {
     if (busy || closed) return;
     busy = true;
+    fetchVersion += 1;
     draft = value;
     error = null;
     saveError = null;
@@ -200,6 +207,7 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
       options.onReady([
         `protocol: ${result.config.protocol}`,
         `model: ${result.config.model}`,
+        `reasoning: ${result.config.reasoningEffort ?? "default"}`,
         `endpoint: ${result.config.baseUrl}`,
         "configuration saved; applies to the next Run",
       ]);
@@ -219,41 +227,69 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
   }
 
   async function fetchModels(protocol: SupportedProtocol): Promise<void> {
-    if (options.fetchModels === undefined || busy || closed) return;
-    // Browsing a draft must not disclose a stored key to an unsaved destination.
-    if (
-      savedConfig === null ||
-      draft.baseUrl !== savedConfig.baseUrl ||
-      draft.credentialRef !== savedConfig.credentialRef ||
-      draft.apiKey !== ""
-    ) {
-      if (phase.kind === "browser") {
-        phase = {
-          kind: "browser",
-          state: {
-            ...phase.state,
-            status: { text: "Save connection before refreshing models", isError: false },
-          },
-        };
-        redraw();
-      }
+    if (busy || closed || phase.kind !== "browser") return;
+    const version = ++fetchVersion;
+    function status(text: string, isError: boolean): void {
+      if (closed || version !== fetchVersion || phase.kind !== "browser") return;
+      phase = { kind: "browser", state: { ...phase.state, status: { text, isError } } };
+      redraw();
+    }
+    if (options.fetchModels === undefined) {
+      status("Model list unavailable; add a model manually", false);
       return;
     }
-    const version = ++fetchVersion;
-    const key = await options.vault.read({
-      reference: draft.credentialRef,
-      purpose: "provider_api_key",
-      revision: 1,
+    const route = validateProviderConfig({
+      protocol,
+      baseUrl: draft.baseUrl,
+      credentialRef: draft.credentialRef,
+      model: draft.model.trim() || "model-list",
     });
-    if (!key.ok || closed || version !== fetchVersion) return;
+    if (!route.ok) {
+      status("Enter a valid HTTPS connection before loading models", true);
+      return;
+    }
+    // An explicitly entered key belongs to this draft destination. A stored key
+    // must never follow an edited URL or credential reference automatically.
+    if (
+      draft.apiKey === "" &&
+      (savedConfig === null ||
+        route.value.baseUrl !== savedConfig.baseUrl ||
+        draft.credentialRef !== savedConfig.credentialRef)
+    ) {
+      status("Enter an API key for this connection before loading models", true);
+      return;
+    }
+    status("Loading models...", false);
     try {
-      const models = await options.fetchModels({
+      let apiKey = draft.apiKey;
+      if (apiKey === "") {
+        const key = await options.vault.read({
+          reference: draft.credentialRef,
+          purpose: "provider_api_key",
+          revision: 1,
+        });
+        if (closed || version !== fetchVersion) return;
+        if (!key.ok) {
+          status("API key unavailable; edit the connection", true);
+          return;
+        }
+        apiKey = key.value;
+      }
+      const result = await options.fetchModels({
         protocol,
-        baseUrl: draft.baseUrl,
-        apiKey: key.value,
+        baseUrl: route.value.baseUrl,
+        apiKey,
       });
       if (closed || version !== fetchVersion || phase.kind !== "browser") return;
-      phase = { kind: "browser", state: mergeFetchedModels(phase.state, models) };
+      if ("ok" in result) {
+        const message =
+          result.code === "not_supported"
+            ? "This endpoint does not list models; add a model manually"
+            : "Model list unavailable; check the connection or add a model manually";
+        status(message, true);
+        return;
+      }
+      phase = { kind: "browser", state: mergeFetchedModels(phase.state, result) };
     } catch {
       if (closed || version !== fetchVersion || phase.kind !== "browser") return;
       phase = {
@@ -290,7 +326,7 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
       saveError = "configuration could not be loaded";
     }
     if (closed) return;
-    instance = (options.mount ?? render)(element());
+    instance = (options.mount ?? render)(element(), { alternateScreen: true });
   }
 
   void initialize();

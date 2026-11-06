@@ -1,5 +1,6 @@
 import { Box, Text, useInput } from "ink";
 import { createElement as h, type ReactElement } from "react";
+import type { ReasoningEffort } from "../domain/config/provider-config.ts";
 import { ConfigChrome, clipText, colorProps, useViewport, type Viewport } from "./chrome.ts";
 import {
   applyKey,
@@ -20,7 +21,9 @@ export type ConfigBrowserProps = Readonly<{
   animated?: boolean;
   viewport?: Viewport;
   onState: (state: BrowserState) => void;
-  onCommit: (value: Readonly<{ protocol: string; model: string }>) => void;
+  onCommit: (
+    value: Readonly<{ protocol: string; model: string; reasoningEffort?: ReasoningEffort }>,
+  ) => void;
   onCancel: () => void;
   onEdit?: () => void;
   onRefresh?: () => void;
@@ -136,6 +139,11 @@ export function ConfigBrowser(props: ConfigBrowserProps): ReactElement {
           ),
       ),
       h(Text, colorProps(colorFor("faint", capabilities)), "─".repeat(width)),
+      h(
+        Text,
+        colorProps(colorFor("primary", capabilities)),
+        `Reasoning: ${state.protocols[state.protocolIndex] === "anthropic_messages" ? "unavailable" : state.reasoningEffort}`,
+      ),
       state.modelInput !== null
         ? h(
             Box,
@@ -185,7 +193,7 @@ export function ConfigBrowser(props: ConfigBrowserProps): ReactElement {
         : h(
             Text,
             colorProps(colorFor("dim", capabilities)),
-            "e edit endpoint/key  ·  / filter  ·  a add model  ·  Ctrl+R refresh",
+            "e edit  ·  / filter  ·  a add  ·  r reasoning  ·  Ctrl+R refresh",
           ),
     ),
   );

@@ -3,6 +3,8 @@ import { createElement, type ReactElement, useState } from "react";
 
 import {
   maskSecret,
+  REASONING_EFFORTS,
+  type ReasoningEffort,
   SUPPORTED_PROTOCOLS,
   type SupportedProtocol,
 } from "../domain/config/provider-config.ts";
@@ -24,7 +26,13 @@ import { TextInput } from "./text-input.ts";
 
 const h = createElement;
 
-export type SetupField = "protocol" | "baseUrl" | "model" | "apiKey" | "credentialRef";
+export type SetupField =
+  | "protocol"
+  | "baseUrl"
+  | "model"
+  | "reasoningEffort"
+  | "apiKey"
+  | "credentialRef";
 
 export type SetupDraft = Readonly<{
   protocol?: SupportedProtocol;
@@ -32,6 +40,7 @@ export type SetupDraft = Readonly<{
   model: string;
   apiKey: string;
   credentialRef: string;
+  reasoningEffort?: ReasoningEffort;
 }>;
 
 export type SetupProps = Readonly<{
@@ -57,6 +66,7 @@ const FIELD_ORDER: readonly SetupField[] = [
   "protocol",
   "apiKey",
   "model",
+  "reasoningEffort",
   "credentialRef",
 ];
 
@@ -66,6 +76,7 @@ const FIELD_LABEL: Readonly<Record<SetupField, string>> = {
   model: "Model",
   credentialRef: "Credential reference",
   apiKey: "API key",
+  reasoningEffort: "Reasoning",
 };
 const PROTOCOL_LABEL: Readonly<Record<SupportedProtocol, string>> = {
   anthropic_messages: "Anthropic",
@@ -80,6 +91,7 @@ export function SetupScreen(props: SetupProps): ReactElement {
     model: props.initial.model ?? "",
     apiKey: props.initial.apiKey ?? "",
     credentialRef: props.initial.credentialRef ?? "provider-main",
+    reasoningEffort: props.initial.reasoningEffort ?? "default",
   });
   const actions = [...FIELD_ORDER, ...(props.onBrowse ? ["models"] : []), "save", "discard"];
   const [focus, setFocus] = useState<string>(props.hasStoredCredential ? "baseUrl" : "protocol");
@@ -90,6 +102,7 @@ export function SetupScreen(props: SetupProps): ReactElement {
     model: characters(props.initial.model ?? "").length,
     credentialRef: characters(props.initial.credentialRef ?? "provider-main").length,
     apiKey: characters(props.initial.apiKey ?? "").length,
+    reasoningEffort: 0,
   });
   const viewport = useViewport(props.viewport);
   const width = Math.max(1, Math.min(84, viewport.columns - 4));
@@ -102,6 +115,33 @@ export function SetupScreen(props: SetupProps): ReactElement {
       force: process.env["LYCWL_COLOR"],
       windowsTerminal: process.env["WT_SESSION"] !== undefined,
     });
+
+  function cycleProtocol(delta: number): void {
+    setDraft((current) => {
+      const index = SUPPORTED_PROTOCOLS.indexOf(current.protocol);
+      const next = (index + delta + SUPPORTED_PROTOCOLS.length) % SUPPORTED_PROTOCOLS.length;
+      const protocol = SUPPORTED_PROTOCOLS[next] ?? "anthropic_messages";
+      return {
+        ...current,
+        protocol,
+        ...(protocol === "anthropic_messages" ? { reasoningEffort: "default" } : {}),
+      };
+    });
+  }
+
+  function cycleReasoning(delta: number): void {
+    if (draft.protocol === "anthropic_messages") return;
+    setDraft((current) => {
+      const index = REASONING_EFFORTS.indexOf(current.reasoningEffort ?? "default");
+      return {
+        ...current,
+        reasoningEffort:
+          REASONING_EFFORTS[
+            (index + delta + REASONING_EFFORTS.length) % REASONING_EFFORTS.length
+          ] ?? "default",
+      };
+    });
+  }
 
   useInput((input, key) => {
     if (props.busy) return;
@@ -136,14 +176,10 @@ export function SetupScreen(props: SetupProps): ReactElement {
       if (focus === "save") props.onSave(draft);
       else if (focus === "discard") props.onDiscard();
       else if (focus === "models") props.onBrowse?.(draft);
-      else if (focus === "protocol") {
-        const index = SUPPORTED_PROTOCOLS.indexOf(draft.protocol);
-        setDraft((current) => ({
-          ...current,
-          protocol:
-            SUPPORTED_PROTOCOLS[(index + 1) % SUPPORTED_PROTOCOLS.length] ?? "anthropic_messages",
-        }));
-      } else setEditing((current) => !current);
+      else if (focus === "model" && !editing && props.onBrowse) props.onBrowse(draft);
+      else if (focus === "protocol") cycleProtocol(1);
+      else if (focus === "reasoningEffort") cycleReasoning(1);
+      else setEditing((current) => !current);
       return;
     }
     if (!editing && !key.ctrl && !key.meta && input === "s") {
@@ -152,17 +188,16 @@ export function SetupScreen(props: SetupProps): ReactElement {
     }
     if (focus === "protocol") {
       if (key.leftArrow || key.rightArrow || input === " ") {
-        const delta = key.leftArrow ? -1 : 1;
-        setDraft((current) => {
-          const index = SUPPORTED_PROTOCOLS.indexOf(current.protocol);
-          const next = (index + delta + SUPPORTED_PROTOCOLS.length) % SUPPORTED_PROTOCOLS.length;
-          return { ...current, protocol: SUPPORTED_PROTOCOLS[next] ?? "anthropic_messages" };
-        });
+        cycleProtocol(key.leftArrow ? -1 : 1);
       }
       return;
     }
+    if (focus === "reasoningEffort") {
+      if (key.leftArrow || key.rightArrow || input === " ") cycleReasoning(key.leftArrow ? -1 : 1);
+      return;
+    }
     if (!editing || !FIELD_ORDER.includes(focus as SetupField)) return;
-    const field = focus as Exclude<SetupField, "protocol">;
+    const field = focus as Exclude<SetupField, "protocol" | "reasoningEffort">;
     const next = editText({ value: draft[field], cursor: cursors[field] }, input, key);
     setDraft((current) => ({ ...current, [field]: next.value }));
     setCursors((current) => ({ ...current, [field]: next.cursor }));
@@ -178,12 +213,18 @@ export function SetupScreen(props: SetupProps): ReactElement {
         h(FieldRow, {
           key: field,
           field,
-          value: draft[field],
+          value:
+            field === "reasoningEffort"
+              ? draft.protocol === "anthropic_messages"
+                ? "unavailable"
+                : (draft.reasoningEffort ?? "default")
+              : draft[field],
           focused: focus === field,
           editing: editing && focus === field,
           cursor: cursors[field],
           stored: field === "apiKey" && props.hasStoredCredential,
-          required: !(field === "apiKey" && props.hasStoredCredential),
+          required:
+            field !== "reasoningEffort" && !(field === "apiKey" && props.hasStoredCredential),
           error: props.error !== null && props.error.field === field ? props.error.code : null,
           capabilities,
           width,
@@ -283,15 +324,17 @@ function FieldRow(props: {
             clipText(
               props.field === "protocol"
                 ? `‹ ${protocolLabel ?? props.value} ›`
-                : props.field === "apiKey"
-                  ? props.value.length > 0
-                    ? maskSecret(props.value)
-                    : props.stored
-                      ? "(stored)"
-                      : "(empty)"
-                  : props.value.length === 0
-                    ? "(empty)"
-                    : props.value,
+                : props.field === "reasoningEffort"
+                  ? `‹ ${props.value} ›`
+                  : props.field === "apiKey"
+                    ? props.value.length > 0
+                      ? maskSecret(props.value)
+                      : props.stored
+                        ? "(stored)"
+                        : "(empty)"
+                    : props.value.length === 0
+                      ? "(empty)"
+                      : props.value,
               Math.max(1, props.width - (props.width < 60 ? 15 : 26)),
             ),
           ),
