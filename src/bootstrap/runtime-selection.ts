@@ -66,6 +66,12 @@ export type SelectRuntimeOptions = Readonly<{
    */
   enableSkills?: boolean;
   /**
+   * Enable process execution: shell and the background task tools. Off by default.
+   * Every command still requires its own one-shot approval, and an approved command
+   * runs with the current Windows user's full permissions — v1 has no OS sandbox.
+   */
+  enableProcesses?: boolean;
+  /**
    * Fixed Session identity so successive launches share one durable log.
    * Absent means a fresh Session per Run, appropriate only for tests.
    */
@@ -84,6 +90,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   }
 
   const enableWrites = options.enableWrites === true;
+  const enableProcesses = options.enableProcesses === true;
   const tools = createWorkspaceTools({
     workspaceRoot: options.workspaceRoot,
     // This gate answers inline requests that do not go through the suspend path,
@@ -93,7 +100,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     approvals: { decide: async () => "denied" },
     ids: { create: () => "probe" },
     enableWrites,
-    enableProcesses: false,
+    enableProcesses,
   });
 
   // Advertise only tools this composition actually exposes under the current
@@ -196,7 +203,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
         approvals: { decide: async () => "denied" },
         ids,
         enableWrites,
-        enableProcesses: false,
+        enableProcesses,
       }),
       approvals: { decide: async () => "denied" },
       eventLog,

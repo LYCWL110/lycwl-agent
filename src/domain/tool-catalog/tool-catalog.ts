@@ -285,6 +285,97 @@ export const TOOL_CATALOG: readonly CatalogEntry[] = Object.freeze([
       additionalProperties: false,
     },
   },
+  {
+    name: "shell",
+    description:
+      "Run one command and return its bounded stdout and stderr. Every command needs " +
+      "its own approval and runs with the current Windows user's permissions; there is " +
+      "no OS sandbox. Use the background tools for anything long-running.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "The command line to run." },
+        cwd: { type: "string", description: "Workspace-relative working directory." },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1000,
+          description: "Timeout in milliseconds. Defaults to 120000, maximum 600000.",
+        },
+      },
+      required: ["command", "cwd"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "background_start",
+    description:
+      "Start a long-running command and return a task id. Starting needs approval; the " +
+      "task keeps running until it exits, its timeout passes, or it is stopped.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "The command line to run." },
+        cwd: { type: "string", description: "Workspace-relative working directory." },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1000,
+          description: "Deadline in milliseconds. Defaults to 600000.",
+        },
+        label: { type: "string", description: "Short label shown in status output." },
+      },
+      required: ["command", "cwd"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "background_status",
+    description:
+      "Report the state of a background task. Returning a task id earlier confirmed " +
+      "launch only, not completion.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "Task id from background_start." },
+      },
+      required: ["taskId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "background_output",
+    description:
+      "Read new output from a background task using a cursor. The cursor is bound to " +
+      "one execution, so output from a restart cannot be read as if it were this run.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "Task id from background_start." },
+        cursor: {
+          type: "object",
+          description: "Opaque cursor returned by the previous call.",
+        },
+        pageBytes: {
+          type: "integer",
+          minimum: 1,
+          description: "Maximum bytes to return in this page.",
+        },
+      },
+      required: ["taskId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "background_stop",
+    description: "Stop a background task and terminate its process tree.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "Task id from background_start." },
+      },
+      required: ["taskId"],
+      additionalProperties: false,
+    },
+  },
 ]);
 
 /**

@@ -28,12 +28,16 @@ if (args.includes("--help") || args.includes("-h")) {
       "  lycwl               start the interactive TUI (read-only)",
       "  lycwl --write       allow file mutations, each requiring approval",
       "  lycwl --skills      enable the .agents/skills catalog (default off)",
+      "  lycwl --shell       enable shell and background commands (implies --write)",
       "  lycwl --setup       show configuration status and file locations",
       "  lycwl --help        show this help",
       "  lycwl --version     show the package version",
       "",
       "With no configured Provider the TUI runs a demo runtime that performs no",
       "network, credential, process or write access.",
+      "",
+      "Shell is disabled unless --shell is given. Every command needs its own",
+      "approval and runs with your full Windows user permissions: v1 has no sandbox.",
       "",
       "Skills are disabled unless --skills is given; enabling them grants no",
       "read permission beyond ordinary file access.",
@@ -114,8 +118,10 @@ const selection = await selectRuntime({
   dataDirectory,
   settings,
   hasSettings: loaded.ok,
-  enableWrites: args.includes("--write"),
+  // A read-only Session refuses Shell by design, so --shell implies write mode.
+  enableWrites: args.includes("--write") || args.includes("--shell"),
   enableSkills: args.includes("--skills"),
+  enableProcesses: args.includes("--shell"),
   sessionId,
 });
 
