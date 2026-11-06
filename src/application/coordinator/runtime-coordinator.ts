@@ -110,6 +110,12 @@ export type CoordinatorDependencies = Readonly<{
    */
   projectContext?: string;
   /**
+   * Conversation rebuilt from earlier Runs in this Session. It is prepended to the
+   * new task so a resumed Session continues with its history instead of starting
+   * blank. Absent means the Run begins with only its own input.
+   */
+  priorConversation?: readonly ProviderConversationItem[];
+  /**
    * Resolve guidance for paths the Run has touched, before each model request.
    *
    * Called at a safe boundary with the accumulated touched paths, so a session that
@@ -532,6 +538,7 @@ export class RuntimeCoordinator {
       lastEventId: null,
       conversation: [
         ...(projectContext === undefined ? [] : [{ kind: "user" as const, text: projectContext }]),
+        ...(this.#deps.priorConversation ?? []),
         { kind: "user", text: input },
       ],
       inputQueue: emptyRunInputQueue(),

@@ -82,6 +82,12 @@ export type InternalEventPayload =
       toolCallId: string;
       providerToolCallId: string;
       toolName: string;
+      /**
+       * Canonicalized arguments. Recorded so a restart can rebuild the
+       * assistant turn it belonged to; without them the replayed history would
+       * contain a tool call with no input.
+       */
+      arguments: unknown;
     }>
   | Readonly<{
       kind: "approval_requested";
@@ -188,6 +194,8 @@ export type InternalEventPayload =
       status: "succeeded" | "failed" | "outcome_unknown";
       safeCode: string | null;
       text: string | null;
+      /** Name of the tool, so a replay can rebuild the result without a lookup. */
+      toolName?: string;
     }>
   | Readonly<{
       kind: "tool_execution_denied";

@@ -8,6 +8,7 @@ import type { RuntimeCoordinator } from "../application/coordinator/runtime-coor
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.ts";
 import { availableTools, COORDINATOR_TOOL_NAMES } from "../domain/tool-catalog/tool-catalog.ts";
+import type { ProviderConversationItem } from "../ports/model-provider.ts";
 import { createDemoRuntime } from "./demo-runtime.ts";
 import { createWorkspaceTools } from "./read-only-tools.ts";
 import { assembleRuntime, type RuntimeAssemblyFailure } from "./runtime-assembly.ts";
@@ -31,6 +32,8 @@ export type RuntimeSelection =
       config: ProviderConfig;
       /** Whether filesystem mutation tools are exposed for this session. */
       enableWrites: boolean;
+      /** Rebuilt history, for the launch summary. */
+      prior: PriorSummary;
       /** Project guidance that was injected, for the launch summary. */
       guidance: GuidanceSummary;
       warnings: readonly string[];
@@ -141,6 +144,11 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   const eventLog = new JsonlEventLog(sessionRoot, ids, digests);
   const checkpoints = new JsonlCheckpointStore(sessionRoot, digests);
 
+  // Rebuild prior conversation so a resumed Session continues with its history.
+  // A rebuild failure is reported and the Run starts fresh rather than guessing at
+  // a repaired history.
+  const prior = await rebuildPriorConversation(eventLog, options.sessionId);
+
   // Compute the C04 budget only from a verified window. A capacity failure leaves
   // budgeting off rather than substituting a guess.
   const computed = computeContextBudget({
@@ -180,6 +188,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
       nowUtc: () => new Date().toISOString(),
       suspendOnApproval: true,
       ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+      ...(prior.conversation.length === 0 ? {} : { priorConversation: prior.conversation }),
       ...(guidance.block === "" ? {} : { projectContext: guidance.block }),
       // Budgeting applies only when a verified window was configured. Without one,
       // no compaction runs and an oversized prompt fails at the provider instead of
@@ -211,6 +220,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
       },
     }),
     guidance: guidance.summary,
+    prior: prior.summary,
   };
 }
 
@@ -222,6 +232,11 @@ export function describeSelection(selection: RuntimeSelection): readonly string[
       `model: ${selection.config.model}`,
       `endpoint: ${selection.config.baseUrl}`,
       `writes: ${selection.enableWrites ? "enabled (every write requires approval)" : "disabled"}`,
+      ...(selection.prior.kind === "rebuilt"
+        ? [`history: ${selection.prior.runs} run(s), ${selection.prior.items} item(s)`]
+        : selection.prior.kind === "failed"
+          ? [`history: not rebuilt (${selection.prior.code})`]
+          : ["history: none"]),
       ...(selection.guidance.kind === "loaded"
         ? [
             `guidance: ${selection.guidance.files.length} file(s), ${selection.guidance.bytes} bytes`,
@@ -287,4 +302,49 @@ function estimateFixedTokens(
   let total = Math.ceil(guidanceBlock.length / 4);
   for (const tool of tools) total += Math.ceil(tool.description.length / 4) + 50;
   return total;
+}
+
+export type PriorSummary =
+  | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "rebuilt"; runs: number; items: number }>
+  | Readonly<{ kind: "failed"; code: string }>;
+
+/**
+ * Rebuild the conversation from a Session's stored events.
+ *
+ * A failed rebuild is reported rather than hidden: silently starting fresh would
+ * make a damaged history look like a new Session.
+ */
+async function rebuildPriorConversation(
+  eventLog: InstanceType<typeof import("../adapters/persistence/jsonl-event-log.ts").JsonlEventLog>,
+  sessionId: string | undefined,
+): Promise<Readonly<{ conversation: readonly ProviderConversationItem[]; summary: PriorSummary }>> {
+  if (sessionId === undefined) {
+    return { conversation: [], summary: { kind: "none" } };
+  }
+  try {
+    const stored = await eventLog.readWithRecovery(sessionId);
+    if (!stored.ok) {
+      return { conversation: [], summary: { kind: "failed", code: stored.code } };
+    }
+    const { rebuildConversation, trimConversation } = await import(
+      "../application/coordinator/conversation-rebuild.ts"
+    );
+    const rebuilt = rebuildConversation(stored.events);
+    if (!rebuilt.ok) {
+      return { conversation: [], summary: { kind: "failed", code: rebuilt.code } };
+    }
+    if (rebuilt.conversation.length === 0) {
+      return { conversation: [], summary: { kind: "none" } };
+    }
+    // Bound the rebuilt history so a long Session does not consume the whole
+    // context before the new task is even considered.
+    const trimmed = trimConversation(rebuilt.conversation, 40);
+    return {
+      conversation: trimmed,
+      summary: { kind: "rebuilt", runs: rebuilt.runs, items: trimmed.length },
+    };
+  } catch {
+    return { conversation: [], summary: { kind: "failed", code: "rebuild_failed" } };
+  }
 }

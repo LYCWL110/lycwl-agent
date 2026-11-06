@@ -121,6 +121,8 @@ export async function executeToolCall(
       toolCallId,
       providerToolCallId: call.providerToolCallId,
       toolName: call.toolName,
+      // Recorded so a restart can rebuild this call's input.
+      arguments: call.arguments,
     });
 
     // `ask_user` is handled by the coordinator itself and has no tool executor, so
@@ -404,6 +406,7 @@ async function dispatchAndExecute(
     status: result.status,
     safeCode: result.status === "succeeded" ? null : result.safeCode,
     text: delivery.text,
+    toolName: call.toolName,
   });
 
   if (result.status === "outcome_unknown") {
