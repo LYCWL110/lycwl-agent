@@ -1,8 +1,8 @@
 /**
  * Provider configuration browser.
  *
- * Modelled on the Miyu reference's `ProviderBrowser` (`src/config_tui/providers.rs`):
- * three columns — provider, protocol, model — with independent cursors and scroll
+ * Adapts Miyu's provider/group/model browser (`src/config_tui/providers.rs`) into
+ * provider/protocol/model columns for this Harness, with independent cursors and scroll
  * offsets, a filter mode, a status line that distinguishes information from error,
  * and an undoable delete.
  *
@@ -39,6 +39,7 @@ export type BrowserState = Readonly<{
   scroll: Readonly<Record<Column, number>>;
   filter: string;
   filterMode: boolean;
+  modelInput: string | null;
   status: Readonly<{ text: string; isError: boolean }> | null;
   /** A snapshot taken before a destructive action, for a single-step undo. */
   undo: BrowserState | null;
@@ -69,6 +70,7 @@ export function createBrowserState(seed: BrowserSeed): BrowserState {
     scroll: { provider: 0, protocol: 0, model: 0 },
     filter: "",
     filterMode: false,
+    modelInput: null,
     status: null,
     undo: null,
   };
@@ -103,22 +105,64 @@ export type BrowserOutcome = Readonly<{
  */
 export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
   if (typeof key === "object") {
-    if (!state.filterMode) return { state, commit: null, cancel: false };
+    if (state.modelInput !== null) {
+      return {
+        state: {
+          ...state,
+          modelInput: (state.modelInput + key.value).slice(0, BROWSER_LIMITS.maxModelLength),
+        },
+        commit: null,
+        cancel: false,
+      };
+    }
+    if (!state.filterMode) {
+      if (key.value === "/") {
+        return {
+          state: { ...state, filterMode: true, activeColumn: "model" },
+          commit: null,
+          cancel: false,
+        };
+      }
+      if (key.value === "a" && state.activeColumn === "model") {
+        return { state: { ...state, modelInput: "", status: null }, commit: null, cancel: false };
+      }
+      return { state, commit: null, cancel: false };
+    }
     return {
-      state: { ...state, filter: state.filter + key.value },
+      state: {
+        ...state,
+        filter: state.filter + key.value,
+        modelIndex: 0,
+        scroll: { ...state.scroll, model: 0 },
+      },
       commit: null,
       cancel: false,
     };
   }
 
   if (key === "escape") {
+    if (state.modelInput !== null) {
+      return { state: { ...state, modelInput: null }, commit: null, cancel: false };
+    }
     if (state.filterMode) {
-      return { state: { ...state, filterMode: false, filter: "" }, commit: null, cancel: false };
+      return {
+        state: {
+          ...state,
+          filterMode: false,
+          filter: "",
+          modelIndex: 0,
+          scroll: { ...state.scroll, model: 0 },
+        },
+        commit: null,
+        cancel: false,
+      };
     }
     return { state, commit: null, cancel: true };
   }
 
   if (key === "tab") {
+    if (state.modelInput !== null || state.filterMode)
+      return { state, commit: null, cancel: false };
     const index = COLUMNS.indexOf(state.activeColumn);
     const next = COLUMNS[(index + 1) % COLUMNS.length] ?? "protocol";
     return { state: { ...state, activeColumn: next }, commit: null, cancel: false };
@@ -138,6 +182,22 @@ export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
   }
 
   if (key === "enter") {
+    if (state.modelInput !== null) {
+      const added = addCustomModel(state, state.modelInput);
+      if (added.status?.isError) return { state: added, commit: null, cancel: false };
+      const next = added.models.findIndex((entry) => entry.id === state.modelInput?.trim());
+      return {
+        state: {
+          ...added,
+          modelInput: null,
+          filter: "",
+          modelIndex: next,
+          scroll: scrollTo(added.scroll, "model", next),
+        },
+        commit: null,
+        cancel: false,
+      };
+    }
     if (state.filterMode) {
       return { state: { ...state, filterMode: false }, commit: null, cancel: false };
     }
@@ -160,18 +220,34 @@ export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
   }
 
   if (key === "backspace") {
+    if (state.modelInput !== null) {
+      return {
+        state: { ...state, modelInput: [...state.modelInput].slice(0, -1).join("") },
+        commit: null,
+        cancel: false,
+      };
+    }
     if (!state.filterMode) return { state, commit: null, cancel: false };
     return {
-      state: { ...state, filter: [...state.filter].slice(0, -1).join("") },
+      state: {
+        ...state,
+        filter: [...state.filter].slice(0, -1).join(""),
+        modelIndex: 0,
+        scroll: { ...state.scroll, model: 0 },
+      },
       commit: null,
       cancel: false,
     };
   }
 
   if (key === "delete") {
+    if (state.activeColumn !== "model" || state.modelInput !== null || state.filterMode) {
+      return { state, commit: null, cancel: false };
+    }
     return deleteSelectedModel(state);
   }
 
+  if (state.modelInput !== null || state.filterMode) return { state, commit: null, cancel: false };
   // Movement keys.
   if (key === "left" || key === "right") {
     const index = COLUMNS.indexOf(state.activeColumn);
@@ -185,7 +261,22 @@ export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
     if (state.activeColumn === "protocol") {
       const next = clamp(state.protocolIndex + delta, 0, state.protocols.length - 1);
       return {
-        state: { ...state, protocolIndex: next, scroll: scrollTo(state.scroll, "protocol", next) },
+        state: {
+          ...state,
+          protocolIndex: next,
+          ...(next === state.protocolIndex
+            ? {}
+            : {
+                models: state.models.filter((entry) => entry.source === "custom"),
+                modelIndex: 0,
+                filter: "",
+                status: null,
+              }),
+          scroll: {
+            ...scrollTo(state.scroll, "protocol", next),
+            model: next === state.protocolIndex ? state.scroll.model : 0,
+          },
+        },
         commit: null,
         cancel: false,
       };

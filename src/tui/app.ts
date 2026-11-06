@@ -1,7 +1,8 @@
 import { Box, Text, useInput } from "ink";
 import { createElement, type ReactElement, useState } from "react";
+import { Brand, clipText, colorProps, useViewport, type Viewport, wrapText } from "./chrome.ts";
 import { type Capabilities, colorFor, detectCapabilities } from "./palette.ts";
-import type { TranscriptEntry, TuiViewState } from "./view-model.ts";
+import type { TuiViewState } from "./view-model.ts";
 
 /**
  * Main TUI layout, following the Miyu reference's structure.
@@ -33,11 +34,18 @@ export type AppProps = Readonly<{
   capabilities?: Capabilities;
   /** Model name for the footer; absent hides that segment. */
   modelLabel?: string;
+  modeLabel?: string;
+  viewport?: Viewport;
+  animated?: boolean;
 }>;
 
 export function App(props: AppProps): ReactElement {
   const { view } = props;
   const [draft, setDraft] = useState("");
+  const [scroll, setScroll] = useState(0);
+  const viewport = useViewport(props.viewport);
+  const width = Math.max(1, viewport.columns - 4);
+  const bodyRows = Math.max(3, viewport.rows - 9);
   const capabilities =
     props.capabilities ??
     detectCapabilities({
@@ -45,6 +53,7 @@ export function App(props: AppProps): ReactElement {
       colorterm: process.env["COLORTERM"],
       term: process.env["TERM"],
       force: process.env["LYCWL_COLOR"],
+      windowsTerminal: process.env["WT_SESSION"] !== undefined,
     });
 
   useInput((input, key) => {
@@ -56,13 +65,26 @@ export function App(props: AppProps): ReactElement {
       props.onQuit();
       return;
     }
+    if (key.pageUp) {
+      setScroll((current) => current + Math.max(1, bodyRows - 1));
+      return;
+    }
+    if (key.pageDown) {
+      setScroll((current) => Math.max(0, current - Math.max(1, bodyRows - 1)));
+      return;
+    }
+    if (key.end) {
+      setScroll(0);
+      return;
+    }
     if (key.return) {
       const text = draft.trim();
       setDraft("");
+      setScroll(0);
       if (text.length === 0) return;
       if (view.pendingQuestion !== null) props.onAnswer(text);
       else if (view.pendingApproval !== null) {
-        if (text === "a") props.onApprove();
+        if (text === "a" && view.pendingApprovalPreview !== null) props.onApprove();
         else if (text === "d") props.onDeny();
       } else props.onSubmit(text);
       return;
@@ -71,20 +93,162 @@ export function App(props: AppProps): ReactElement {
       setDraft((current) => [...current].slice(0, -1).join(""));
       return;
     }
-    if (input.length > 0) setDraft((current) => current + input);
+    if (input.length > 0 && !key.ctrl && !key.meta) setDraft((current) => current + input);
   });
 
+  const lobby = view.runStatus === "idle" && view.transcript.length === 0 && view.todo === null;
+  if (lobby) {
+    const lobbyWidth = Math.max(1, Math.min(84, Math.max(50, Math.floor((width * 2) / 3)), width));
+    return h(
+      Box,
+      {
+        width: viewport.columns,
+        minHeight: Math.max(1, viewport.rows - 1),
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+      },
+      h(Brand, {
+        capabilities,
+        width: lobbyWidth,
+        compact: viewport.rows < 20,
+        animated: props.animated,
+      }),
+      h(
+        Box,
+        { width: lobbyWidth, flexDirection: "column", marginTop: 1 },
+        h(Composer, { view, draft, capabilities, width: lobbyWidth }),
+        h(Footer, {
+          view,
+          capabilities,
+          modelLabel: props.modelLabel,
+          modeLabel: props.modeLabel,
+          width: lobbyWidth,
+        }),
+      ),
+      h(
+        Box,
+        { marginTop: 1 },
+        h(Text, colorProps(colorFor("dim", capabilities)), "lycwl  ·  0.1.0"),
+      ),
+    );
+  }
+  const lines = documentLines(view, width);
+  const offset = Math.min(scroll, Math.max(0, lines.length - bodyRows));
+  const start = Math.max(0, lines.length - bodyRows - offset);
   return h(
     Box,
-    { flexDirection: "column" },
+    {
+      flexDirection: "column",
+      width: viewport.columns,
+      minHeight: Math.max(1, viewport.rows - 1),
+      paddingX: 2,
+    },
     h(TitleBar, { view, capabilities }),
-    h(Transcript, { entries: view.transcript, capabilities }),
-    view.todo === null ? null : h(TodoPanel, { view, capabilities }),
-    h(ApprovalPanel, { view, capabilities }),
-    h(QuestionPanel, { view, capabilities }),
-    h(Composer, { view, draft, capabilities }),
-    h(Footer, { view, capabilities, modelLabel: props.modelLabel }),
+    h(Text, colorProps(colorFor("faint", capabilities)), "─".repeat(width)),
+    h(
+      Box,
+      { flexDirection: "column", height: bodyRows, flexShrink: 0 },
+      ...lines.slice(start, start + bodyRows).map((line, index) =>
+        h(
+          Text,
+          {
+            key: `${start + index}`,
+            ...colorProps(colorFor(line.role, capabilities)),
+            ...(line.bold ? { bold: true } : {}),
+          },
+          line.text || " ",
+        ),
+      ),
+    ),
+    h(
+      Text,
+      colorProps(colorFor("faint", capabilities)),
+      lines.length > bodyRows
+        ? `${start + 1}–${Math.min(start + bodyRows, lines.length)} / ${lines.length}  ·  PgUp / PgDn`
+        : "─".repeat(width),
+    ),
+    h(Composer, { view, draft, capabilities, width }),
+    h(Footer, {
+      view,
+      capabilities,
+      modelLabel: props.modelLabel,
+      modeLabel: props.modeLabel,
+      width,
+    }),
   );
+}
+
+type DocumentLine = Readonly<{
+  text: string;
+  role: "primary" | "secondary" | "tertiary" | "success" | "dim" | "faint";
+  bold?: boolean;
+}>;
+
+/** Wrap rather than truncate: approval commands and diffs remain available by paging. */
+function documentLines(view: TuiViewState, width: number): DocumentLine[] {
+  const lines: DocumentLine[] = [];
+  function append(text: string, role: DocumentLine["role"], bold = false): void {
+    lines.push(...wrapText(text, width).map((line) => ({ text: line, role, bold })));
+  }
+  for (const entry of view.transcript) {
+    const role =
+      entry.kind === "user"
+        ? "primary"
+        : entry.kind === "assistant"
+          ? "success"
+          : entry.status === "failed" || entry.status === "denied"
+            ? "tertiary"
+            : "dim";
+    const label =
+      entry.kind === "user"
+        ? "you"
+        : entry.kind === "assistant"
+          ? "agent"
+          : entry.kind === "tool"
+            ? `tool${entry.status === null ? "" : `·${entry.status}`}`
+            : "sys";
+    append(`▌ ${label}`, role, true);
+    append(entry.text, "dim");
+    append("", "faint");
+  }
+  if (view.todo !== null) {
+    append("plan", "secondary", true);
+    for (const item of view.todo.items)
+      append(
+        `${marker(item.state)} ${item.content}`,
+        item.state === "completed" ? "success" : "dim",
+      );
+  }
+  if (view.pendingApproval !== null) {
+    append(`▌ approval required · ${view.pendingApproval.toolName}`, "secondary", true);
+    if (view.pendingApprovalPreview === null)
+      append("preview unavailable: the exact operation is not recorded", "tertiary");
+    else for (const line of view.pendingApprovalPreview) append(line, "dim");
+    append(
+      view.pendingApprovalPreview === null
+        ? 'type "d" then Enter to deny'
+        : 'type "a" then Enter to approve, "d" to deny',
+      "secondary",
+    );
+  }
+  if (view.pendingQuestion !== null) {
+    const question = view.pendingQuestion;
+    append(`▌ question · ${question.question}`, "secondary", true);
+    for (const option of question.options) append(`${option.id}) ${option.label}`, "dim");
+    append(
+      question.answerType === "confirmation"
+        ? 'type "yes" or "no"'
+        : question.answerType === "text"
+          ? "type an answer"
+          : question.multiple
+            ? "type ids or labels, comma separated"
+            : "type an option id or label",
+      "faint",
+    );
+    if (view.answerError !== null) append(`not accepted: ${view.answerError}`, "tertiary");
+  }
+  return lines;
 }
 
 /** One-line title with the run state on the right, as the reference does. */
@@ -107,186 +271,11 @@ function TitleBar(props: { view: TuiViewState; capabilities: Capabilities }): Re
   );
 }
 
-function Transcript(props: {
-  entries: readonly TranscriptEntry[];
-  capabilities: Capabilities;
-}): ReactElement {
-  const { entries, capabilities } = props;
-  if (entries.length === 0) {
-    return h(
-      Box,
-      { marginTop: 1, marginLeft: 2 },
-      h(Text, colorProps(colorFor("faint", capabilities)), "Type a task and press Enter."),
-    );
-  }
-  return h(
-    Box,
-    { flexDirection: "column", marginTop: 1 },
-    ...entries.map((entry) => h(TranscriptLine, { key: entry.id, entry, capabilities })),
-  );
-}
-
-/**
- * A transcript row: a coloured gutter character, a role label, then the text.
- *
- * The gutter is what makes the role readable at a glance; the reference does the same
- * with its message prefixes.
- */
-function TranscriptLine(props: {
-  entry: TranscriptEntry;
-  capabilities: Capabilities;
-}): ReactElement {
-  const { entry, capabilities } = props;
-  const failed = entry.status === "failed" || entry.status === "denied";
-  const role =
-    entry.kind === "user"
-      ? { text: "you", color: colorFor("primary", capabilities) }
-      : entry.kind === "assistant"
-        ? { text: "agent", color: colorFor("success", capabilities) }
-        : entry.kind === "tool"
-          ? {
-              text: entry.status === null ? "tool" : `tool·${entry.status}`,
-              color: failed
-                ? colorFor("tertiary", capabilities)
-                : colorFor("secondary", capabilities),
-            }
-          : { text: "sys", color: colorFor("faint", capabilities) };
-  return h(
-    Box,
-    { flexDirection: "column", marginBottom: 0 },
-    h(
-      Box,
-      null,
-      h(Text, colorProps(role.color), "▌ "),
-      h(Text, { bold: true, ...colorProps(role.color) }, role.text),
-    ),
-    h(Box, { marginLeft: 2 }, h(Text, null, entry.text)),
-  );
-}
-
-function TodoPanel(props: { view: TuiViewState; capabilities: Capabilities }): ReactElement {
-  const list = props.view.todo;
-  if (list === null) return h(Box, null);
-  return h(
-    Box,
-    { flexDirection: "column", marginTop: 1, marginLeft: 2 },
-    h(Text, { bold: true, ...colorProps(colorFor("secondary", props.capabilities)) }, "plan"),
-    ...list.items.map((item) =>
-      h(
-        Box,
-        { key: item.id, marginLeft: 1 },
-        h(
-          Text,
-          colorProps(
-            item.state === "completed"
-              ? colorFor("success", props.capabilities)
-              : item.state === "cancelled"
-                ? colorFor("tertiary", props.capabilities)
-                : item.state === "in_progress"
-                  ? colorFor("secondary", props.capabilities)
-                  : colorFor("dim", props.capabilities),
-          ),
-          `${marker(item.state)} ${item.content}`,
-        ),
-      ),
-    ),
-  );
-}
-
 function marker(state: string): string {
   if (state === "completed") return "[x]";
   if (state === "in_progress") return "[>]";
   if (state === "cancelled") return "[-]";
   return "[ ]";
-}
-
-function ApprovalPanel(props: { view: TuiViewState; capabilities: Capabilities }): ReactElement {
-  const pending = props.view.pendingApproval;
-  if (pending === null) return h(Box, null);
-  const preview = props.view.pendingApprovalPreview;
-  const accent = colorFor("secondary", props.capabilities);
-  return h(
-    Box,
-    { flexDirection: "column", marginTop: 1 },
-    h(
-      Box,
-      null,
-      h(Text, colorProps(accent), "▌ "),
-      h(Text, { bold: true, ...colorProps(accent) }, `approval required · ${pending.toolName}`),
-    ),
-    ...(preview === null
-      ? [
-          h(
-            Box,
-            { key: "none", marginLeft: 2 },
-            h(
-              Text,
-              colorProps(colorFor("tertiary", props.capabilities)),
-              "preview unavailable: the exact operation is not recorded",
-            ),
-          ),
-        ]
-      : preview.map((line, index) =>
-          h(
-            Box,
-            { key: `p${index}`, marginLeft: 2 },
-            h(Text, null, line.length === 0 ? " " : line),
-          ),
-        )),
-    h(
-      Box,
-      { marginLeft: 2 },
-      h(
-        Text,
-        colorProps(colorFor("faint", props.capabilities)),
-        'type "a" then Enter to approve, "d" to deny',
-      ),
-    ),
-  );
-}
-
-function QuestionPanel(props: { view: TuiViewState; capabilities: Capabilities }): ReactElement {
-  const pending = props.view.pendingQuestion;
-  if (pending === null) return h(Box, null);
-  const accent = colorFor("secondary", props.capabilities);
-  const hint =
-    pending.answerType === "confirmation"
-      ? 'type "yes" or "no"'
-      : pending.answerType === "text"
-        ? "type an answer"
-        : pending.multiple
-          ? "type ids or labels, comma separated"
-          : "type an option id or label";
-  return h(
-    Box,
-    { flexDirection: "column", marginTop: 1 },
-    h(
-      Box,
-      null,
-      h(Text, colorProps(accent), "▌ "),
-      h(Text, { bold: true, ...colorProps(accent) }, `question · ${pending.question}`),
-    ),
-    ...pending.options.map((option) =>
-      h(
-        Box,
-        { key: option.id, marginLeft: 2 },
-        h(Text, colorProps(colorFor("primary", props.capabilities)), option.id),
-        h(Text, null, `) ${option.label}`),
-      ),
-    ),
-    h(Box, { marginLeft: 2 }, h(Text, colorProps(colorFor("faint", props.capabilities)), hint)),
-    props.view.answerError === null
-      ? null
-      : h(
-          Box,
-          { marginLeft: 2 },
-          h(
-            Text,
-            colorProps(colorFor("tertiary", props.capabilities)),
-            `not accepted: ${props.view.answerError}`,
-          ),
-        ),
-  );
 }
 
 /**
@@ -299,14 +288,22 @@ function Composer(props: {
   view: TuiViewState;
   draft: string;
   capabilities: Capabilities;
+  width: number;
 }): ReactElement {
   const { view, draft, capabilities } = props;
   const accent = colorFor(view.queueingInput ? "secondary" : "primary", capabilities);
-  const hint = view.queueingInput
-    ? "queued as supplementary input for the running run"
-    : view.canSubmit
-      ? "Enter submits · Esc quits · Ctrl+C cancels the run"
-      : "run is busy";
+  const hint =
+    view.pendingApproval !== null
+      ? view.pendingApprovalPreview === null
+        ? "d deny · preview unavailable"
+        : "a approve  ·  d deny"
+      : view.pendingQuestion !== null
+        ? "Enter answer"
+        : view.queueingInput
+          ? "queued as supplementary input for the running run"
+          : view.canSubmit
+            ? "Enter submits · /config settings · Ctrl+C cancels"
+            : "run is busy";
   return h(
     Box,
     { flexDirection: "column", marginTop: 1 },
@@ -316,23 +313,41 @@ function Composer(props: {
       h(Text, colorProps(accent), "▌ "),
       h(Text, colorProps(accent), view.queueingInput ? "queue" : "task"),
       h(Text, null, " › "),
-      h(Text, null, draft),
+      h(
+        Text,
+        null,
+        draft.length === 0
+          ? ""
+          : clipText(
+              [...draft].slice(-Math.max(1, props.width - 12)).join(""),
+              Math.max(1, props.width - 11),
+            ),
+      ),
       h(Text, colorProps(accent), "_"),
     ),
-    h(Box, { marginLeft: 2 }, h(Text, colorProps(colorFor("faint", capabilities)), hint)),
+    h(
+      Box,
+      { marginLeft: 2 },
+      h(
+        Text,
+        colorProps(colorFor("faint", capabilities)),
+        clipText(hint, Math.max(1, props.width - 2)),
+      ),
+    ),
   );
 }
 
 /**
  * Footer: mode on the left, model and status on the right.
  *
- * The reference keeps this to one line and drops the least important segment first
- * when space is short. Here the segments are few enough that dropping is unnecessary.
+ * Clip the mode and model independently so they cannot collide on narrow terminals.
  */
 function Footer(props: {
   view: TuiViewState;
   capabilities: Capabilities;
   modelLabel: string | undefined;
+  modeLabel: string | undefined;
+  width: number;
 }): ReactElement {
   const { view, capabilities, modelLabel } = props;
   const mode = view.queueingInput ? "queue" : view.runStatus === "idle" ? "ready" : view.runStatus;
@@ -340,18 +355,23 @@ function Footer(props: {
   return h(
     Box,
     { marginTop: 1, justifyContent: "space-between" },
-    h(Text, { bold: true, ...colorProps(accent) }, mode),
+    h(
+      Text,
+      { bold: true, ...colorProps(accent) },
+      clipText(
+        props.modeLabel === undefined ? mode : `${props.modeLabel} · ${mode}`,
+        Math.max(1, Math.floor(props.width / 2)),
+      ),
+    ),
     h(
       Text,
       colorProps(colorFor("dim", capabilities)),
-      modelLabel === undefined
-        ? (view.safeCode ?? "")
-        : `${modelLabel}${view.safeCode === null ? "" : ` · ${view.safeCode}`}`,
+      clipText(
+        modelLabel === undefined
+          ? (view.safeCode ?? "")
+          : `${modelLabel}${view.safeCode === null ? "" : ` · ${view.safeCode}`}`,
+        Math.max(1, Math.floor(props.width / 2) - 1),
+      ),
     ),
   );
-}
-
-/** Ink rejects an explicit `undefined` colour, so the prop is built conditionally. */
-function colorProps(color: string | undefined): { color?: string } {
-  return color === undefined ? {} : { color };
 }

@@ -73,10 +73,11 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   }
 
   function view(): TuiViewState {
+    const live = deps.coordinator.currentRunProjection();
     return deriveView({
-      runStatus,
+      runStatus: live?.status ?? runStatus,
       safeCode,
-      events,
+      events: live?.events ?? events,
       todo: todo.items.length === 0 ? null : todo,
       pendingApproval: deps.coordinator.pendingApprovalView(),
       pendingQuestion: deps.coordinator.pendingQuestionView(),

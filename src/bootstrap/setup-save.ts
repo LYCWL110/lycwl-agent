@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { ConfigDocument, ConfigStore } from "../adapters/windows/config-store.ts";
 import type { FileVault } from "../adapters/windows/file-credential-vault.ts";
 import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
+import { insertTopLevelValue, replaceTopLevelValue } from "../domain/config/jsonc-edit.ts";
 import {
   type ProviderConfigResult,
   readProviderConfig,
@@ -13,7 +14,8 @@ import type { SetupDraft, SetupField } from "../tui/setup-screen.ts";
  * Persist a setup draft.
  *
  * Order matters: validate first, write the credential second, write settings last.
- * If the settings write fails, a credential may exist that nothing references yet 閳? * recoverable. The reverse order would leave settings pointing at a key that was
+ * If the settings write fails, an unreferenced credential may remain, which is
+ * recoverable. The reverse order would leave settings pointing at a key that was
  * never stored, which fails later as an opaque authentication error.
  */
 
@@ -54,12 +56,23 @@ export async function saveSetup(input: {
   draft: SetupDraft;
   vault: FileVault;
   store: ConfigStore;
+  /** The document the user edited, so another save cannot be silently overwritten. */
+  baseDocument?: ConfigDocument | null;
 }): Promise<SaveSetupResult> {
+  const current = await input.store.load();
+  if (!current.ok && current.code !== "config_missing") {
+    return { ok: false, code: "config_write_failed", detail: current.code };
+  }
+  const base =
+    input.baseDocument === undefined ? (current.ok ? current.value : null) : input.baseDocument;
+  const existing = readProviderConfig(base === null ? {} : parseSettings(base.text));
   const validated = validateProviderConfig({
-    protocol: "anthropic_messages",
+    protocol:
+      input.draft.protocol ?? (existing.ok ? existing.value.protocol : "anthropic_messages"),
     baseUrl: input.draft.baseUrl,
     model: input.draft.model,
     credentialRef: input.draft.credentialRef,
+    ...(existing.ok ? { maxOutputTokens: existing.value.maxOutputTokens } : {}),
   });
   if (!validated.ok) {
     const field = mapField(validated.field);
@@ -71,6 +84,24 @@ export async function saveSetup(input: {
     };
   }
   const config = validated.value;
+  const withProvider = writeProviderBlock(base?.text ?? DEFAULT_SCHEMA_HEADER, {
+    protocol: config.protocol,
+    baseUrl: config.baseUrl,
+    model: config.model,
+    credentialRef: config.credentialRef,
+    maxOutputTokens: config.maxOutputTokens,
+  });
+  if (!withProvider.ok) {
+    return { ok: false, code: "config_write_failed", detail: withProvider.code };
+  }
+  // Reject an already-stale form before it can replace a stored credential.
+  // The store still rechecks this snapshot under its lock at the final save.
+  if (
+    (current.ok ? current.value.documentHash : "") !== (base?.documentHash ?? "") ||
+    (current.ok ? current.value.revision : 0) !== (base?.revision ?? 0)
+  ) {
+    return { ok: false, code: "config_conflict", draft: withProvider.text };
+  }
 
   // An empty key is allowed only when a credential already exists for the
   // reference; otherwise the configuration would look complete and fail on send.
@@ -101,22 +132,8 @@ export async function saveSetup(input: {
     }
   }
 
-  const current = await input.store.load();
-  const baseRevision = current.ok ? current.value.revision : 0;
-  const baseDocumentHash = current.ok ? current.value.documentHash : "";
-  const baseText = current.ok ? current.value.text : DEFAULT_SCHEMA_HEADER;
-
-  const withProvider = writeProviderBlock(baseText, {
-    protocol: config.protocol,
-    baseUrl: config.baseUrl,
-    model: config.model,
-    credentialRef: config.credentialRef,
-    maxOutputTokens: config.maxOutputTokens,
-  });
-  if (!withProvider.ok) {
-    return { ok: false, code: "config_write_failed", detail: withProvider.code };
-  }
-
+  const baseRevision = base?.revision ?? 0;
+  const baseDocumentHash = base?.documentHash ?? "";
   const saved = await input.store.save({
     baseRevision,
     baseDocumentHash,
@@ -183,9 +200,23 @@ function writeProviderBlock(
 
   const existing = parsed.value.members.find((member) => member.key === "provider");
   if (existing !== undefined) {
+    if (existing.value.kind !== "object") return { ok: false, code: "invalid_provider" };
+    let providerText = text.slice(existing.value.start, existing.value.end);
+    for (const [key, value] of Object.entries(block)) {
+      const provider = parseJsonc(providerText);
+      if (!provider.ok || provider.value.kind !== "object") {
+        return { ok: false, code: "invalid_provider" };
+      }
+      const present = provider.value.members.some((member) => member.key === key);
+      const edited = present
+        ? replaceTopLevelValue(providerText, key, value)
+        : insertTopLevelValue(providerText, key, value);
+      if (!edited.ok) return edited;
+      providerText = edited.text;
+    }
     return {
       ok: true,
-      text: `${text.slice(0, existing.value.start)}${literal}${text.slice(existing.value.end)}`,
+      text: `${text.slice(0, existing.value.start)}${providerText}${text.slice(existing.value.end)}`,
     };
   }
 
@@ -241,6 +272,7 @@ function parseSettings(text: string): unknown {
 }
 
 function mapField(field: string | undefined): SetupField | undefined {
+  if (field === "protocol") return "protocol";
   if (field === "baseUrl") return "baseUrl";
   if (field === "model") return "model";
   if (field === "credentialRef") return "credentialRef";

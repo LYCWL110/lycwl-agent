@@ -1,47 +1,37 @@
 import { type Instance, render } from "ink";
 import { createElement, type ReactElement } from "react";
-import type { ConfigStore } from "../adapters/windows/config-store.ts";
+import type { ConfigDocument, ConfigStore } from "../adapters/windows/config-store.ts";
 import type { FileVault } from "../adapters/windows/file-credential-vault.ts";
-import { describeSelection, selectRuntime } from "../bootstrap/runtime-selection.ts";
-import { type SaveSetupResult, saveSetup } from "../bootstrap/setup-save.ts";
 import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
-import { SUPPORTED_PROTOCOLS, type SupportedProtocol } from "../domain/config/provider-config.ts";
+import {
+  readProviderConfig,
+  SUPPORTED_PROTOCOLS,
+  type SupportedProtocol,
+} from "../domain/config/provider-config.ts";
 import {
   addCustomModel,
   applyKey,
   type BrowserState,
   createBrowserState,
+  filteredModels,
   mergeFetchedModels,
 } from "../tui/config-browser.ts";
 import { ConfigBrowser } from "../tui/config-browser-view.ts";
 import { type Capabilities, detectCapabilities } from "../tui/palette.ts";
-import { type SetupDraft, SetupScreen } from "../tui/setup-screen.ts";
-
-/**
- * Configuration inside the TUI.
- *
- * Everything is configured here: there is no web page and no external editor. The
- * flow is setup (endpoint, model, credential) then the browser (protocol, model) and
- * back, reusing the same save path the first-run screen uses.
- *
- * The browser is mounted in place of the app rather than alongside it, because both
- * use Ink's `useInput` and two active handlers would compete for keystrokes.
- */
+import { type SetupDraft, type SetupField, SetupScreen } from "../tui/setup-screen.ts";
+import { saveSetup } from "./setup-save.ts";
 
 export type ConfigFlowOptions = Readonly<{
   configStore: ConfigStore;
   vault: FileVault;
   workspaceRoot: string;
   dataDirectory: string;
-  /** Called with the message to print before the main TUI starts. */
   onReady: (lines: readonly string[]) => void;
-  /** Called when the user leaves configuration without saving. */
   onDiscard: () => void;
-  /** Injected for tests; production uses the real save path. */
   save?: typeof saveSetup;
-  /** Injected for tests; production reads the real environment. */
   capabilities?: Capabilities;
-  /** Injected for tests; production fetches from the provider. */
+  /** Mount boundary for exercising the real save flow without a terminal. */
+  mount?: (element: ReactElement) => Pick<Instance, "rerender" | "unmount">;
   fetchModels?: (input: {
     protocol: SupportedProtocol;
     baseUrl: string;
@@ -56,6 +46,7 @@ export type ConfigFlow = Readonly<{
 
 type Phase = Readonly<{ kind: "setup" }> | Readonly<{ kind: "browser"; state: BrowserState }>;
 
+/** One active input handler; saved selections apply only to the next Run. */
 export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
   const save = options.save ?? saveSetup;
   const capabilities =
@@ -65,178 +56,228 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
       colorterm: process.env["COLORTERM"],
       term: process.env["TERM"],
       force: process.env["LYCWL_COLOR"],
+      windowsTerminal: process.env["WT_SESSION"] !== undefined,
     });
-
-  let instance: Instance | null = null;
+  let instance: Pick<Instance, "rerender" | "unmount"> | null = null;
   let settle: (outcome: "saved" | "discarded") => void = () => undefined;
   const done = new Promise<"saved" | "discarded">((resolve) => {
     settle = resolve;
   });
-
-  let phase: Phase = { kind: "setup" };
-  let error: Readonly<{
-    field: "baseUrl" | "model" | "apiKey" | "credentialRef";
-    code: string;
-  }> | null = null;
+  let closed = false;
   let busy = false;
+  let fetchVersion = 0;
+  let phase: Phase = { kind: "setup" };
+  let draft: SetupDraft = {
+    protocol: "anthropic_messages",
+    baseUrl: "https://api.anthropic.com",
+    model: "",
+    credentialRef: "provider-main",
+    apiKey: "",
+  };
+  let baseDocument: ConfigDocument | null = null;
+  let hasStoredCredential = false;
+  let error: Readonly<{ field: SetupField; code: string }> | null = null;
+  let saveError: string | null = null;
 
-  const element = (): ReactElement => {
+  function redraw(): void {
+    if (!closed) instance?.rerender(element());
+  }
+
+  function close(outcome: "saved" | "discarded"): void {
+    if (closed) return;
+    closed = true;
+    fetchVersion += 1;
+    instance?.unmount();
+    if (outcome === "discarded") options.onDiscard();
+    settle(outcome);
+  }
+
+  function element(): ReactElement {
     if (phase.kind === "setup") {
       return createElement(SetupScreen, {
-        initial: {},
-        hasStoredCredential: false,
+        initial: draft,
+        hasStoredCredential,
+        capabilities,
+        animated: true,
+        busy,
         error,
-        warnings: ["credentials are stored unencrypted (ADR-0038)"],
-        onSave: (draft: SetupDraft) => {
-          if (busy) return;
-          busy = true;
-          void handleSave(draft);
+        saveError,
+        warnings: ["credentials are stored unencrypted"],
+        onSave: (value: SetupDraft) => {
+          void persist(value);
         },
         onDiscard: () => {
-          instance?.unmount();
-          options.onDiscard();
-          settle("discarded");
+          if (!busy) close("discarded");
         },
       });
     }
     return createElement(ConfigBrowser, {
       state: phase.state,
       capabilities,
+      animated: true,
+      busy,
+      endpoint: draft.baseUrl,
       onState: (state: BrowserState) => {
+        if (busy || phase.kind !== "browser") return;
+        const changedProtocol = state.protocolIndex !== phase.state.protocolIndex;
         phase = { kind: "browser", state };
-        instance?.rerender(element());
+        redraw();
+        if (changedProtocol)
+          void fetchModels(state.protocols[state.protocolIndex] as SupportedProtocol);
+      },
+      onEdit: () => {
+        if (busy || phase.kind !== "browser") return;
+        draft = {
+          ...draft,
+          protocol: phase.state.protocols[phase.state.protocolIndex] as SupportedProtocol,
+          model: filteredModels(phase.state)[phase.state.modelIndex]?.id ?? draft.model,
+        };
+        fetchVersion += 1;
+        phase = { kind: "setup" };
+        redraw();
+      },
+      onRefresh: () => {
+        if (phase.kind === "browser")
+          void fetchModels(phase.state.protocols[phase.state.protocolIndex] as SupportedProtocol);
       },
       onCommit: (value) => {
-        void handleCommit(value);
+        void persist({
+          ...draft,
+          protocol: value.protocol as SupportedProtocol,
+          model: value.model,
+          apiKey: "",
+        });
       },
       onCancel: () => {
-        instance?.unmount();
-        options.onDiscard();
-        settle("discarded");
+        if (!busy) close("discarded");
       },
     });
-  };
-
-  async function handleSave(draft: SetupDraft): Promise<void> {
-    const result: SaveSetupResult = await save({
-      draft,
-      vault: options.vault,
-      store: options.configStore,
-    });
-    if (!result.ok) {
-      error =
-        result.field === undefined
-          ? null
-          : { field: result.field, code: result.detail ?? result.code };
-      busy = false;
-      instance?.rerender(element());
-      return;
-    }
-
-    // Move to the browser so the user can pick a protocol and model before the
-    // Session starts, which is what the first-run screen cannot do.
-    error = null;
-    busy = false;
-    const savedProtocol = await readSavedProtocol();
-    phase = {
-      kind: "browser",
-      state: createBrowserState({
-        providerLabel: new URL(draft.baseUrl).hostname,
-        protocols: [...SUPPORTED_PROTOCOLS],
-        currentProtocol: savedProtocol,
-        models: [draft.model],
-        currentModel: draft.model,
-      }),
-    };
-    instance?.rerender(element());
-    void maybeFetchModels(draft, savedProtocol);
   }
 
-  /** Fetch the provider's model list, keeping the browser usable on failure. */
-  async function maybeFetchModels(draft: SetupDraft, protocol: SupportedProtocol): Promise<void> {
-    if (options.fetchModels === undefined) return;
-    const apiKey = await readKey(draft.credentialRef);
-    if (apiKey === null) return;
+  async function persist(value: SetupDraft): Promise<void> {
+    if (busy || closed) return;
+    busy = true;
+    draft = value;
+    error = null;
+    saveError = null;
+    redraw();
+    try {
+      const result = await save({
+        draft: value,
+        vault: options.vault,
+        store: options.configStore,
+        baseDocument,
+      });
+      if (closed) return;
+      if (!result.ok) {
+        saveError = result.detail ?? result.code;
+        error = result.field === undefined ? null : { field: result.field, code: saveError };
+        if (phase.kind === "browser") {
+          phase = {
+            kind: "browser",
+            state: { ...phase.state, status: { text: `Save failed: ${saveError}`, isError: true } },
+          };
+        }
+        return;
+      }
+      options.onReady([
+        `protocol: ${result.config.protocol}`,
+        `model: ${result.config.model}`,
+        `endpoint: ${result.config.baseUrl}`,
+        "configuration saved; applies to the next Run",
+      ]);
+      close("saved");
+    } catch {
+      saveError = "configuration could not be saved";
+      if (phase.kind === "browser") {
+        phase = {
+          kind: "browser",
+          state: { ...phase.state, status: { text: saveError, isError: true } },
+        };
+      }
+    } finally {
+      busy = false;
+      redraw();
+    }
+  }
+
+  async function fetchModels(protocol: SupportedProtocol): Promise<void> {
+    if (options.fetchModels === undefined || busy || closed) return;
+    const version = ++fetchVersion;
+    const key = await options.vault.read({
+      reference: draft.credentialRef,
+      purpose: "provider_api_key",
+      revision: 1,
+    });
+    if (!key.ok || closed || version !== fetchVersion) return;
     try {
       const models = await options.fetchModels({
         protocol,
         baseUrl: draft.baseUrl,
-        apiKey,
+        apiKey: key.value,
       });
-      if (phase.kind !== "browser") return;
+      if (closed || version !== fetchVersion || phase.kind !== "browser") return;
       phase = { kind: "browser", state: mergeFetchedModels(phase.state, models) };
-      instance?.rerender(element());
     } catch {
-      // A fetch failure must not break configuration; the user can type a name.
-      if (phase.kind !== "browser") return;
+      if (closed || version !== fetchVersion || phase.kind !== "browser") return;
       phase = {
         kind: "browser",
-        state: {
-          ...phase.state,
-          status: { text: "could not fetch the model list; type a name instead", isError: true },
-        },
+        state: { ...phase.state, status: { text: "Model list unavailable", isError: true } },
       };
-      instance?.rerender(element());
     }
+    redraw();
   }
 
-  /** Read the protocol from the saved document, falling back to the default. */
-  async function readSavedProtocol(): Promise<SupportedProtocol> {
-    const loaded = await options.configStore.load();
-    if (!loaded.ok) return SUPPORTED_PROTOCOLS[0];
-    const settings = parseSettings(loaded.value.text) as {
-      provider?: { protocol?: unknown };
-    };
-    const candidate = settings.provider?.protocol;
-    return (SUPPORTED_PROTOCOLS as readonly string[]).includes(String(candidate))
-      ? (candidate as SupportedProtocol)
-      : SUPPORTED_PROTOCOLS[0];
+  async function initialize(): Promise<void> {
+    try {
+      const loaded = await options.configStore.load();
+      if (closed) return;
+      if (loaded.ok) {
+        baseDocument = loaded.value;
+        const parsed = parseJsonc(loaded.value.text);
+        const config = readProviderConfig(parsed.ok ? toPlainValue(parsed.value) : {});
+        if (config.ok) {
+          draft = { ...config.value, apiKey: "" };
+          const key = await options.vault.read({
+            reference: config.value.credentialRef,
+            purpose: "provider_api_key",
+            revision: 1,
+          });
+          if (closed) return;
+          hasStoredCredential = key.ok;
+          if (key.ok) {
+            phase = {
+              kind: "browser",
+              state: createBrowserState({
+                providerLabel: new URL(config.value.baseUrl).hostname,
+                protocols: SUPPORTED_PROTOCOLS,
+                currentProtocol: config.value.protocol,
+                models: [config.value.model],
+                currentModel: config.value.model,
+              }),
+            };
+          }
+        }
+      } else if (loaded.code !== "config_missing") {
+        saveError = loaded.code;
+      }
+    } catch {
+      saveError = "configuration could not be loaded";
+    }
+    if (closed) return;
+    instance = (options.mount ?? render)(element());
+    if (phase.kind === "browser") void fetchModels(draft.protocol ?? "anthropic_messages");
   }
 
-  async function readKey(reference: string): Promise<string | null> {
-    const read = await options.vault.read({
-      reference,
-      purpose: "provider_api_key",
-      revision: 1,
-    });
-    return read.ok ? read.value : null;
-  }
-
-  async function handleCommit(value: Readonly<{ protocol: string; model: string }>): Promise<void> {
-    instance?.unmount();
-    const loaded = await options.configStore.load();
-    const settings = loaded.ok ? parseSettings(loaded.value.text) : null;
-    const selection = await selectRuntime({
-      workspaceRoot: options.workspaceRoot,
-      dataDirectory: options.dataDirectory,
-      settings,
-      hasSettings: loaded.ok,
-    });
-    options.onReady([
-      ...describeSelection(selection),
-      `protocol: ${value.protocol}`,
-      `model: ${value.model}`,
-    ]);
-    settle("saved");
-  }
-
-  instance = render(element());
-  return { done, unmount: () => instance?.unmount() };
+  void initialize();
+  return { done, unmount: () => close("discarded") };
 }
 
-function parseSettings(text: string): unknown {
-  const parsed = parseJsonc(text);
-  return parsed.ok ? toPlainValue(parsed.value) : {};
-}
-
-/** Whether the saved settings already contain a provider block. */
 export async function hasProvider(configStore: ConfigStore): Promise<boolean> {
   const loaded = await configStore.load();
   if (!loaded.ok) return false;
   const parsed = parseJsonc(loaded.value.text);
-  if (!parsed.ok) return false;
-  const settings = toPlainValue(parsed.value) as Record<string, unknown>;
-  return settings["provider"] !== undefined;
+  return parsed.ok && readProviderConfig(toPlainValue(parsed.value)).ok;
 }
 
 export { applyKey, addCustomModel };

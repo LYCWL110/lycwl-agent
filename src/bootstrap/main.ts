@@ -105,8 +105,7 @@ if (configureFirst) {
       process.stderr.write("setup discarded; nothing was written\n");
     },
   });
-  await flow.done;
-  process.exit(0);
+  if ((await flow.done) === "discarded") process.exit(0);
 }
 
 // A stable Session per workspace, so launching again in the same project
@@ -180,6 +179,11 @@ async function startSession(): Promise<void> {
   process.stderr.write(`${describeSelection(chosen).join("\n")}\n\n`);
   startTui(createTuiController({ coordinator: chosen.coordinator }), {
     ...(chosen.kind === "real" ? { modelLabel: chosen.config.model } : {}),
+    modeLabel: args.includes("--shell")
+      ? "shell"
+      : args.includes("--write")
+        ? "workspace-write"
+        : "read-only",
     onConfigRequest: openConfig,
   });
 }

@@ -350,9 +350,17 @@ export class RuntimeCoordinator {
   }
 
   /**
-   * Read-only projection of the approval the Run is currently waiting on. A TUI
-   * renders this and submits replyApproval; it grants no authority by itself.
+   * Snapshot of current facts for a TUI; reading it performs no transition.
    */
+  currentRunProjection(): Readonly<{
+    status: Run["state"];
+    events: readonly InternalEvent[];
+  }> | null {
+    const context = this.#activeContext;
+    return context === null ? null : { status: context.run.state, events: context.events.slice() };
+  }
+
+  /** Reading a pending approval grants no authority. */
   pendingApprovalView(): PendingApprovalView | null {
     const pending = this.#activeContext?.pendingApproval;
     if (pending === null || pending === undefined) return null;

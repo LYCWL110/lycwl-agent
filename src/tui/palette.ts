@@ -53,6 +53,7 @@ export function detectCapabilities(input: {
   colorterm: string | undefined;
   term: string | undefined;
   force: string | undefined;
+  windowsTerminal?: boolean;
 }): Capabilities {
   const depth = detectDepth(input);
   return {
@@ -70,6 +71,7 @@ function detectDepth(input: {
   colorterm: string | undefined;
   term: string | undefined;
   force: string | undefined;
+  windowsTerminal?: boolean;
 }): ColorDepth {
   if (input.noColor) return "mono";
   const forced = input.force?.trim().toLowerCase();
@@ -79,6 +81,7 @@ function detectDepth(input: {
     if (forced === "16" || forced === "ansi") return "ansi16";
     if (forced === "none" || forced === "mono" || forced === "0") return "mono";
   }
+  if (input.windowsTerminal) return "truecolor";
   const colorterm = input.colorterm?.toLowerCase() ?? "";
   if (colorterm.includes("truecolor") || colorterm.includes("24bit")) return "truecolor";
   const term = input.term?.toLowerCase() ?? "";
@@ -146,6 +149,7 @@ export function gradientWorthDrawing(capabilities: Capabilities): boolean {
 
 export type RowStyle = Readonly<{
   color: InkColor;
+  backgroundColor: InkColor;
   bold: boolean;
   /** Reverse video is how selection is expressed without a background colour. */
   inverse: boolean;
@@ -166,6 +170,12 @@ export function rowStyle(input: {
   const lowColor = input.capabilities.depth === "ansi16" || input.capabilities.depth === "mono";
   return {
     color,
+    backgroundColor:
+      input.focused && !lowColor
+        ? input.capabilities.depth === "truecolor"
+          ? "#242733"
+          : "#262633"
+        : undefined,
     bold: input.focused && input.capabilities.bold,
     inverse: input.focused && lowColor && input.capabilities.reverse,
   };

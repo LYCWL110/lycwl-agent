@@ -50,7 +50,7 @@ export async function fetchModelList(request: ModelListRequest): Promise<ModelLi
   if (request.apiKey.length === 0) return { ok: false, code: "key_not_configured" };
 
   const get = request.get ?? providerHttpsGet;
-  const base = request.baseUrl.replace(/\/+$/, "");
+  const base = request.baseUrl.replace(/\/+$/, "").replace(/\/v1(beta)?$/i, "");
 
   let posted: ProviderHttpResult;
   try {

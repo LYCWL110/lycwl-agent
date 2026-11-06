@@ -6,8 +6,7 @@
  * about network access or credentials 閳?it validates a draft and produces the
  * values the composition root needs.
  *
- * Deliberately narrow: one protocol is implemented, so the model rejects any other
- * protocol instead of accepting a value nothing can serve.
+ * Only protocols with an implemented adapter are selectable.
  */
 
 export const SUPPORTED_PROTOCOLS = [

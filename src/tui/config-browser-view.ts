@@ -1,6 +1,6 @@
 import { Box, Text, useInput } from "ink";
-import { createElement, type ReactElement } from "react";
-
+import { createElement as h, type ReactElement } from "react";
+import { ConfigChrome, clipText, colorProps, useViewport, type Viewport } from "./chrome.ts";
 import {
   applyKey,
   BROWSER_LIMITS,
@@ -11,160 +11,176 @@ import {
 } from "./config-browser.ts";
 import { type Capabilities, colorFor, rowStyle } from "./palette.ts";
 
-/**
- * Three-column provider browser.
- *
- * Layout follows the Miyu reference: provider, protocol and model side by side, with
- * the focused column marked and a status line that distinguishes information from
- * error by colour. Rendering is pure; every key is forwarded to the reducer, which
- * owns all the rules.
- */
-
-const h = createElement;
-
 export type ConfigBrowserProps = Readonly<{
   state: BrowserState;
   capabilities: Capabilities;
+  endpoint?: string;
+  busy?: boolean;
+  animated?: boolean;
+  viewport?: Viewport;
   onState: (state: BrowserState) => void;
   onCommit: (value: Readonly<{ protocol: string; model: string }>) => void;
   onCancel: () => void;
+  onEdit?: () => void;
+  onRefresh?: () => void;
 }>;
 
+/** Shared Miyu chrome, independent column focus and a separate selection marker. */
 export function ConfigBrowser(props: ConfigBrowserProps): ReactElement {
   const { state, capabilities } = props;
+  const viewport = useViewport(props.viewport);
+  const width = Math.max(1, Math.min(84, viewport.columns - 4));
+  const stacked = width < 62;
+  const providerWidth = stacked ? width : Math.floor(width * 0.25);
+  const protocolWidth = stacked ? width : Math.floor(width * 0.34);
+  const modelWidth = stacked ? width : width - providerWidth - protocolWidth - 2;
+  const editing = state.filterMode || state.modelInput !== null;
 
   useInput((input, key) => {
+    if (props.busy) return;
+    if (!editing && input === "e" && !key.ctrl && !key.meta) {
+      props.onEdit?.();
+      return;
+    }
+    if (!editing && key.ctrl && input === "r") {
+      props.onRefresh?.();
+      return;
+    }
     const translated = translateKey(input, key);
     if (translated === null) return;
     const outcome = applyKey(state, translated);
-    if (outcome.cancel) {
-      props.onCancel();
-      return;
-    }
-    if (outcome.commit !== null) {
-      props.onCommit(outcome.commit);
-      return;
-    }
-    if (outcome.state !== state) props.onState(outcome.state);
+    if (outcome.cancel) props.onCancel();
+    else if (outcome.commit !== null) props.onCommit(outcome.commit);
+    else if (outcome.state !== state) props.onState(outcome.state);
   });
 
   const models = filteredModels(state);
-  const statusColor =
-    state.status === null
-      ? undefined
-      : colorFor(state.status.isError ? "tertiary" : "success", capabilities);
-
+  const columns = [
+    {
+      title: "Provider",
+      focused: state.activeColumn === "provider",
+      width: providerWidth,
+      values: [state.providerLabel],
+      offset: 0,
+      selected: 0,
+    },
+    {
+      title: "Protocol",
+      focused: state.activeColumn === "protocol",
+      width: protocolWidth,
+      values: state.protocols,
+      offset: state.scroll.protocol,
+      selected: state.protocolIndex,
+    },
+    {
+      title: "Model",
+      focused: state.activeColumn === "model",
+      width: modelWidth,
+      values: models.map((entry) => entry.id),
+      offset: state.scroll.model,
+      selected: state.modelIndex,
+    },
+  ];
   return h(
-    Box,
-    { flexDirection: "column" },
+    ConfigChrome,
+    { capabilities, viewport, title: "Provider / Model", animated: props.animated },
     h(
       Box,
-      null,
+      { flexDirection: "column" },
+      h(Text, { bold: true }, "Provider configuration"),
+      props.endpoint === undefined
+        ? null
+        : h(Text, colorProps(colorFor("dim", capabilities)), clipText(props.endpoint, width)),
+      h(
+        Box,
+        { flexDirection: stacked ? "column" : "row", marginTop: 1, gap: 1 },
+        ...columns
+          .filter((column) => !stacked || column.focused)
+          .map((column) =>
+            h(
+              Box,
+              {
+                key: column.title,
+                width: column.width,
+                flexDirection: "column",
+                minHeight: stacked ? undefined : BROWSER_LIMITS.visibleRows + 2,
+              },
+              h(
+                Text,
+                {
+                  bold: true,
+                  ...colorProps(colorFor(column.focused ? "secondary" : "dim", capabilities)),
+                },
+                clipText(column.title, column.width),
+              ),
+              h(Text, colorProps(colorFor("faint", capabilities)), "─".repeat(column.width)),
+              ...visibleWindow(column.values, column.offset).map((value, index) => {
+                return h(
+                  Row,
+                  // biome-ignore lint/correctness/useJsxKeyInIterable: The React createElement props below include a stable key.
+                  {
+                    key: `${column.title}-${value}`,
+                    text: value,
+                    width: column.width,
+                    focused: column.focused,
+                    selected: column.offset + index === column.selected,
+                    capabilities,
+                  },
+                );
+              }),
+              column.values.length === 0
+                ? h(Text, colorProps(colorFor("dim", capabilities)), "(no models)")
+                : null,
+            ),
+          ),
+      ),
+      h(Text, colorProps(colorFor("faint", capabilities)), "─".repeat(width)),
+      state.modelInput !== null
+        ? h(
+            Text,
+            colorProps(colorFor("primary", capabilities)),
+            `Model id: ${clipText(state.modelInput, Math.max(1, width - 11))}▏`,
+          )
+        : state.filterMode
+          ? h(
+              Text,
+              colorProps(colorFor("primary", capabilities)),
+              `Filter: ${clipText(state.filter, Math.max(1, width - 9))}▏`,
+            )
+          : null,
+      state.status === null
+        ? null
+        : h(
+            Text,
+            colorProps(colorFor(state.status.isError ? "tertiary" : "success", capabilities)),
+            state.status.text,
+          ),
       h(
         Text,
-        { bold: true, ...colorProps(colorFor("secondary", capabilities)) },
-        "Provider configuration",
+        colorProps(colorFor("dim", capabilities)),
+        props.busy ? "Saving…" : `${models.length} model(s)`,
       ),
-      h(Text, colorProps(colorFor("faint", capabilities)), `  ${state.providerLabel}`),
-    ),
-    h(
-      Box,
-      { marginTop: 1 },
-      h(Column, {
-        title: "Provider",
-        focused: state.activeColumn === "provider",
-        capabilities,
-        children: [
-          h(Row, {
-            key: "p0",
-            text: state.providerLabel,
-            focused: state.activeColumn === "provider",
-            selected: true,
-            capabilities,
-          }),
-        ],
-      }),
-      h(Column, {
-        title: "Protocol",
-        focused: state.activeColumn === "protocol",
-        capabilities,
-        children: visibleWindow(state.protocols, state.scroll.protocol).map((protocol, index) =>
-          h(Row, {
-            key: protocol,
-            text: protocol,
-            focused: state.activeColumn === "protocol",
-            selected: state.scroll.protocol + index === state.protocolIndex,
-            capabilities,
-          }),
-        ),
-      }),
-      h(Column, {
-        title: "Model",
-        focused: state.activeColumn === "model",
-        capabilities,
-        children: visibleWindow(models, state.scroll.model).map((entry, index) =>
-          h(Row, {
-            key: entry.id,
-            text: entry.source === "fetched" ? `${entry.id} *` : entry.id,
-            focused: state.activeColumn === "model",
-            selected: state.scroll.model + index === state.modelIndex,
-            capabilities,
-          }),
-        ),
-      }),
-    ),
-    h(
-      Box,
-      { marginTop: 1 },
       h(
         Text,
-        colorProps(colorFor("faint", capabilities)),
-        state.filterMode
-          ? `filter: ${state.filter}_  (enter applies, esc clears)`
-          : "tab/left/right column - up/down move - enter apply - del remove - ctrl+z undo",
+        colorProps(colorFor("secondary", capabilities)),
+        editing
+          ? "Enter confirm  ·  Esc cancel"
+          : "← → column  ·  ↑ ↓ select  ·  Enter save  ·  Esc cancel",
       ),
+      editing
+        ? null
+        : h(
+            Text,
+            colorProps(colorFor("dim", capabilities)),
+            "e edit endpoint/key  ·  / filter  ·  a add model  ·  Ctrl+R refresh",
+          ),
     ),
-    state.status === null
-      ? null
-      : h(Box, null, h(Text, colorProps(statusColor), state.status.text)),
-    h(
-      Box,
-      null,
-      h(
-        Text,
-        colorProps(colorFor("faint", capabilities)),
-        `${models.length} model(s)  * = fetched from the provider`,
-      ),
-    ),
-  );
-}
-
-function Column(props: {
-  title: string;
-  focused: boolean;
-  capabilities: Capabilities;
-  children: readonly ReactElement[];
-}): ReactElement {
-  const { capabilities, focused } = props;
-  const titleStyle = rowStyle({ role: "secondary", focused, capabilities });
-  return h(
-    Box,
-    { flexDirection: "column", width: 26, marginRight: 1 },
-    h(
-      Text,
-      {
-        ...(titleStyle.bold ? { bold: true } : {}),
-        ...colorProps(titleStyle.color),
-        ...(titleStyle.inverse ? { inverse: true } : {}),
-      },
-      props.title,
-    ),
-    ...props.children,
   );
 }
 
 function Row(props: {
   text: string;
+  width: number;
   focused: boolean;
   selected: boolean;
   capabilities: Capabilities;
@@ -174,29 +190,25 @@ function Row(props: {
     focused: props.focused && props.selected,
     capabilities: props.capabilities,
   });
-  const marker = props.selected ? ">" : " ";
   return h(
     Box,
-    null,
-    h(Text, colorProps(colorFor("faint", props.capabilities)), `${marker} `),
+    { width: props.width },
     h(
       Text,
       {
         ...colorProps(style.color),
+        ...(style.backgroundColor === undefined ? {} : { backgroundColor: style.backgroundColor }),
         ...(style.bold ? { bold: true } : {}),
         ...(style.inverse ? { inverse: true } : {}),
       },
-      truncate(props.text, 23),
+      clipText(
+        `${props.focused && props.selected ? "▸" : " "} ${props.selected ? "●" : "○"} ${props.text}`,
+        props.width,
+      ),
     ),
   );
 }
 
-function truncate(text: string, width: number): string {
-  if (text.length <= width) return text;
-  return `${text.slice(0, Math.max(0, width - 1))}…`;
-}
-
-/** Translate Ink's key event into the reducer's vocabulary. */
 function translateKey(
   input: string,
   key: {
@@ -210,6 +222,7 @@ function translateKey(
     backspace?: boolean;
     delete?: boolean;
     ctrl?: boolean;
+    meta?: boolean;
   },
 ): BrowserKey | null {
   if (key.ctrl === true && input === "z") return "undo";
@@ -222,13 +235,8 @@ function translateKey(
   if (key.escape === true) return "escape";
   if (key.backspace === true) return "backspace";
   if (key.delete === true) return "delete";
-  if (input.length > 0 && !key.ctrl) return { kind: "text", value: input };
+  if (input.length > 0 && !key.ctrl && !key.meta) return { kind: "text", value: input };
   return null;
 }
 
 export { BROWSER_LIMITS };
-
-/** Build Ink's color prop only when a colour is available at this depth. */
-function colorProps(color: string | undefined): { color?: string } {
-  return color === undefined ? {} : { color };
-}
