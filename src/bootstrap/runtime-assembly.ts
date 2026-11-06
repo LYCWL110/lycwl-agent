@@ -3,6 +3,7 @@ import {
   type AnthropicToolDefinition,
 } from "../adapters/providers/anthropic-provider.ts";
 import { OpenAiChatProvider } from "../adapters/providers/openai-chat-provider.ts";
+import { OpenAiResponsesProvider } from "../adapters/providers/openai-responses-provider.ts";
 import { createFileVault } from "../adapters/windows/file-credential-vault.ts";
 import {
   type ProviderConfig,
@@ -106,25 +107,35 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
   };
 
   const provider: ModelProvider =
-    config.protocol === "openai_chat"
-      ? new OpenAiChatProvider({
+    config.protocol === "openai_responses"
+      ? new OpenAiResponsesProvider({
           resolveApiKey,
           model: config.model,
           baseUrl: config.baseUrl,
-          maxTokens: config.maxOutputTokens,
+          maxOutputTokens: config.maxOutputTokens,
           tools: options.toolDefinitions,
           ...(options.post === undefined ? {} : { post: options.post }),
           ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
         })
-      : new AnthropicProvider({
-          resolveApiKey,
-          model: config.model,
-          endpoint: protocolEndpoint(config.baseUrl, config.protocol),
-          maxTokens: config.maxOutputTokens,
-          tools: options.toolDefinitions,
-          ...(options.post === undefined ? {} : { post: options.post }),
-          ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
-        });
+      : config.protocol === "openai_chat"
+        ? new OpenAiChatProvider({
+            resolveApiKey,
+            model: config.model,
+            baseUrl: config.baseUrl,
+            maxTokens: config.maxOutputTokens,
+            tools: options.toolDefinitions,
+            ...(options.post === undefined ? {} : { post: options.post }),
+            ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
+          })
+        : new AnthropicProvider({
+            resolveApiKey,
+            model: config.model,
+            endpoint: protocolEndpoint(config.baseUrl, config.protocol),
+            maxTokens: config.maxOutputTokens,
+            tools: options.toolDefinitions,
+            ...(options.post === undefined ? {} : { post: options.post }),
+            ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
+          });
 
   return { ok: true, provider, config, warnings };
 }

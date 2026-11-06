@@ -10,7 +10,11 @@
  * protocol instead of accepting a value nothing can serve.
  */
 
-export const SUPPORTED_PROTOCOLS = ["anthropic_messages", "openai_chat"] as const;
+export const SUPPORTED_PROTOCOLS = [
+  "anthropic_messages",
+  "openai_chat",
+  "openai_responses",
+] as const;
 export type SupportedProtocol = (typeof SUPPORTED_PROTOCOLS)[number];
 
 export const PROVIDER_CONFIG_LIMITS = Object.freeze({
@@ -55,6 +59,7 @@ export type ProviderConfigResult =
 export function protocolEndpoint(baseUrl: string, protocol: SupportedProtocol): string {
   const base = baseUrl.replace(/\/+$/, "");
   if (protocol === "openai_chat") return `${base}/v1/chat/completions`;
+  if (protocol === "openai_responses") return `${base}/v1/responses`;
   return `${base}/v1/messages`;
 }
 
