@@ -44,12 +44,30 @@ export const RENAME_PATH_DEFINITION: ToolDefinition = {
 const DEFINITIONS: readonly ToolDefinition[] = [DELETE_PATH_DEFINITION, RENAME_PATH_DEFINITION];
 
 export function createMutationTools(dependencies: MutationToolDependencies): ToolExecutor {
+  const prepared = new Map<string, string>();
+  async function factsFor(request: ToolExecutionRequest) {
+    if (request.toolName === DELETE_PATH_DEFINITION.name) {
+      const paths = readPaths(request.arguments);
+      if (!paths.ok) throw new Error("invalid_arguments");
+      return JSON.stringify([
+        request.arguments,
+        await dependencies.inspectDeleteTargets(paths.value),
+      ]);
+    }
+    const pair = readPair(request.arguments);
+    if (!pair.ok) throw new Error("invalid_arguments");
+    return JSON.stringify([
+      request.arguments,
+      await dependencies.inspectRename(pair.value.from, pair.value.to),
+    ]);
+  }
   return {
     getDefinition(toolName: string): ToolDefinition | null {
       return DEFINITIONS.find((definition) => definition.name === toolName) ?? null;
     },
 
     async preview(request: ToolExecutionRequest): Promise<string | null> {
+      prepared.delete(request.toolCallId);
       const args = request.arguments;
       if (typeof args !== "object" || args === null) {
         return `${request.toolName}: invalid_arguments`;
@@ -57,6 +75,7 @@ export function createMutationTools(dependencies: MutationToolDependencies): Too
       if (request.toolName === DELETE_PATH_DEFINITION.name) {
         const paths = readPaths(args);
         if (!paths.ok) return `${request.toolName}: invalid_arguments`;
+        prepared.set(request.toolCallId, await factsFor(request));
         return [
           "delete_path",
           `targets=${paths.value.join(",")}`,
@@ -66,6 +85,7 @@ export function createMutationTools(dependencies: MutationToolDependencies): Too
       }
       const pair = readPair(args);
       if (!pair.ok) return `${request.toolName}: invalid_arguments`;
+      prepared.set(request.toolCallId, await factsFor(request));
       return [
         "rename_path",
         `from=${pair.value.from}`,
@@ -74,12 +94,24 @@ export function createMutationTools(dependencies: MutationToolDependencies): Too
       ].join("\n");
     },
 
+    discardApproval: (id) => {
+      prepared.delete(id);
+    },
+    async revalidateApproval(request) {
+      return prepared.get(request.toolCallId) === (await factsFor(request));
+    },
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
+      const saved = prepared.get(request.toolCallId);
+      prepared.delete(request.toolCallId);
+      if (request.signal?.aborted)
+        return { status: "failed", safeCode: "tool_cancelled", text: null };
+      if (request.approvalGranted && (saved === undefined || saved !== (await factsFor(request))))
+        return { status: "failed", safeCode: "file_conflict", text: null };
       if (request.toolName === DELETE_PATH_DEFINITION.name) {
-        return executeDelete(dependencies, request.arguments);
+        return executeDelete(dependencies, request.arguments, request.signal);
       }
       if (request.toolName === RENAME_PATH_DEFINITION.name) {
-        return executeRename(dependencies, request.arguments);
+        return executeRename(dependencies, request.arguments, request.signal);
       }
       return { status: "failed", safeCode: "unknown_tool", text: null };
     },
@@ -89,6 +121,7 @@ export function createMutationTools(dependencies: MutationToolDependencies): Too
 async function executeDelete(
   dependencies: MutationToolDependencies,
   args: unknown,
+  signal?: AbortSignal,
 ): Promise<ToolExecutionResult> {
   if (typeof args !== "object" || args === null) {
     return { status: "failed", safeCode: "invalid_arguments", text: null };
@@ -112,8 +145,14 @@ async function executeDelete(
   for (let index = 0; index < paths.value.length; index += 1) {
     const path = paths.value[index] ?? "";
     const fact = factsByPath.get(path);
+    const current = (await dependencies.inspectDeleteTargets([path]))[0];
     // Re-check the preflight facts immediately before each removal.
-    if (fact === undefined || !fact.exists) {
+    if (
+      fact === undefined ||
+      !fact.exists ||
+      JSON.stringify(current) !== JSON.stringify(fact) ||
+      signal?.aborted
+    ) {
       factsOut.push({ target: path, outcome: "failed", safeCode: "file_conflict" });
       return finish(factsOut, paths.value.slice(index + 1));
     }
@@ -131,6 +170,7 @@ async function executeDelete(
 async function executeRename(
   dependencies: MutationToolDependencies,
   args: unknown,
+  signal?: AbortSignal,
 ): Promise<ToolExecutionResult> {
   const pair = readPair(args);
   if (!pair.ok) return { status: "failed", safeCode: "invalid_arguments", text: null };
@@ -145,6 +185,12 @@ async function executeRename(
   if (!validated.ok) return { status: "failed", safeCode: validated.code, text: null };
 
   try {
+    if (signal?.aborted) return { status: "failed", safeCode: "tool_cancelled", text: null };
+    if (
+      JSON.stringify(await dependencies.inspectRename(pair.value.from, pair.value.to)) !==
+      JSON.stringify(facts)
+    )
+      return { status: "failed", safeCode: "file_conflict", text: null };
     await dependencies.renamePath(pair.value.from, pair.value.to);
   } catch {
     return { status: "outcome_unknown", safeCode: "rename_outcome_unknown" };

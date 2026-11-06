@@ -21,10 +21,12 @@ export type TranscriptEntry = Readonly<{
 export type RunStatus = "idle" | "active" | "waiting" | "completed" | "failed" | "cancelled";
 
 export type WaitingKind = "approval" | "question" | "configuration" | "other";
+export type RunActivity = "thinking" | "working";
 
 export type TuiViewState = Readonly<{
   runStatus: RunStatus;
   waitingKind: WaitingKind | null;
+  activity: RunActivity | null;
   safeCode: string | null;
   transcript: readonly TranscriptEntry[];
   todo: TodoList | null;
@@ -49,6 +51,7 @@ export type TuiViewState = Readonly<{
 export const EMPTY_VIEW: TuiViewState = {
   runStatus: "idle",
   waitingKind: null,
+  activity: null,
   safeCode: null,
   transcript: [],
   todo: null,
@@ -83,6 +86,7 @@ export function deriveView(input: ViewInput): TuiViewState {
   return {
     runStatus,
     waitingKind,
+    activity: deriveActivity(input, waitingKind),
     safeCode: input.safeCode,
     transcript: buildTranscript(input.events),
     todo: input.todo,
@@ -94,6 +98,29 @@ export function deriveView(input: ViewInput): TuiViewState {
     canSubmit: runStatus !== "active" && waitingKind === null,
     queueingInput: runStatus === "active" || waitingKind !== null,
   };
+}
+
+function deriveActivity(input: ViewInput, waiting: WaitingKind | null): RunActivity | null {
+  if (input.runStatus !== "active" || waiting !== null) return null;
+  for (let index = input.events.length - 1; index >= 0; index -= 1) {
+    switch (input.events[index]?.payload.kind) {
+      case "run_cancel_requested":
+      case "run_completed":
+      case "run_failed":
+      case "run_cancelled":
+        return null;
+      case "model_request_started":
+      case "model_retry_scheduled":
+        return "thinking";
+      case "model_response_validated":
+      case "tool_execution_started":
+      case "tool_execution_finished":
+      case "run_started":
+      case "run_resumed":
+        return "working";
+    }
+  }
+  return null;
 }
 
 /**
@@ -247,9 +274,7 @@ export type ComposerIntent =
   | Readonly<{ kind: "open_config" }>
   | Readonly<{ kind: "reject"; reason: "empty" | "run_active" }>;
 
-export const COMPOSER_COMMANDS = [
-  { name: "/config", description: "Configure provider, protocol, model and API key." },
-] as const;
+export const COMPOSER_COMMANDS = [{ name: "/config", description: "Provider settings" }] as const;
 
 export function interpretComposer(
   view: TuiViewState,

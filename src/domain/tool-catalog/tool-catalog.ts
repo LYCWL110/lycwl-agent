@@ -74,7 +74,7 @@ export const TOOL_CATALOG: readonly CatalogEntry[] = Object.freeze([
         },
         depth: {
           type: "integer",
-          minimum: 0,
+          minimum: 1,
           description: "How many levels to descend. Defaults to 1.",
         },
         limit: {
@@ -138,6 +138,8 @@ export const TOOL_CATALOG: readonly CatalogEntry[] = Object.freeze([
           type: "boolean",
           description: "Match case exactly. Defaults to true.",
         },
+        contextBefore: { type: "integer", minimum: 0, maximum: 10 },
+        contextAfter: { type: "integer", minimum: 0, maximum: 10 },
         limit: {
           type: "integer",
           minimum: 1,
@@ -288,7 +290,7 @@ export const TOOL_CATALOG: readonly CatalogEntry[] = Object.freeze([
   {
     name: "shell",
     description:
-      "Run one command and return its bounded stdout and stderr. Every command needs " +
+      "Run a Windows PowerShell 5.1 command with -NoProfile and -NonInteractive, and return bounded stdout and stderr. Every command needs " +
       "its own approval and runs with the current Windows user's permissions; there is " +
       "no OS sandbox. Use the background tools for anything long-running.",
     inputSchema: {
@@ -309,7 +311,7 @@ export const TOOL_CATALOG: readonly CatalogEntry[] = Object.freeze([
   {
     name: "background_start",
     description:
-      "Start a long-running command and return a task id. Starting needs approval; the " +
+      "Start a Windows PowerShell 5.1 command and return a task id. Starting needs approval; the " +
       "task keeps running until it exits, its timeout passes, or it is stopped.",
     inputSchema: {
       type: "object",

@@ -72,8 +72,8 @@ export type SelectRuntimeOptions = Readonly<{
    */
   enableProcesses?: boolean;
   /**
-   * Fixed Session identity so successive launches share one durable log.
-   * Absent means a fresh Session per Run, appropriate only for tests.
+   * Conversation identity. A fresh launch supplies a new ID; explicit resume
+   * and configuration reload reuse one. Absent creates one per coordinator.
    */
   sessionId?: string;
   post?: Parameters<typeof assembleRuntime>[0]["post"];

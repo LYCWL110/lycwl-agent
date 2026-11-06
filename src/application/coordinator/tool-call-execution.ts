@@ -82,11 +82,13 @@ export type ToolCallDependencies = Readonly<{
   deferQuestions?: boolean;
   /** C10 owned-key registry applied to persisted tool result text. */
   ownedKeys?: OwnedKeyRegistry;
+  signal?: AbortSignal;
   onEvent: (
     type:
       | "tool_call_received"
       | "approval_requested"
       | "approval_decided"
+      | "approval_grant_revoked"
       | "tool_dispatch_committed"
       | "tool_execution_denied"
       | "tool_execution_started"
@@ -195,7 +197,12 @@ export async function executeToolCall(
     }
 
     // `ask_user` returned above, so reaching here means the tool has a definition.
-    if (definition?.requiresApproval) {
+    const dynamicApproval = await dependencies.tools.requiresApproval?.({
+      toolCallId,
+      toolName: call.toolName,
+      arguments: call.arguments,
+    });
+    if (definition?.requiresApproval || dynamicApproval === true) {
       const awaiting = transitionToolInvocation(invocation, "awaiting_approval");
       if (!awaiting.ok) return { kind: "invalid", safeCode: awaiting.code };
       invocation = awaiting.value;
@@ -203,6 +210,7 @@ export async function executeToolCall(
       const pending = requestApproval(approvalId, toolCallId);
       if (!pending.ok) return { kind: "invalid", safeCode: pending.code };
       const safePreview = await resolvePreview(dependencies, call, toolCallId);
+      if (safePreview === null) return previewFailure(dependencies, call, toolCallId);
       await dependencies.onEvent("approval_requested", {
         kind: "approval_requested",
         approvalId,
@@ -320,7 +328,7 @@ async function resolvePreview(
   dependencies: ToolCallDependencies,
   call: ProviderToolCall,
   toolCallId: string,
-): Promise<string> {
+): Promise<string | null> {
   const preview = dependencies.tools.preview;
   if (preview === undefined) return `${call.toolName} in synthetic workspace`;
   try {
@@ -332,8 +340,30 @@ async function resolvePreview(
     return rendered ?? `${call.toolName} in synthetic workspace`;
   } catch {
     // A broken preview must not silently authorize the operation.
-    return `${call.toolName}: preview unavailable`;
+    return null;
   }
+}
+
+async function previewFailure(
+  dependencies: ToolCallDependencies,
+  call: ProviderToolCall,
+  toolCallId: string,
+): Promise<ToolCallOutcome> {
+  dependencies.tools.discardApproval?.(toolCallId);
+  await dependencies.onEvent("tool_execution_finished", {
+    kind: "tool_execution_finished",
+    toolCallId,
+    status: "failed",
+    safeCode: "preview_unavailable",
+    text: null,
+  });
+  return {
+    kind: "continue",
+    providerToolCallId: call.providerToolCallId,
+    toolName: call.toolName,
+    status: "failed",
+    text: null,
+  };
 }
 
 async function deniedOutcome(
@@ -341,6 +371,7 @@ async function deniedOutcome(
   call: ProviderToolCall,
   toolCallId: string,
 ): Promise<ToolCallOutcome> {
+  dependencies.tools.discardApproval?.(toolCallId);
   const denied = transitionToolInvocation({ toolCallId, state: "awaiting_approval" }, "denied");
   if (!denied.ok) return { kind: "invalid", safeCode: denied.code };
   await dependencies.onEvent("tool_execution_denied", {
@@ -364,6 +395,65 @@ async function dispatchAndExecute(
   invocation: ToolInvocation,
   approvalId: string | null,
 ): Promise<ToolCallOutcome> {
+  const request = {
+    toolCallId,
+    toolName: call.toolName,
+    arguments: call.arguments,
+    ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
+    approvalGranted: approvalId !== null,
+  };
+  if (dependencies.signal?.aborted) return { kind: "invalid", safeCode: "tool_cancelled" };
+  if (approvalId !== null && dependencies.tools.revalidateApproval !== undefined) {
+    let unchanged = false;
+    try {
+      unchanged = await dependencies.tools.revalidateApproval(request);
+    } catch {
+      /* Reapproval fails closed. */
+    }
+    if (!unchanged) {
+      await dependencies.onEvent("approval_grant_revoked", {
+        kind: "approval_grant_revoked",
+        approvalId,
+        toolCallId,
+        reason: "precondition_changed",
+      });
+      const freshApprovalId = dependencies.ids.create();
+      const safePreview = await resolvePreview(dependencies, call, toolCallId);
+      if (safePreview === null) return previewFailure(dependencies, call, toolCallId);
+      await dependencies.onEvent("approval_requested", {
+        kind: "approval_requested",
+        approvalId: freshApprovalId,
+        toolCallId,
+        toolName: call.toolName,
+        safePreview,
+      });
+      if (dependencies.deferApprovals === true) {
+        return {
+          kind: "waiting",
+          toolCallId,
+          approvalId: freshApprovalId,
+          waitToken: freshApprovalId,
+          requestVersion: 1,
+          call,
+        };
+      }
+      const decision = await dependencies.approvals.decide({
+        approvalId: freshApprovalId,
+        toolCallId,
+        toolName: call.toolName,
+        safePreview,
+      });
+      await dependencies.onEvent("approval_decided", {
+        kind: "approval_decided",
+        approvalId: freshApprovalId,
+        toolCallId,
+        decision,
+      });
+      if (decision === "denied") return deniedOutcome(dependencies, call, toolCallId);
+      return dispatchAndExecute(dependencies, call, toolCallId, invocation, freshApprovalId);
+    }
+  }
+  if (dependencies.signal?.aborted) return { kind: "invalid", safeCode: "tool_cancelled" };
   const grant: ApprovalGrant | null =
     approvalId === null ? null : { approvalId, state: "available" };
   const dispatchId = dependencies.ids.create();
@@ -386,11 +476,8 @@ async function dispatchAndExecute(
     toolName: call.toolName,
   });
 
-  const result = await dependencies.tools.execute({
-    toolCallId,
-    toolName: call.toolName,
-    arguments: call.arguments,
-  });
+  if (dependencies.signal?.aborted) return { kind: "invalid", safeCode: "tool_cancelled" };
+  const result = await dependencies.tools.execute(request);
   const terminal = transitionToolInvocation(executing.value, result.status);
   if (!terminal.ok) return { kind: "invalid", safeCode: terminal.code };
   // C10: the persisted tool result is a protected exit too. A blocked text is

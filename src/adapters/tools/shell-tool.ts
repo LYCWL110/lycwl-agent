@@ -34,6 +34,8 @@ export type ShellToolDependencies = Readonly<{
   runShell: (
     request: ShellRequest,
     environment: Readonly<Record<string, string>>,
+    signal?: AbortSignal,
+    toolCallId?: string,
   ) => Promise<ShellRunOutcome>;
 }>;
 
@@ -94,7 +96,14 @@ export function createShellTool(dependencies: ShellToolDependencies): ToolExecut
 
       let outcome: ShellRunOutcome;
       try {
-        outcome = await dependencies.runShell(shellRequest, filter.environment);
+        if (request.signal?.aborted)
+          return { status: "failed", safeCode: "tool_cancelled", text: null };
+        outcome = await dependencies.runShell(
+          shellRequest,
+          filter.environment,
+          request.signal,
+          request.toolCallId,
+        );
       } catch {
         return { status: "outcome_unknown", safeCode: "shell_outcome_unknown" };
       }

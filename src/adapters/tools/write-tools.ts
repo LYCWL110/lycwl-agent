@@ -20,6 +20,7 @@ export type WriteTargetFacts = Readonly<{
   /** SHA-256 of the current bytes, or null when the file does not exist. */
   sha256: string | null;
   exists: boolean;
+  stateKey?: string;
 }>;
 
 export type WriteToolDependencies = Readonly<{
@@ -32,7 +33,7 @@ export type WriteToolDependencies = Readonly<{
    * Injected write sink. Called only after approval and precondition recheck.
    * A real adapter must use same-volume temp + replace and G06 checks.
    */
-  writeBytes: (path: string, bytes: Uint8Array) => Promise<void>;
+  writeBytes: (path: string, bytes: Uint8Array, expected?: WriteTargetFacts) => Promise<void>;
 }>;
 
 export const CREATE_FILE_DEFINITION: ToolDefinition = {
@@ -62,19 +63,60 @@ const KNOWN_PRE_WRITE_CODES: ReadonlySet<string> = new Set([
 ]);
 
 export function createWriteTools(dependencies: WriteToolDependencies): ToolExecutor {
+  const prepared = new Map<string, { args: string; plan: PlannedWrite }>();
+  const refused = new Map<string, { args: string; code: string }>();
   return {
     getDefinition(toolName: string): ToolDefinition | null {
       return DEFINITIONS.find((definition) => definition.name === toolName) ?? null;
     },
 
     async preview(request: ToolExecutionRequest): Promise<string | null> {
+      prepared.delete(request.toolCallId);
+      refused.delete(request.toolCallId);
       const planned = await planFor(dependencies, request);
-      if (!planned.ok) return `${request.toolName}: ${planned.code}`;
+      if (!planned.ok) {
+        refused.set(request.toolCallId, {
+          args: JSON.stringify(request.arguments),
+          code: planned.code,
+        });
+        return `${request.toolName}: ${planned.code}`;
+      }
+      prepared.set(request.toolCallId, {
+        args: JSON.stringify(request.arguments),
+        plan: planned.value,
+      });
       return renderPreview(request.toolName, planned.value);
     },
 
+    discardApproval: (id) => {
+      prepared.delete(id);
+      refused.delete(id);
+    },
+    async revalidateApproval(request) {
+      const saved = prepared.get(request.toolCallId);
+      if (saved === undefined)
+        return refused.get(request.toolCallId)?.args === JSON.stringify(request.arguments);
+      if (saved.args !== JSON.stringify(request.arguments)) return false;
+      const current = await dependencies.inspectTarget(saved.plan.path);
+      return sameTargetState(current, saved.plan.expectedBefore);
+    },
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
-      const planned = await planFor(dependencies, request);
+      const saved = prepared.get(request.toolCallId);
+      const refusal = refused.get(request.toolCallId);
+      prepared.delete(request.toolCallId);
+      refused.delete(request.toolCallId);
+      if (refusal !== undefined) return { status: "failed", safeCode: refusal.code, text: null };
+      if (request.approvalGranted && saved === undefined)
+        return { status: "failed", safeCode: "approval_precondition_missing", text: null };
+      if (request.signal?.aborted)
+        return { status: "failed", safeCode: "tool_cancelled", text: null };
+      if (saved !== undefined && saved.args !== JSON.stringify(request.arguments)) {
+        return { status: "failed", safeCode: "file_conflict", text: null };
+      }
+      const planned =
+        saved === undefined
+          ? await planFor(dependencies, request)
+          : { ok: true as const, value: saved.plan };
       if (!planned.ok) {
         return { status: "failed", safeCode: planned.code, text: null };
       }
@@ -87,7 +129,9 @@ export function createWriteTools(dependencies: WriteToolDependencies): ToolExecu
       }
 
       try {
-        await dependencies.writeBytes(plan.path, plan.bytes);
+        if (request.signal?.aborted)
+          return { status: "failed", safeCode: "tool_cancelled", text: null };
+        await dependencies.writeBytes(plan.path, plan.bytes, plan.expectedBefore);
       } catch (error) {
         // Distinguish a known pre-write refusal from an uncertain outcome: a
         // rejected path or denied access means nothing was written, while any
@@ -261,7 +305,9 @@ function detectFormat(bytes: Uint8Array): {
 }
 
 function sameTargetState(left: WriteTargetFacts, right: WriteTargetFacts): boolean {
-  return left.exists === right.exists && left.sha256 === right.sha256;
+  return (
+    left.exists === right.exists && left.sha256 === right.sha256 && left.stateKey === right.stateKey
+  );
 }
 
 function renderPreview(toolName: string, plan: PlannedWrite): string {

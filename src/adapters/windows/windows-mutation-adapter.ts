@@ -1,4 +1,5 @@
-import { lstat, readdir, type realpath, rename, rmdir, unlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, readdir, readFile, realpath, rename, rmdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import {
   BATCH_LIMITS,
@@ -32,6 +33,20 @@ export type MutationAdapterFailure =
 
 export function createWindowsMutationAdapter(options: Readonly<{ workspaceRoot: string }>) {
   const { workspaceRoot } = options;
+
+  async function versionOf(target: string): Promise<string> {
+    const resolved = await realpath(target);
+    const checked = resolveWorkspacePath(workspaceRoot, resolved);
+    if (!checked.ok || !checked.value.withinWorkspace) throw new Error("invalid_path");
+    const stats = await lstat(target, { bigint: true });
+    if (stats.isSymbolicLink()) throw new Error("reparse_point_unsupported");
+    const content = stats.isFile()
+      ? createHash("sha256")
+          .update(await readFile(target))
+          .digest("hex")
+      : "";
+    return `${resolved}:${stats.dev}:${stats.ino}:${stats.mtimeNs}:${stats.size}:${content}`;
+  }
 
   async function inspectDeleteTargets(
     requested: readonly string[],
@@ -86,6 +101,7 @@ export function createWindowsMutationAdapter(options: Readonly<{ workspaceRoot: 
       isDirectory,
       isSymbolicLink,
       isEmptyDirectory,
+      ...(!isSymbolicLink ? { stateKey: await versionOf(supplied.value.absolutePath) } : {}),
     };
   }
 
@@ -149,10 +165,12 @@ export function createWindowsMutationAdapter(options: Readonly<{ workspaceRoot: 
 
     let treeEntries = 1;
     let manifestBytes = fromPath.length + toPath.length;
+    let manifestKey = "";
     if (sourceStats.isDirectory()) {
       const counted = await countTree(fromPath);
       treeEntries = counted.entries;
       manifestBytes += counted.bytes;
+      manifestKey = counted.digest;
     }
 
     return {
@@ -166,6 +184,11 @@ export function createWindowsMutationAdapter(options: Readonly<{ workspaceRoot: 
       manifestBytes,
       targetInsideSource,
       aliasAmbiguous,
+      ...(!sourceStats.isSymbolicLink()
+        ? {
+            stateKey: `${await versionOf(fromPath)}:${await realpath(path.dirname(toPath))}:${manifestKey}`,
+          }
+        : {}),
     };
   }
 
@@ -219,33 +242,41 @@ async function exists(target: string): Promise<boolean> {
   }
 }
 
-async function countTree(root: string): Promise<Readonly<{ entries: number; bytes: number }>> {
+async function countTree(
+  root: string,
+): Promise<Readonly<{ entries: number; bytes: number; digest: string }>> {
   let entries = 0;
   let bytes = 0;
+  const digest = createHash("sha256");
   const queue = [root];
   while (queue.length > 0) {
     const current = queue.pop();
     if (current === undefined) break;
     let children: string[];
     try {
-      children = await readdir(current);
+      children = (await readdir(current)).sort();
     } catch {
-      continue;
+      throw new Error("operation_failed");
     }
     for (const child of children) {
       entries += 1;
       bytes += child.length;
-      if (entries > BATCH_LIMITS.maxRenameTreeEntries) return { entries, bytes };
+      if (entries > BATCH_LIMITS.maxRenameTreeEntries)
+        return { entries, bytes, digest: digest.digest("hex") };
       const childPath = path.join(current, child);
       try {
         const stats = await lstat(childPath, { bigint: true });
+        if (stats.isSymbolicLink()) throw new Error("reparse_point_unsupported");
+        digest.update(
+          JSON.stringify([childPath, `${stats.dev}:${stats.ino}:${stats.mtimeNs}:${stats.size}`]),
+        );
         if (stats.isDirectory() && !stats.isSymbolicLink()) queue.push(childPath);
       } catch {
-        // Vanished during traversal; it still counted as an entry.
+        throw new Error("operation_failed");
       }
     }
   }
-  return { entries, bytes };
+  return { entries, bytes, digest: digest.digest("hex") };
 }
 
 function sameVolume(left: string, right: string): boolean {

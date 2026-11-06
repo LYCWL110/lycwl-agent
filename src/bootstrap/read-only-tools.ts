@@ -1,10 +1,11 @@
+import { realpath, stat } from "node:fs/promises";
 import { tavilySearch, toWebSearchRun } from "../adapters/network/tavily-adapter.ts";
 import { createBackgroundTools } from "../adapters/tools/background-tools.ts";
 import { createLspTools } from "../adapters/tools/lsp-tools.ts";
 import { createMutationTools } from "../adapters/tools/mutation-tools.ts";
 import { createApplyPatchTool } from "../adapters/tools/patch-tool.ts";
 import { createReadFileTool } from "../adapters/tools/read-file-tool.ts";
-import { createSearchTools, type SearchEntry } from "../adapters/tools/search-tools.ts";
+import { createSearchTools } from "../adapters/tools/search-tools.ts";
 import { createShellTool } from "../adapters/tools/shell-tool.ts";
 import { createTodoTool } from "../adapters/tools/todo-tool.ts";
 import { createWebTools } from "../adapters/tools/web-tools.ts";
@@ -13,8 +14,15 @@ import { createBackgroundRegistry } from "../adapters/windows/background-registr
 import { resolveWebFetchHost } from "../adapters/windows/dns-resolver.ts";
 import { createLspRegistry } from "../adapters/windows/lsp-registry.ts";
 import { pinnedFetch } from "../adapters/windows/pinned-https-client.ts";
+import {
+  createPowerShellCapturePaths,
+  type PowerShellCapturePaths,
+  powershellCommand,
+  powershellExecutable,
+} from "../adapters/windows/powershell-command.ts";
 import { createProcessSupervisor } from "../adapters/windows/process-supervisor.ts";
 import { createSearchLedger, makeReservationId } from "../adapters/windows/search-ledger.ts";
+import { createSearchScope } from "../adapters/windows/search-scope.ts";
 import { createWindowsFileReader } from "../adapters/windows/windows-directory-reader.ts";
 import { createWindowsFsAdapter } from "../adapters/windows/windows-fs-adapter.ts";
 import { createWindowsMutationAdapter } from "../adapters/windows/windows-mutation-adapter.ts";
@@ -28,13 +36,14 @@ import type {
   ToolExecutionResult,
   ToolExecutor,
 } from "../ports/tool-executor.ts";
+import { resolveWorkspacePath } from "../services/permission/workspace-path.ts";
 
 /**
  * Composition root for the delivered filesystem slices.
  *
  * Read-only tools (Stage 2A) and write tools (Stage 2B) are wired to real disk.
- * Every other tool name fails closed with `tool_unavailable_in_build`, so a model
- * can never reach a process, network, credential, LSP, delete or rename path.
+ * Optional process, LSP and network delegates follow their explicit build flags.
+ * Unavailable tool names fail closed with `tool_unavailable_in_build`.
  */
 export const UNAVAILABLE_CODE = "tool_unavailable_in_build";
 
@@ -99,6 +108,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
   const reader = createWindowsFileReader({ workspaceRoot });
   const writer = createWindowsWriteAdapter({ workspaceRoot });
   const mutator = createWindowsMutationAdapter({ workspaceRoot });
+  const processCaptures = new Map<string, PowerShellCapturePaths>();
 
   const readFile = createReadFileTool({
     workspaceRoot,
@@ -116,17 +126,12 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     },
   });
 
+  const scope = createSearchScope(workspaceRoot, reader, fsAdapter);
   const search = createSearchTools({
-    listEntries: async (directory): Promise<readonly SearchEntry[]> => {
-      const listed = await reader.listDirectory(directory);
-      if (!listed.ok) throw new Error(listed.code);
-      return listed.entries;
-    },
-    readText: async (filePath) => {
-      const text = await reader.readText(filePath);
-      if (text === null) throw new Error("read_failed");
-      return text;
-    },
+    begin: scope.begin,
+    scopeFacts: scope.facts,
+    listEntries: scope.listEntries,
+    readText: scope.readText,
   });
 
   const writes = enableWrites
@@ -140,8 +145,8 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
           }
         },
         readBytes: async (requestedPath) => writer.readBytes(requestedPath),
-        writeBytes: async (requestedPath, bytes) => {
-          const result = await writer.writeBytes(requestedPath, bytes);
+        writeBytes: async (requestedPath, bytes, expected) => {
+          const result = await writer.writeBytes(requestedPath, bytes, expected);
           if (!result.ok) throw new Error(result.code);
         },
       })
@@ -156,8 +161,8 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
           }
           return snapshots;
         },
-        writeBytes: async (requestedPath, bytes) => {
-          const result = await writer.writeBytes(requestedPath, bytes);
+        writeBytes: async (requestedPath, bytes, expected) => {
+          const result = await writer.writeBytes(requestedPath, bytes, expected);
           if (!result.ok) throw new Error(result.code);
         },
       })
@@ -176,17 +181,23 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     ? createShellTool({
         sessionMode: enableWrites ? "workspace_write" : "read_only",
         inheritedEnvironment: { ...process.env } as Record<string, string>,
-        runShell: async (request, environment) => {
+        runShell: async (request, environment, signal, toolCallId) => {
           const supervisor = createProcessSupervisor();
+          const capturePaths =
+            toolCallId === undefined ? undefined : processCaptures.get(toolCallId);
           const outcome = await supervisor.runToCompletion({
             command: request.command,
             cwd: request.cwd,
             timeoutMs: request.timeoutMs,
             environment,
+            ...(signal === undefined ? {} : { signal }),
+            ...(capturePaths === undefined ? {} : { capturePaths }),
           });
           if (outcome.kind === "failed") {
             return { kind: "unknown", safeCode: outcome.code };
           }
+          if (outcome.cancelled)
+            return { kind: "unknown", safeCode: "shell_cancelled_outcome_unknown" };
           return outcome.timedOut
             ? { kind: "timed_out", stdout: outcome.stdout, stderr: outcome.stderr }
             : {
@@ -199,14 +210,15 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
       })
     : null;
 
-  const background = enableProcesses
-    ? createBackgroundTools(
-        createBackgroundRegistry({
-          sessionMode: enableWrites ? "workspace_write" : "read_only",
-          inheritedEnvironment: { ...process.env } as Record<string, string>,
-        }).dependencies,
-      )
+  const backgroundRegistry = enableProcesses
+    ? createBackgroundRegistry({
+        sessionMode: enableWrites ? "workspace_write" : "read_only",
+        inheritedEnvironment: { ...process.env } as Record<string, string>,
+        captureFor: (id) => (id === undefined ? undefined : processCaptures.get(id)),
+      })
     : null;
+  const background =
+    backgroundRegistry === null ? null : createBackgroundTools(backgroundRegistry.dependencies);
 
   const delegates: ToolExecutor[] = [readFile, search];
   // Todo is a planning tool with no side effects. Its list is held by the caller so
@@ -333,6 +345,32 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     return null;
   }
 
+  const processSnapshots = new Map<string, string>();
+  const isStart = (request: ToolExecutionRequest) =>
+    request.toolName === "shell" || request.toolName === "background_start";
+  async function normalize(request: ToolExecutionRequest): Promise<ToolExecutionRequest> {
+    if (!isStart(request)) return request;
+    const args = request.arguments as Record<string, unknown> | null;
+    if (args === null || typeof args !== "object" || typeof args["cwd"] !== "string")
+      throw new Error("invalid_arguments");
+    const supplied = resolveWorkspacePath(workspaceRoot, args["cwd"]);
+    if (!supplied.ok) throw new Error("invalid_path");
+    const resolved = await realpath(supplied.value.absolutePath);
+    const info = await stat(resolved);
+    if (!info.isDirectory()) throw new Error("invalid_cwd");
+    return { ...request, arguments: { ...args, cwd: resolved } };
+  }
+  async function processIdentity(request: ToolExecutionRequest) {
+    const normalized = await normalize(request);
+    const cwd = (normalized.arguments as { cwd: string }).cwd;
+    const info = await stat(cwd, { bigint: true });
+    return JSON.stringify([
+      normalized.arguments,
+      `${info.dev}:${info.ino}`,
+      powershellExecutable(),
+    ]);
+  }
+
   return {
     getDefinition(toolName: string): ToolDefinition | null {
       for (const delegate of delegates) {
@@ -343,8 +381,35 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     },
 
     async preview(request: ToolExecutionRequest) {
+      const normalized = await normalize(request);
+      if (isStart(request)) {
+        processSnapshots.set(request.toolCallId, await processIdentity(request));
+        processCaptures.set(request.toolCallId, createPowerShellCapturePaths());
+      }
       const delegate = resolveDelegate(request.toolName);
-      return delegate?.preview === undefined ? null : delegate.preview(request);
+      const preview = delegate?.preview === undefined ? null : await delegate.preview(normalized);
+      const capture = processCaptures.get(request.toolCallId);
+      const command = (normalized.arguments as { command?: unknown } | null)?.command;
+      return isStart(request) && capture !== undefined && typeof command === "string"
+        ? `${preview}\nexecutable=${powershellExecutable()}\ncommandLine=${powershellCommand(command, capture.stdoutPath, capture.stderrPath)}`
+        : preview;
+    },
+    async requiresApproval(request) {
+      return (await resolveDelegate(request.toolName)?.requiresApproval?.(request)) ?? false;
+    },
+    async revalidateApproval(request) {
+      if (isStart(request))
+        return processSnapshots.get(request.toolCallId) === (await processIdentity(request));
+      return (await resolveDelegate(request.toolName)?.revalidateApproval?.(request)) ?? true;
+    },
+    discardApproval(id) {
+      processSnapshots.delete(id);
+      processCaptures.delete(id);
+      for (const delegate of delegates) delegate.discardApproval?.(id);
+    },
+    async cancelAll() {
+      backgroundRegistry?.disposeAll();
+      await lspRegistry.close();
     },
 
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
@@ -353,7 +418,19 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
         return { status: "failed", safeCode: UNAVAILABLE_CODE, text: null };
       }
       try {
-        return await delegate.execute(request);
+        const normalized = await normalize(request);
+        if (request.signal?.aborted)
+          return { status: "failed", safeCode: "tool_cancelled", text: null };
+        if (
+          isStart(request) &&
+          request.approvalGranted &&
+          processSnapshots.get(request.toolCallId) !== (await processIdentity(request))
+        )
+          return { status: "failed", safeCode: "process_precondition_changed", text: null };
+        const result = await delegate.execute(normalized);
+        processSnapshots.delete(request.toolCallId);
+        processCaptures.delete(request.toolCallId);
+        return result;
       } catch (error) {
         const safeCode = error instanceof Error ? error.message : "read_failed";
         return { status: "failed", safeCode, text: null };

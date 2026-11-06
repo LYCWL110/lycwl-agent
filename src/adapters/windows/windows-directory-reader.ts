@@ -87,7 +87,11 @@ export function createWindowsFileReader(options: Readonly<{ workspaceRoot: strin
       // Reparse points are reported as directories but never traversed by
       // callers; the entry kind stays honest.
       const kind = stats.isDirectory() ? "directory" : "file";
-      entries.push({ path: prefix.length === 0 ? name : `${prefix}/${name}`, kind });
+      entries.push({
+        path: prefix.length === 0 ? name : `${prefix}/${name}`,
+        kind,
+        ...(stats.isSymbolicLink() ? { isReparse: true } : {}),
+      });
     }
     return { ok: true, entries };
   }

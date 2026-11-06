@@ -31,6 +31,7 @@ export type BackgroundToolDependencies = Readonly<{
     request: ShellRequest,
     environment: Readonly<Record<string, string>>,
     label: string,
+    toolCallId?: string,
   ) => Promise<BackgroundStartOutcome>;
   /** Read the current supervised state of a task. */
   getTask: (taskId: string) => Promise<BackgroundTask | null>;
@@ -113,7 +114,7 @@ export function createBackgroundTools(dependencies: BackgroundToolDependencies):
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
       switch (request.toolName) {
         case BACKGROUND_START_DEFINITION.name:
-          return executeStart(dependencies, request.arguments);
+          return executeStart(dependencies, request.arguments, request.toolCallId);
         case BACKGROUND_STATUS_DEFINITION.name:
           return executeStatus(dependencies, request.arguments);
         case BACKGROUND_OUTPUT_DEFINITION.name:
@@ -194,6 +195,7 @@ function readTaskId(args: unknown): Parsed<string> {
 async function executeStart(
   dependencies: BackgroundToolDependencies,
   args: unknown,
+  toolCallId: string,
 ): Promise<ToolExecutionResult> {
   if (dependencies.sessionMode === "read_only") {
     return { status: "failed", safeCode: "read_only_session", text: null };
@@ -226,6 +228,7 @@ async function executeStart(
       },
       filter.environment,
       parsed.value.label ?? "",
+      toolCallId,
     );
   } catch {
     return { status: "outcome_unknown", safeCode: "background_start_unknown" };

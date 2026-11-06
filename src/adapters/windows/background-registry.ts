@@ -1,6 +1,7 @@
 import type { BackgroundTask, OutputRecord } from "../../domain/process/background.ts";
 import type { ShellRequest } from "../../domain/process/shell.ts";
 import type { BackgroundToolDependencies } from "../tools/background-tools.ts";
+import type { PowerShellCapturePaths } from "./powershell-command.ts";
 import { createProcessSupervisor } from "./process-supervisor.ts";
 
 /**
@@ -42,6 +43,7 @@ export function createBackgroundRegistry(
     sessionMode: "read_only" | "workspace_write";
     inheritedEnvironment: Readonly<Record<string, string>>;
     providerCredentialNames?: readonly string[];
+    captureFor?: (toolCallId: string | undefined) => PowerShellCapturePaths | undefined;
   }>,
 ): BackgroundRegistry {
   const supervisor = createProcessSupervisor();
@@ -142,14 +144,16 @@ export function createBackgroundRegistry(
       ? {}
       : { providerCredentialNames: options.providerCredentialNames }),
 
-    async startProcess(request: ShellRequest, environment, label) {
+    async startProcess(request: ShellRequest, environment, label, toolCallId) {
       const taskId = nextId("task");
       const executionId = nextId("exec");
+      const capturePaths = options.captureFor?.(toolCallId);
       const start = supervisor.start({
         command: request.command,
         cwd: request.cwd,
         executionId,
         environment,
+        ...(capturePaths === undefined ? {} : { capturePaths }),
       });
       if (!start.ok) return { kind: "unknown", safeCode: start.code };
 

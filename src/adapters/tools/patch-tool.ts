@@ -34,30 +34,50 @@ export type PatchTargetSnapshot = Readonly<{
   encoding: TextFileEncoding;
   lineEnding: string;
   bytes: Uint8Array;
+  stateKey?: string;
 }>;
 
 export type ApplyPatchDependencies = Readonly<{
   /** Injected preflight snapshot for every target before any change. */
   inspectTargets: (paths: readonly string[]) => Promise<readonly PatchTargetSnapshot[]>;
   /** Injected write sink; a real adapter needs G05/G06-safe replacement. */
-  writeBytes: (path: string, bytes: Uint8Array) => Promise<void>;
+  writeBytes: (
+    path: string,
+    bytes: Uint8Array,
+    expected?: { sha256: string | null; stateKey?: string },
+  ) => Promise<void>;
 }>;
 
 type PreparedTarget = Readonly<{
   path: string;
   bytes: Uint8Array;
   expectedSha256: string | null;
+  stateKey?: string;
 }>;
 
 export function createApplyPatchTool(dependencies: ApplyPatchDependencies): ToolExecutor {
+  const plans = new Map<string, { args: string; targets: readonly PreparedTarget[] }>();
+  const refused = new Map<string, { args: string; code: string }>();
   return {
     getDefinition(toolName: string): ToolDefinition | null {
       return toolName === APPLY_PATCH_DEFINITION.name ? APPLY_PATCH_DEFINITION : null;
     },
 
     async preview(request: ToolExecutionRequest): Promise<string | null> {
+      plans.delete(request.toolCallId);
+      refused.delete(request.toolCallId);
       const prepared = await prepare(dependencies, request.arguments);
-      if (!prepared.ok) return `apply_patch: ${prepared.code}`;
+      if (!prepared.ok) {
+        refused.set(request.toolCallId, {
+          args: JSON.stringify(request.arguments),
+          code: prepared.code,
+        });
+        return `apply_patch: ${prepared.code}`;
+      }
+      plans.set(request.toolCallId, {
+        args: JSON.stringify(request.arguments),
+        targets: prepared.value,
+      });
       return [
         "apply_patch",
         `targets=${prepared.value.map((target) => target.path).join(",")}`,
@@ -67,8 +87,41 @@ export function createApplyPatchTool(dependencies: ApplyPatchDependencies): Tool
       ].join("\n");
     },
 
+    discardApproval: (id) => {
+      plans.delete(id);
+      refused.delete(id);
+    },
+    async revalidateApproval(request) {
+      const saved = plans.get(request.toolCallId);
+      if (saved === undefined)
+        return refused.get(request.toolCallId)?.args === JSON.stringify(request.arguments);
+      if (saved.args !== JSON.stringify(request.arguments)) return false;
+      const current = await dependencies.inspectTargets(saved.targets.map((entry) => entry.path));
+      return (
+        current.length === saved.targets.length &&
+        saved.targets.every(
+          (entry, index) =>
+            current[index]?.path === entry.path &&
+            current[index]?.sha256 === entry.expectedSha256 &&
+            current[index]?.stateKey === entry.stateKey,
+        )
+      );
+    },
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
-      const prepared = await prepare(dependencies, request.arguments);
+      const saved = plans.get(request.toolCallId);
+      const refusal = refused.get(request.toolCallId);
+      plans.delete(request.toolCallId);
+      refused.delete(request.toolCallId);
+      if (refusal !== undefined) return { status: "failed", safeCode: refusal.code, text: null };
+      if (request.approvalGranted && saved === undefined)
+        return { status: "failed", safeCode: "approval_precondition_missing", text: null };
+      if (saved !== undefined && saved.args !== JSON.stringify(request.arguments)) {
+        return { status: "failed", safeCode: "file_conflict", text: null };
+      }
+      const prepared =
+        saved === undefined
+          ? await prepare(dependencies, request.arguments)
+          : { ok: true as const, value: saved.targets };
       if (!prepared.ok) return { status: "failed", safeCode: prepared.code, text: null };
       const targets = prepared.value;
 
@@ -76,11 +129,22 @@ export function createApplyPatchTool(dependencies: ApplyPatchDependencies): Tool
       for (let index = 0; index < targets.length; index += 1) {
         const target = targets[index];
         if (target === undefined) continue;
+        if (request.signal?.aborted) {
+          facts.push({ target: target.path, outcome: "failed", safeCode: "tool_cancelled" });
+          return finish(
+            facts,
+            targets.slice(index + 1).map((entry) => entry.path),
+          );
+        }
 
         // Re-check the bound precondition immediately before writing this target.
         const current = await dependencies.inspectTargets([target.path]);
         const currentTarget = current[0];
-        if (currentTarget === undefined || currentTarget.sha256 !== target.expectedSha256) {
+        if (
+          currentTarget === undefined ||
+          currentTarget.sha256 !== target.expectedSha256 ||
+          currentTarget.stateKey !== target.stateKey
+        ) {
           facts.push({ target: target.path, outcome: "failed", safeCode: "file_conflict" });
           return finish(
             facts,
@@ -89,7 +153,11 @@ export function createApplyPatchTool(dependencies: ApplyPatchDependencies): Tool
         }
 
         try {
-          await dependencies.writeBytes(target.path, target.bytes);
+          if (request.signal?.aborted) throw new Error("tool_cancelled");
+          await dependencies.writeBytes(target.path, target.bytes, {
+            sha256: target.expectedSha256,
+            ...(target.stateKey === undefined ? {} : { stateKey: target.stateKey }),
+          });
           facts.push({ target: target.path, outcome: "applied", safeCode: null });
         } catch {
           facts.push({ target: target.path, outcome: "outcome_unknown", safeCode: null });
@@ -140,6 +208,7 @@ async function prepare(
       path: target.path,
       bytes: built.value,
       expectedSha256: snapshot.sha256,
+      ...(snapshot.stateKey === undefined ? {} : { stateKey: snapshot.stateKey }),
     });
   }
   return { ok: true, value: prepared };

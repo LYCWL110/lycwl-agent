@@ -40,6 +40,9 @@ export const CreateProcessW = kernel32.func(
   "bool __stdcall CreateProcessW(const char16_t* lpApplicationName, char16_t* lpCommandLine, void* lpProcessAttributes, void* lpThreadAttributes, bool bInheritHandles, uint32_t dwCreationFlags, void* lpEnvironment, const char16_t* lpCurrentDirectory, void* lpStartupInfo, void* lpProcessInformation)",
 );
 export const ResumeThread = kernel32.func("uint32_t __stdcall ResumeThread(void* hThread)");
+export const TerminateProcess = kernel32.func(
+  "bool __stdcall TerminateProcess(void* hProcess, uint32_t exitCode)",
+);
 export const WaitForSingleObject = kernel32.func(
   "uint32_t __stdcall WaitForSingleObject(void* hHandle, uint32_t dwMilliseconds)",
 );

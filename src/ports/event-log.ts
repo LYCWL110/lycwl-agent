@@ -134,7 +134,7 @@ export type InternalEventPayload =
       kind: "tool_call_cancelled";
       toolCallId: string;
       toolName: string;
-      reason: "user_input_superseded" | "run_cancelled";
+      reason: "user_input_superseded" | "run_cancelled" | "sibling_stopped";
     }>
   | Readonly<{
       kind: "question_requested";

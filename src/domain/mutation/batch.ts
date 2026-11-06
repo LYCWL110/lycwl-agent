@@ -74,6 +74,7 @@ export type DeleteTargetFacts = Readonly<{
   isDirectory: boolean;
   isSymbolicLink: boolean;
   isEmptyDirectory: boolean;
+  stateKey?: string;
 }>;
 
 export type DeleteValidation =
@@ -138,6 +139,7 @@ export type RenameFacts = Readonly<{
   manifestBytes: number;
   targetInsideSource: boolean;
   aliasAmbiguous: boolean;
+  stateKey?: string;
 }>;
 
 /**

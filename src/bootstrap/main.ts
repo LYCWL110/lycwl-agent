@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
-import path from "node:path";
 import { fetchModelList } from "../adapters/providers/model-list.ts";
 import { createConfigStore, defaultConfigDirectory } from "../adapters/windows/config-store.ts";
 import { createFileVault } from "../adapters/windows/file-credential-vault.ts";
@@ -10,6 +8,7 @@ import { createTuiController } from "../tui/controller.ts";
 import { startTui } from "../tui/main.ts";
 import { hasProvider, startConfigFlow } from "./config-flow.ts";
 import { describeSelection, selectRuntime } from "./runtime-selection.ts";
+import { selectSessionLaunch } from "./session-launch.ts";
 
 /**
  * `lycwl` entry point.
@@ -30,6 +29,7 @@ if (args.includes("--help") || args.includes("-h")) {
       "  lycwl --write       allow file mutations, each requiring approval",
       "  lycwl --skills      enable the .agents/skills catalog (default off)",
       "  lycwl --shell       enable shell and background commands (implies --write)",
+      "  lycwl --resume ID   explicitly continue a recorded conversation",
       "  lycwl --setup       show configuration status and file locations",
       "  lycwl --help        show this help",
       "  lycwl --version     show the package version",
@@ -66,6 +66,13 @@ if (args.includes("--setup")) {
   process.stdout.write(`${(await describeConfiguration(await configStore.load())).join("\n")}\n`);
   process.exit(0);
 }
+
+const launch = selectSessionLaunch(args);
+if (!launch.ok) {
+  process.stderr.write(`${launch.message}\n`);
+  process.exit(1);
+}
+const sessionId = launch.sessionId;
 
 if (!process.stdin.isTTY) {
   process.stderr.write(
@@ -108,19 +115,10 @@ if (configureFirst) {
   if ((await flow.done) === "discarded") process.exit(0);
 }
 
-// A stable Session per workspace, so launching again in the same project
-// continues the same durable log instead of starting from nothing.
-const sessionId = workspaceSessionId(process.cwd());
-
-// Report whether an earlier session exists, so the user knows the history is
-// being continued rather than silently reused.
-const priorEvents = await readPriorEventCount(sessionId);
-if (priorEvents > 0) {
-  process.stderr.write(`continuing session ${sessionId} (${priorEvents} recorded event(s))\n`);
-}
+process.stderr.write(`${launch.mode === "new" ? "new" : "resuming"} session ${sessionId}\n`);
 
 // Reopen configuration from inside the Session. The browser replaces the app,
-// so the app is unmounted first and the flow starts a fresh Session afterwards.
+// so the app is unmounted first and the flow rebuilds this same Session afterwards.
 function openConfig(): void {
   const flow = startConfigFlow({
     fetchModels: fetchModelsForBrowser,
@@ -208,34 +206,4 @@ async function describeConfiguration(
 function parseSettings(text: string): unknown {
   const parsed = parseJsonc(text);
   return parsed.ok ? toPlainValue(parsed.value) : {};
-}
-
-/**
- * Derive a stable Session id from the workspace path.
- *
- * The id must be filesystem-safe and stable across launches, so a hash of the
- * normalised path is used rather than a random id. Case and trailing separators are
- * normalised because Windows paths are case-insensitive.
- */
-function workspaceSessionId(workspaceRoot: string): string {
-  const normalized = workspaceRoot.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-  return `ws-${createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 16)}`;
-}
-
-/** Count events already recorded for a Session, so a resumed launch can say so. */
-async function readPriorEventCount(sessionId: string): Promise<number> {
-  const { JsonlEventLog } = await import("../adapters/persistence/jsonl-event-log.ts");
-  const digests = {
-    async sha256Canonical(value: unknown): Promise<string> {
-      return createHash("sha256").update(JSON.stringify(value)).digest("hex");
-    },
-  };
-  const ids = { create: () => crypto.randomUUID() };
-  const log = new JsonlEventLog(path.join(dataDirectory, "sessions"), ids, digests);
-  try {
-    const result = await log.readWithRecovery(sessionId);
-    return result.ok ? result.events.length : 0;
-  } catch {
-    return 0;
-  }
 }

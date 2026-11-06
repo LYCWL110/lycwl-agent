@@ -1,9 +1,6 @@
-import { randomBytes } from "node:crypto";
 import { closeSync, existsSync, openSync, readSync } from "node:fs";
 import { unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
-
+import { setTimeout as delay } from "node:timers/promises";
 import {
   AssignProcessToJobObject,
   buildEnvironmentBlock,
@@ -25,10 +22,17 @@ import {
   SetInformationJobObject,
   STILL_ACTIVE,
   TerminateJobObject,
+  TerminateProcess,
   WAIT_OBJECT_0,
   WAIT_TIMEOUT,
   WaitForSingleObject,
 } from "./koffi-bindings.ts";
+import {
+  createPowerShellCapturePaths,
+  type PowerShellCapturePaths,
+  powershellCommand,
+  powershellExecutable,
+} from "./powershell-command.ts";
 
 /**
  * Windows process supervisor (G02).
@@ -51,6 +55,7 @@ export type SupervisorFailure =
   | "process_create_failed"
   | "job_assign_failed"
   | "resume_failed"
+  | "process_cancelled"
   | "wait_failed";
 
 export type SpawnRequest = Readonly<{
@@ -63,6 +68,8 @@ export type SpawnRequest = Readonly<{
    * parent. Required: there is no inherit-everything default.
    */
   environment: Readonly<Record<string, string>>;
+  signal?: AbortSignal;
+  capturePaths?: PowerShellCapturePaths;
 }>;
 
 export type SpawnOutcome =
@@ -72,6 +79,7 @@ export type SpawnOutcome =
       stdout: string;
       stderr: string;
       timedOut: boolean;
+      cancelled: boolean;
       processId: number;
     }>
   | Readonly<{ kind: "failed"; code: SupervisorFailure }>;
@@ -117,6 +125,7 @@ export function createProcessSupervisor() {
       cwd: string;
       executionId: string;
       environment: Readonly<Record<string, string>>;
+      capturePaths?: PowerShellCapturePaths;
     }>,
   ): StartHandle {
     const job = CreateJobObjectW(null, null);
@@ -130,10 +139,8 @@ export function createProcessSupervisor() {
       return { ok: false, code: "job_configure_failed" };
     }
 
-    const token = randomBytes(6).toString("hex");
-    const stdoutPath = path.join(tmpdir(), `lycwl-bg-out-${token}.log`);
-    const stderrPath = path.join(tmpdir(), `lycwl-bg-err-${token}.log`);
-    const fullCommand = `cmd.exe /d /s /c "( ${request.command} ) > "${stdoutPath}" 2> "${stderrPath}""`;
+    const { stdoutPath, stderrPath } = request.capturePaths ?? createPowerShellCapturePaths();
+    const fullCommand = powershellCommand(request.command, stdoutPath, stderrPath);
 
     const startupInfo = buildStartupInfo(false);
     const processInfo = Buffer.alloc(24);
@@ -141,7 +148,7 @@ export function createProcessSupervisor() {
     const environmentBlock = buildEnvironmentBlock(request.environment);
 
     const created = CreateProcessW(
-      null,
+      powershellExecutable(),
       commandLine,
       null,
       null,
@@ -162,7 +169,7 @@ export function createProcessSupervisor() {
     const processId = readPid(processInfo);
 
     if (!AssignProcessToJobObject(job, hProcess)) {
-      TerminateJobObject(job, 1);
+      TerminateProcess(hProcess, 1);
       CloseHandle(hThread);
       CloseHandle(hProcess);
       CloseHandle(job);
@@ -205,10 +212,11 @@ export function createProcessSupervisor() {
     const entry = running.get(processId);
     if (entry === undefined) return;
     TerminateJobObject(entry.job, 1);
-    WaitForSingleObject(entry.process, 5000);
-    CloseHandle(entry.process);
     CloseHandle(entry.job);
+    const stopped = WaitForSingleObject(entry.process, 5000) === WAIT_OBJECT_0;
+    CloseHandle(entry.process);
     running.delete(processId);
+    if (!stopped) throw new Error("process_termination_unconfirmed");
   }
 
   /** Read the current capture files without removing them. */
@@ -226,6 +234,7 @@ export function createProcessSupervisor() {
    * timeout. Capture files are removed afterwards.
    */
   async function runToCompletion(request: SpawnRequest): Promise<SpawnOutcome> {
+    if (request.signal?.aborted) return { kind: "failed", code: "process_cancelled" };
     const job = CreateJobObjectW(null, null);
     if (job === null) return { kind: "failed", code: "job_create_failed" };
 
@@ -237,20 +246,17 @@ export function createProcessSupervisor() {
       return { kind: "failed", code: "job_configure_failed" };
     }
 
-    const token = randomBytes(6).toString("hex");
-    const stdoutPath = path.join(tmpdir(), `lycwl-out-${token}.log`);
-    const stderrPath = path.join(tmpdir(), `lycwl-err-${token}.log`);
+    const { stdoutPath, stderrPath } = request.capturePaths ?? createPowerShellCapturePaths();
 
-    // Parentheses are required: `cmd /c a & b > file` redirects only `b`, which
-    // would silently drop earlier output and leak it to the Harness console.
-    const fullCommand = `cmd.exe /d /s /c "( ${request.command} ) > "${stdoutPath}" 2> "${stderrPath}""`;
+    // Redirect the complete script block so each PowerShell pipeline is captured.
+    const fullCommand = powershellCommand(request.command, stdoutPath, stderrPath);
     const startupInfo = buildStartupInfo(false);
     const processInfo = Buffer.alloc(24);
     const commandLine = commandLineBuffer(fullCommand);
     const environmentBlock = buildEnvironmentBlock(request.environment);
 
     const created = CreateProcessW(
-      null,
+      powershellExecutable(),
       commandLine,
       null,
       null,
@@ -272,7 +278,7 @@ export function createProcessSupervisor() {
 
     if (!AssignProcessToJobObject(job, hProcess)) {
       // The process is still suspended, so terminating it runs nothing.
-      TerminateJobObject(job, 1);
+      TerminateProcess(hProcess, 1);
       CloseHandle(hThread);
       CloseHandle(hProcess);
       CloseHandle(job);
@@ -288,12 +294,19 @@ export function createProcessSupervisor() {
     }
     CloseHandle(hThread);
 
-    const wait = WaitForSingleObject(hProcess, request.timeoutMs);
+    const deadline = Date.now() + request.timeoutMs;
+    let wait = WaitForSingleObject(hProcess, 0);
+    while (wait === WAIT_TIMEOUT && Date.now() < deadline && !request.signal?.aborted) {
+      await delay(25);
+      wait = WaitForSingleObject(hProcess, 0);
+    }
     let timedOut = false;
+    const cancelled = request.signal?.aborted === true;
+    let terminationConfirmed = true;
     if (wait === WAIT_TIMEOUT) {
-      timedOut = true;
+      timedOut = !cancelled;
       TerminateJobObject(job, 1);
-      WaitForSingleObject(hProcess, 5000);
+      terminationConfirmed = WaitForSingleObject(hProcess, 5000) === WAIT_OBJECT_0;
     } else if (wait !== WAIT_OBJECT_0) {
       TerminateJobObject(job, 1);
       CloseHandle(hProcess);
@@ -312,6 +325,8 @@ export function createProcessSupervisor() {
     const stderr = readCaptureFile(stderrPath);
     await unlink(stdoutPath).catch(() => undefined);
     await unlink(stderrPath).catch(() => undefined);
+    if (!terminationConfirmed || exitCode === STILL_ACTIVE)
+      return { kind: "failed", code: "wait_failed" };
 
     return {
       kind: "completed",
@@ -319,6 +334,7 @@ export function createProcessSupervisor() {
       stdout,
       stderr,
       timedOut,
+      cancelled,
       processId,
     };
   }
@@ -335,7 +351,10 @@ function readCaptureFile(filePath: string): string {
   try {
     const buffer = Buffer.alloc(MAX_CAPTURE_BYTES);
     const read = readSync(fd, buffer, 0, MAX_CAPTURE_BYTES, 0);
-    return buffer.subarray(0, read).toString("utf8");
+    const bytes = buffer.subarray(0, read);
+    return bytes[0] === 0xff && bytes[1] === 0xfe
+      ? bytes.subarray(2).toString("utf16le")
+      : bytes.toString("utf8").replace(/^\uFEFF/, "");
   } finally {
     closeSync(fd);
   }

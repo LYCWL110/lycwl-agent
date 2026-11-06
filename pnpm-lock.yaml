@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      ignore:
+        specifier: 7.0.5
+        version: 7.0.5
       ink:
         specifier: 8.0.0
         version: 8.0.0(@types/react@19.3.0)(react@19.3.1)
@@ -645,6 +648,10 @@ packages:
   get-east-asian-width@1.7.0:
     resolution: {integrity: sha512-XjH1AECxf0giL2V1aU8vKyRR2ppRUb5c0EvT7zuJTokQ74bNo52zOtghqdWIqrhUD79fo3x0WfKZdOqxF6LG1Q==}
     engines: {node: '>=18'}
+
+  ignore@7.0.5:
+    resolution: {integrity: sha512-Hs59xBNfUIunMFgWAbGX5cq6893IbWg4KnrjbYwX3tx0ztorVgTDA6B2sxf8ejHJ4wz8BqGUMYlnzNBer5NvGg==}
+    engines: {node: '>= 4'}
 
   indent-string@5.0.0:
     resolution: {integrity: sha512-m6FAo/spmsW2Ab2fU35JTYwtOKa2yAwXSwgjSv1TJzh4Mh7mC3lzAOVLBprb72XsTrgkEIsl7YrFNAiDiRhIGg==}
@@ -1316,6 +1323,8 @@ snapshots:
     optional: true
 
   get-east-asian-width@1.7.0: {}
+
+  ignore@7.0.5: {}
 
   indent-string@5.0.0: {}
 

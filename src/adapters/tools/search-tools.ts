@@ -19,15 +19,17 @@ import type {
   ToolExecutionResult,
   ToolExecutor,
 } from "../../ports/tool-executor.ts";
+import { createRegexMatcher } from "./regex-matcher.ts";
 
 /**
  * Injected workspace listing for the read-only search tools. `listEntries`
  * returns already-authorized entries; this module never reads file content or
- * bypasses the permission policy. A real Windows adapter is Stage 2 work.
+ * bypasses the permission policy.
  */
 export type SearchEntry = Readonly<{
   path: string;
   kind: "file" | "directory";
+  isReparse?: boolean;
 }>;
 
 export type SearchToolDependencies = Readonly<{
@@ -39,6 +41,12 @@ export type SearchToolDependencies = Readonly<{
   ignoreRules?: readonly IgnoreRule[];
   /** True when some ignore rules could not be read or processed. */
   ignoreRulesIncomplete?: boolean;
+  begin?: () => void;
+  scopeFacts?: () => Pick<
+    SearchCompleteness,
+    "ignoredPaths" | "skippedPaths" | "ignoreRulesIncomplete" | "unsearchedPaths"
+  >;
+  regexTimeoutMs?: number;
 }>;
 
 export const LIST_DIR_DEFINITION: ToolDefinition = {
@@ -78,14 +86,15 @@ export function createSearchTools(dependencies: SearchToolDependencies): ToolExe
     },
 
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
+      dependencies.begin?.();
       if (request.toolName === LIST_DIR_DEFINITION.name) {
-        return executeListDir(dependencies, request.arguments);
+        return executeListDir(dependencies, request.arguments, request.signal);
       }
       if (request.toolName === GLOB_DEFINITION.name) {
-        return executeGlob(dependencies, request.arguments);
+        return executeGlob(dependencies, request.arguments, request.signal);
       }
       if (request.toolName === GREP_DEFINITION.name) {
-        return executeGrep(dependencies, request.arguments);
+        return executeGrep(dependencies, request.arguments, request.signal);
       }
       return { status: "failed", safeCode: "unknown_tool", text: null };
     },
@@ -97,7 +106,10 @@ function failure(code: string): ToolExecutionResult {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function hasOnly(args: Record<string, unknown>, keys: readonly string[]) {
+  return Object.keys(args).every((key) => keys.includes(key));
 }
 
 function readOptionalPath(value: unknown): { ok: true; value: string } | { ok: false } {
@@ -139,11 +151,13 @@ const COMPLETE: SearchCompleteness = {
 async function executeListDir(
   dependencies: SearchToolDependencies,
   args: unknown,
+  signal?: AbortSignal,
 ): Promise<ToolExecutionResult> {
   if (!isRecord(args)) return failure("invalid_arguments");
+  if (!hasOnly(args, ["path", "depth", "limit"])) return failure("invalid_arguments");
   const path = readOptionalPath(args["path"]);
   if (!path.ok) return failure("invalid_arguments");
-  const depth = readInteger(args["depth"], 0, LIST_DIR_LIMITS.maxDepth);
+  const depth = readInteger(args["depth"], 1, LIST_DIR_LIMITS.maxDepth);
   const depthValue = depth.ok ? depth.value : args["depth"] === undefined ? 1 : -1;
   if (depthValue < 0) return failure("invalid_arguments");
   const limit = readInteger(args["limit"], 1, LIST_DIR_LIMITS.maxEntries);
@@ -157,7 +171,7 @@ async function executeListDir(
   const collected: SearchEntry[] = [];
   const unsearched: string[] = [];
   try {
-    await walk(path.value, depthValue, dependencies, collected, unsearched);
+    await walk(path.value, depthValue, dependencies, collected, unsearched, signal);
   } catch {
     return failure("search_failed");
   }
@@ -166,10 +180,14 @@ async function executeListDir(
   const outcome = takeInOrder(ordered, limitValue);
   const completeness: SearchCompleteness = {
     ...COMPLETE,
-    scopeComplete: unsearched.length === 0,
+    scopeComplete:
+      unsearched.length === 0 &&
+      (dependencies.scopeFacts?.().skippedPaths.length ?? 0) === 0 &&
+      !dependencies.scopeFacts?.().ignoreRulesIncomplete,
     limitReached: outcome.limitReached,
-    unsearchedPaths: unsearched,
     ignoreRulesIncomplete: dependencies.ignoreRulesIncomplete === true,
+    ...dependencies.scopeFacts?.(),
+    unsearchedPaths: [...unsearched, ...(dependencies.scopeFacts?.().unsearchedPaths ?? [])],
   };
   return {
     status: "succeeded",
@@ -183,14 +201,19 @@ async function walk(
   dependencies: SearchToolDependencies,
   collected: SearchEntry[],
   unsearched: string[],
+  signal?: AbortSignal,
 ): Promise<void> {
+  if (signal?.aborted) {
+    unsearched.push(directory || ".");
+    return;
+  }
   const entries = await dependencies.listEntries(directory);
   for (const entry of entries) {
     if (isIgnored(dependencies, entry.path)) continue;
     collected.push(entry);
-    if (entry.kind === "directory" && depth > 1) {
+    if (entry.kind === "directory" && !entry.isReparse && depth > 1) {
       try {
-        await walk(entry.path, depth - 1, dependencies, collected, unsearched);
+        await walk(entry.path, depth - 1, dependencies, collected, unsearched, signal);
       } catch {
         unsearched.push(entry.path);
       }
@@ -207,8 +230,10 @@ function isIgnored(dependencies: SearchToolDependencies, path: string): boolean 
 async function executeGlob(
   dependencies: SearchToolDependencies,
   args: unknown,
+  signal?: AbortSignal,
 ): Promise<ToolExecutionResult> {
   if (!isRecord(args)) return failure("invalid_arguments");
+  if (!hasOnly(args, ["path", "pattern", "limit"])) return failure("invalid_arguments");
   const pattern = args["pattern"];
   if (typeof pattern !== "string" || pattern.length === 0) return failure("invalid_arguments");
   const path = readOptionalPath(args["path"]);
@@ -227,7 +252,7 @@ async function executeGlob(
   const collected: string[] = [];
   const unsearched: string[] = [];
   try {
-    await collectFiles(path.value, dependencies, collected, unsearched);
+    await collectFiles(path.value, dependencies, collected, unsearched, signal);
   } catch {
     return failure("search_failed");
   }
@@ -236,10 +261,14 @@ async function executeGlob(
   const outcome = takeInOrder(matched, limitValue);
   const completeness: SearchCompleteness = {
     ...COMPLETE,
-    scopeComplete: unsearched.length === 0,
+    scopeComplete:
+      unsearched.length === 0 &&
+      (dependencies.scopeFacts?.().skippedPaths.length ?? 0) === 0 &&
+      !dependencies.scopeFacts?.().ignoreRulesIncomplete,
     limitReached: outcome.limitReached,
-    unsearchedPaths: unsearched,
     ignoreRulesIncomplete: dependencies.ignoreRulesIncomplete === true,
+    ...dependencies.scopeFacts?.(),
+    unsearchedPaths: [...unsearched, ...(dependencies.scopeFacts?.().unsearchedPaths ?? [])],
   };
   return {
     status: "succeeded",
@@ -257,16 +286,25 @@ async function collectFiles(
   dependencies: SearchToolDependencies,
   collected: string[],
   unsearched: string[],
+  signal?: AbortSignal,
 ): Promise<void> {
+  if (signal?.aborted) {
+    unsearched.push(directory || ".");
+    return;
+  }
   const entries = await dependencies.listEntries(directory);
   for (const entry of entries) {
+    if (entry.isReparse) {
+      unsearched.push(entry.path);
+      continue;
+    }
     if (isIgnored(dependencies, entry.path)) continue;
     if (entry.kind === "file") {
       collected.push(entry.path);
       continue;
     }
     try {
-      await collectFiles(entry.path, dependencies, collected, unsearched);
+      await collectFiles(entry.path, dependencies, collected, unsearched, signal);
     } catch {
       unsearched.push(entry.path);
     }
@@ -276,10 +314,28 @@ async function collectFiles(
 async function executeGrep(
   dependencies: SearchToolDependencies,
   args: unknown,
+  signal?: AbortSignal,
 ): Promise<ToolExecutionResult> {
   if (!isRecord(args)) return failure("invalid_arguments");
+  if (
+    !hasOnly(args, [
+      "path",
+      "pattern",
+      "limit",
+      "regex",
+      "caseSensitive",
+      "contextBefore",
+      "contextAfter",
+    ])
+  )
+    return failure("invalid_arguments");
   const pattern = args["pattern"];
   if (typeof pattern !== "string" || pattern.length === 0) return failure("invalid_arguments");
+  if (
+    (args["regex"] !== undefined && typeof args["regex"] !== "boolean") ||
+    (args["caseSensitive"] !== undefined && typeof args["caseSensitive"] !== "boolean")
+  )
+    return failure("invalid_arguments");
   const regexMode = args["regex"] === true;
   const caseSensitive = args["caseSensitive"] !== false;
   const path = readOptionalPath(args["path"]);
@@ -298,74 +354,92 @@ async function executeGrep(
   const afterValue = after.ok ? after.value : args["contextAfter"] === undefined ? 0 : -1;
   if (afterValue < 0) return failure("invalid_arguments");
 
-  const matcher = buildMatcher(pattern, regexMode, caseSensitive);
-  if (matcher === null) return failure("invalid_pattern");
-
-  const files: string[] = [];
-  const unsearched: string[] = [];
+  const needle = caseSensitive ? pattern : pattern.toLowerCase();
+  const matcher = (line: string) => (caseSensitive ? line : line.toLowerCase()).includes(needle);
+  let regex: Awaited<ReturnType<typeof createRegexMatcher>> | null = null;
   try {
-    await collectFiles(path.value, dependencies, files, unsearched);
-  } catch {
-    return failure("search_failed");
+    if (regexMode)
+      regex = await createRegexMatcher(pattern, caseSensitive, signal, dependencies.regexTimeoutMs);
+  } catch (error) {
+    return failure(error instanceof Error ? error.message : "regex_worker_failed");
   }
-
-  const matches: { path: string; lineNumber: number; text: string }[] = [];
-  const skipped: string[] = [];
-  for (const file of sortSearchPaths(files)) {
-    let content: string;
+  try {
+    const files: string[] = [];
+    const unsearched: string[] = [];
     try {
-      content = await dependencies.readText(file);
+      await collectFiles(path.value, dependencies, files, unsearched, signal);
     } catch {
-      skipped.push(file);
-      continue;
+      return failure("search_failed");
     }
-    const lines = content.split(/\r\n|\n|\r/);
-    for (let index = 0; index < lines.length; index += 1) {
-      const line = lines[index] ?? "";
-      if (matcher(line)) matches.push({ path: file, lineNumber: index + 1, text: line });
+
+    const matches: { path: string; lineNumber: number; text: string }[] = [];
+    const skipped: string[] = [];
+    const orderedFiles = sortSearchPaths(files);
+    let interrupted: string | null = null;
+    for (const [position, file] of orderedFiles.entries()) {
+      if (signal?.aborted) {
+        interrupted = "search_cancelled";
+        unsearched.push(...orderedFiles.slice(position));
+        break;
+      }
+      let content: string;
+      try {
+        content = await dependencies.readText(file);
+      } catch {
+        skipped.push(file);
+        continue;
+      }
+      const lines = content.split(/\r\n|\n|\r/);
+      let indexes: readonly number[];
+      try {
+        indexes =
+          regex === null
+            ? lines.flatMap((line, index) => (matcher(line) ? [index] : []))
+            : await regex.match(lines);
+      } catch (error) {
+        interrupted = error instanceof Error ? error.message : "regex_worker_failed";
+        unsearched.push(...orderedFiles.slice(position));
+        break;
+      }
+      for (const index of indexes) {
+        const line = lines[index] ?? "";
+        matches.push({ path: file, lineNumber: index + 1, text: line });
+      }
     }
-  }
 
-  const result = collectGrepMatches(matches, {
-    limit: limitValue,
-    contextBefore: beforeValue,
-    contextAfter: afterValue,
-  });
-  const completeness: SearchCompleteness = {
-    ...COMPLETE,
-    scopeComplete: unsearched.length === 0 && skipped.length === 0,
-    limitReached: result.limitReached,
-    skippedPaths: skipped,
-    unsearchedPaths: unsearched,
-    ignoreRulesIncomplete: dependencies.ignoreRulesIncomplete === true,
-  };
+    const result = collectGrepMatches(matches, {
+      limit: limitValue,
+      contextBefore: beforeValue,
+      contextAfter: afterValue,
+    });
+    const completeness: SearchCompleteness = {
+      ...COMPLETE,
+      scopeComplete:
+        unsearched.length === 0 &&
+        skipped.length === 0 &&
+        (dependencies.scopeFacts?.().skippedPaths.length ?? 0) === 0 &&
+        !dependencies.scopeFacts?.().ignoreRulesIncomplete,
+      limitReached: result.limitReached,
+      ignoreRulesIncomplete: dependencies.ignoreRulesIncomplete === true,
+      ...dependencies.scopeFacts?.(),
+      unsearchedPaths: [...unsearched, ...(dependencies.scopeFacts?.().unsearchedPaths ?? [])],
+      skippedPaths: [...skipped, ...(dependencies.scopeFacts?.().skippedPaths ?? [])],
+    };
 
-  return {
-    status: "succeeded",
-    text: [
+    const text = [
       `grep: ${result.hitLines} hit line(s)`,
       describeCompleteness(completeness),
+      ...(interrupted === null ? [] : [`interrupted=${interrupted}`]),
+      ...completeness.unsearchedPaths.map((file) => `unsearchedPath=${file}`),
       ...(result.observedExtra > 0 ? [`observedExtra=${result.observedExtra}`] : []),
       ...result.lines.map((line) => `${line.path}:${line.lineNumber}:${line.text}`),
-    ].join("\n"),
-  };
-}
-
-function buildMatcher(
-  pattern: string,
-  regexMode: boolean,
-  caseSensitive: boolean,
-): ((line: string) => boolean) | null {
-  if (regexMode) {
-    try {
-      const expression = new RegExp(pattern, caseSensitive ? "u" : "iu");
-      return (line) => expression.test(line);
-    } catch {
-      return null;
-    }
+    ].join("\n");
+    return interrupted === null
+      ? { status: "succeeded", text }
+      : { status: "failed", safeCode: interrupted, text };
+  } finally {
+    await regex?.close();
   }
-  const needle = caseSensitive ? pattern : pattern.toLowerCase();
-  return (line) => (caseSensitive ? line : line.toLowerCase()).includes(needle);
 }
 
 function globToRegex(pattern: string): RegExp | null {

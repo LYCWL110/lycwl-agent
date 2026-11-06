@@ -259,6 +259,8 @@ type MutableRunContext = {
   nextAcceptedSeq: number;
   taskRevision: number;
   cancelRequested: boolean;
+  abortController: AbortController;
+  stopSiblings: boolean;
   cancelCommandIds: Set<string>;
   cancelledDuring: "model_request" | "tool_execution" | null;
   pendingApproval: PendingApproval | null;
@@ -349,6 +351,10 @@ export class RuntimeCoordinator {
       commandId,
     });
     context.cancelRequested = true;
+    context.abortController.abort();
+    context.pendingApproval?.resolve();
+    context.pendingQuestion?.resolve();
+    await this.#deps.tools.cancelAll?.();
     return { ok: true, duplicate: false };
   }
 
@@ -556,6 +562,8 @@ export class RuntimeCoordinator {
       nextAcceptedSeq: 1,
       taskRevision: 1,
       cancelRequested: false,
+      abortController: new AbortController(),
+      stopSiblings: false,
       cancelCommandIds: new Set<string>(),
       cancelledDuring: null,
       pendingApproval: null,
@@ -776,9 +784,27 @@ export class RuntimeCoordinator {
           return this.#result(context, "completed", guarded.text, null);
         }
 
-        for (const call of completion.toolCalls) {
+        for (const [index, call] of completion.toolCalls.entries()) {
           const callResult = await this.#executeCall(context, call);
           if (callResult.kind === "stop") return callResult.result;
+          if (context.stopSiblings) {
+            context.stopSiblings = false;
+            for (const remaining of completion.toolCalls.slice(index + 1)) {
+              this.#appendToolResult(
+                context,
+                remaining,
+                "failed",
+                "not_attempted: sibling mutation failed or was denied",
+              );
+              await this.#record(context, "tool_call_cancelled", {
+                kind: "tool_call_cancelled",
+                toolCallId: this.#deps.ids.create(),
+                toolName: remaining.toolName,
+                reason: "sibling_stopped",
+              });
+            }
+            break;
+          }
         }
       }
     } catch {
@@ -935,6 +961,9 @@ export class RuntimeCoordinator {
     const preview = base.preview;
     return {
       getDefinition: (toolName) => base.getDefinition(toolName),
+      requiresApproval: async (request) => (await base.requiresApproval?.(request)) ?? false,
+      revalidateApproval: async (request) => (await base.revalidateApproval?.(request)) ?? true,
+      discardApproval: (id) => base.discardApproval?.(id),
       ...(preview === undefined
         ? {}
         : { preview: (request: ToolExecutionRequest) => preview.call(base, request) }),
@@ -1220,6 +1249,7 @@ export class RuntimeCoordinator {
         tools: this.#sessionTools(context),
         approvals: this.#deps.approvals,
         ids: this.#deps.ids,
+        signal: context.abortController.signal,
         deferApprovals: this.#deps.suspendOnApproval ?? false,
         deferQuestions: this.#deps.suspendOnApproval ?? false,
         ...(this.#deps.ownedKeys === undefined ? {} : { ownedKeys: this.#deps.ownedKeys }),
@@ -1231,6 +1261,10 @@ export class RuntimeCoordinator {
     );
     context.cancelledDuring = null;
 
+    if (outcome.kind === "unknown")
+      this.#appendToolResult(context, call, "outcome_unknown", outcome.safeCode);
+    if (context.cancelRequested && outcome.kind !== "continue")
+      return { kind: "stop", result: await this.#cancel(context) };
     if (outcome.kind === "waiting") {
       return this.#awaitApproval(context, outcome);
     }
@@ -1244,6 +1278,9 @@ export class RuntimeCoordinator {
       return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
     }
     this.#appendToolResult(context, call, outcome.status, outcome.text);
+    context.stopSiblings =
+      outcome.status !== "succeeded" &&
+      this.#deps.tools.getDefinition(call.toolName)?.sideEffectClass === "filesystem_mutation";
     // Record the fingerprint after the fact so the next identical call is compared
     // against a real result rather than an intention.
     context.callHistory.push({
@@ -1334,6 +1371,8 @@ export class RuntimeCoordinator {
         tools: this.#sessionTools(context),
         approvals: this.#deps.approvals,
         ids: this.#deps.ids,
+        signal: context.abortController.signal,
+        deferApprovals: this.#deps.suspendOnApproval ?? false,
         onEvent: async (type, payload) => {
           await this.#record(context, type, payload as InternalEvent["payload"]);
         },
@@ -1348,16 +1387,25 @@ export class RuntimeCoordinator {
       },
     );
 
+    if (outcome.kind === "unknown")
+      this.#appendToolResult(context, pending.call, "outcome_unknown", outcome.safeCode);
+    if (context.cancelRequested && outcome.kind !== "continue")
+      return { kind: "stop", result: await this.#cancel(context) };
+    if (outcome.kind === "waiting") return this.#awaitApproval(context, outcome);
     if (outcome.kind === "invalid") {
       return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
     }
     if (outcome.kind === "unknown") {
       return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
     }
-    if (outcome.kind === "waiting" || outcome.kind === "question_waiting") {
+    if (outcome.kind === "question_waiting") {
       return { kind: "stop", result: await this.#fail(context, "approval_wait_repeated") };
     }
     this.#appendToolResult(context, pending.call, outcome.status, outcome.text);
+    context.stopSiblings =
+      outcome.status !== "succeeded" &&
+      this.#deps.tools.getDefinition(pending.call.toolName)?.sideEffectClass ===
+        "filesystem_mutation";
     context.callHistory.push({
       fingerprint: {
         toolName: pending.call.toolName,
@@ -1487,7 +1535,7 @@ export class RuntimeCoordinator {
   #appendToolResult(
     context: MutableRunContext,
     call: ProviderToolCall,
-    status: "succeeded" | "failed" | "denied" | "outcome_unknown",
+    status: "succeeded" | "failed" | "denied" | "cancelled" | "outcome_unknown",
     text: string | null,
   ): void {
     // C10: a blocked tool result keeps its real status but its text never
@@ -1553,6 +1601,34 @@ export class RuntimeCoordinator {
   }
 
   async #cancel(context: MutableRunContext): Promise<CoordinatorResult> {
+    const outstanding = new Map<string, ProviderToolCall>();
+    for (const item of context.conversation) {
+      if (item.kind === "assistant")
+        for (const call of item.toolCalls) outstanding.set(call.providerToolCallId, call);
+      else if (item.kind === "tool_result") outstanding.delete(item.providerToolCallId);
+    }
+    const terminal = new Set<string>();
+    for (const { payload } of context.events) {
+      if (
+        payload.kind === "tool_execution_finished" ||
+        payload.kind === "tool_execution_denied" ||
+        payload.kind === "tool_call_cancelled"
+      )
+        terminal.add(payload.toolCallId);
+    }
+    for (const { payload } of [...context.events]) {
+      if (payload.kind !== "tool_call_received") continue;
+      this.#deps.tools.discardApproval?.(payload.toolCallId);
+      if (terminal.has(payload.toolCallId)) continue;
+      await this.#record(context, "tool_call_cancelled", {
+        kind: "tool_call_cancelled",
+        toolCallId: payload.toolCallId,
+        toolName: payload.toolName,
+        reason: "run_cancelled",
+      });
+    }
+    for (const call of outstanding.values())
+      this.#appendToolResult(context, call, "cancelled", "not_attempted: run cancelled");
     const finished = finishRun(context.run, "cancelled");
     if (!finished.ok) return this.#fail(context, finished.code);
     context.run = finished.value;

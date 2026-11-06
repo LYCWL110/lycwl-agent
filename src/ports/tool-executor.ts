@@ -16,6 +16,9 @@ export type ToolExecutionRequest = Readonly<{
   toolCallId: string;
   toolName: string;
   arguments: unknown;
+  signal?: AbortSignal;
+  /** Set only by the coordinator after consuming this invocation's approval. */
+  approvalGranted?: boolean;
 }>;
 
 export type ToolExecutionResult =
@@ -40,5 +43,9 @@ export interface ToolExecutor {
    * generic preview.
    */
   preview?(request: ToolExecutionRequest): Promise<string | null>;
+  requiresApproval?(request: ToolExecutionRequest): Promise<boolean>;
+  revalidateApproval?(request: ToolExecutionRequest): Promise<boolean>;
+  discardApproval?(toolCallId: string): void;
+  cancelAll?(): Promise<void>;
   execute(request: ToolExecutionRequest): Promise<ToolExecutionResult>;
 }

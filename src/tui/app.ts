@@ -1,6 +1,8 @@
 import { Box, Text, useInput, usePaste } from "ink";
 import { createElement, type ReactElement, useState } from "react";
+import { ActivityIndicator } from "./activity-indicator.ts";
 import { Brand, clipText, colorProps, useViewport, type Viewport, wrapText } from "./chrome.ts";
+import { CommandMenu } from "./command-menu.ts";
 import { type Capabilities, colorFor, detectCapabilities } from "./palette.ts";
 import { useTerminalWheel } from "./terminal-wheel.ts";
 import { editText, type TextEdit } from "./text-edit.ts";
@@ -18,8 +20,7 @@ import { COMPOSER_COMMANDS, type TuiViewState } from "./view-model.ts";
  * - the same accent colour for the input bar, the mode label and the goal line, so
  *   the corners of the screen agree.
  *
- * Differences are deliberate: there is no persona lane, no thinking variant and no
- * token meter, because this Harness has none of those concepts.
+ * Provider activity comes from recorded Runtime events, not inferred reasoning.
  */
 
 const h = createElement;
@@ -53,7 +54,6 @@ export function App(props: AppProps): ReactElement {
   const width = Math.max(1, viewport.columns - 4);
   const lobby = view.runStatus === "idle" && view.transcript.length === 0 && view.todo === null;
   const lobbyWidth = Math.max(1, Math.min(84, Math.max(50, Math.floor((width * 2) / 3)), width));
-  const composerWidth = lobby ? lobbyWidth : width;
   const commands =
     !dismissedCommands &&
     view.pendingApproval === null &&
@@ -62,15 +62,7 @@ export function App(props: AppProps): ReactElement {
       ? COMPOSER_COMMANDS.filter((command) => command.name.startsWith(draft))
       : [];
   const selectedCommand = Math.min(commandIndex, Math.max(0, commands.length - 1));
-  const commandLines = commands.flatMap((command, index) =>
-    wrapText(
-      `${index === selectedCommand ? "> " : "  "}${command.name}  ${command.description}${
-        view.canSubmit ? "" : " Available after the current run ends."
-      }`,
-      composerWidth,
-    ),
-  );
-  const bodyRows = Math.max(1, viewport.rows - 9 - commandLines.length);
+  const bodyRows = Math.max(1, viewport.rows - 9);
   const lines = documentLines(view, width);
   const maxStart = Math.max(0, lines.length - bodyRows);
   const start = scroll === null ? maxStart : Math.min(scroll, maxStart);
@@ -190,7 +182,15 @@ export function App(props: AppProps): ReactElement {
       h(
         Box,
         { width: lobbyWidth, flexDirection: "column", marginTop: 1 },
-        h(Composer, { view, editor, capabilities, width: lobbyWidth, commandLines }),
+        h(Composer, {
+          view,
+          editor,
+          capabilities,
+          width: lobbyWidth,
+          commands,
+          selectedCommand,
+          animated: props.animated,
+        }),
         h(Footer, {
           view,
           capabilities,
@@ -244,7 +244,15 @@ export function App(props: AppProps): ReactElement {
           )
         : "─".repeat(width),
     ),
-    h(Composer, { view, editor, capabilities, width, commandLines }),
+    h(Composer, {
+      view,
+      editor,
+      capabilities,
+      width,
+      commands,
+      selectedCommand,
+      animated: props.animated,
+    }),
     h(Footer, {
       view,
       capabilities,
@@ -365,7 +373,9 @@ function Composer(props: {
   editor: TextEdit;
   capabilities: Capabilities;
   width: number;
-  commandLines: readonly string[];
+  commands: (typeof COMPOSER_COMMANDS)[number][];
+  selectedCommand: number;
+  animated?: boolean | undefined;
 }): ReactElement {
   const { view, editor, capabilities } = props;
   const accent = colorFor(view.queueingInput ? "secondary" : "primary", capabilities);
@@ -384,16 +394,6 @@ function Composer(props: {
   return h(
     Box,
     { flexDirection: "column", marginTop: 1, flexShrink: 0 },
-    ...props.commandLines.map((line, index) =>
-      h(
-        Text,
-        {
-          key: index,
-          ...colorProps(colorFor(view.canSubmit ? "secondary" : "faint", capabilities)),
-        },
-        line,
-      ),
-    ),
     h(
       Box,
       null,
@@ -410,12 +410,26 @@ function Composer(props: {
     h(
       Box,
       { marginLeft: 2 },
-      h(
-        Text,
-        colorProps(colorFor("faint", capabilities)),
-        clipText(hint, Math.max(1, props.width - 2)),
-      ),
+      view.activity === null
+        ? h(
+            Text,
+            colorProps(colorFor("faint", capabilities)),
+            clipText(hint, Math.max(1, props.width - 2)),
+          )
+        : h(ActivityIndicator, {
+            activity: view.activity,
+            capabilities,
+            width: Math.max(1, props.width - 2),
+            animated: props.animated,
+          }),
     ),
+    h(CommandMenu, {
+      commands: props.commands,
+      selected: props.selectedCommand,
+      enabled: view.canSubmit,
+      width: props.width,
+      capabilities,
+    }),
   );
 }
 

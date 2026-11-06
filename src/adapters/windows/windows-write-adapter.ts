@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { lstat, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import type { FileSnapshotFacts } from "../../services/files/consistent-snapshot.ts";
@@ -30,42 +30,50 @@ export type WriteResult = Readonly<{ ok: true }> | Readonly<{ ok: false; code: W
 export function createWindowsWriteAdapter(options: Readonly<{ workspaceRoot: string }>) {
   const { workspaceRoot } = options;
 
+  async function targetPath(relativePath: string) {
+    const supplied = resolveWorkspacePath(workspaceRoot, relativePath);
+    if (!supplied.ok || !supplied.value.withinWorkspace) throw new Error("invalid_path");
+    const parent = await realpath(path.dirname(supplied.value.absolutePath));
+    const resolved = resolveWorkspacePath(workspaceRoot, parent);
+    if (!resolved.ok || !resolved.value.withinWorkspace) throw new Error("invalid_path");
+    const parentInfo = await lstat(parent, { bigint: true });
+    return {
+      absolutePath: supplied.value.absolutePath,
+      parentKey: `${parent}:${parentInfo.dev}:${parentInfo.ino}`,
+    };
+  }
+
   /** Facts for conflict detection: existence plus the current content hash. */
   async function inspectTarget(relativePath: string): Promise<WriteTargetFacts> {
-    const supplied = resolveWorkspacePath(workspaceRoot, relativePath);
-    if (!supplied.ok) throw new Error("invalid_path");
-
-    let resolvedPath: string;
-    try {
-      resolvedPath = await realpath(supplied.value.absolutePath);
-    } catch (error) {
-      if (isNotFound(error)) return { exists: false, sha256: null };
-      throw new Error(mapWriteError(error));
-    }
+    const supplied = await targetPath(relativePath);
 
     let stats: Awaited<ReturnType<typeof lstat>>;
     try {
-      stats = await lstat(resolvedPath, { bigint: true });
+      stats = await lstat(supplied.absolutePath, { bigint: true });
     } catch (error) {
-      if (isNotFound(error)) return { exists: false, sha256: null };
+      if (isNotFound(error)) return { exists: false, sha256: null, stateKey: supplied.parentKey };
       throw new Error(mapWriteError(error));
     }
-    if (!stats.isFile()) throw new Error("invalid_path");
+    if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("invalid_path");
 
     try {
-      const bytes = await readFile(resolvedPath);
-      const { createHash } = await import("node:crypto");
-      return { exists: true, sha256: createHash("sha256").update(bytes).digest("hex") };
+      const bytes = await readFile(supplied.absolutePath);
+      return {
+        exists: true,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        stateKey: `${supplied.parentKey}:${stats.dev}:${stats.ino}:${stats.mtimeNs}:${stats.size}`,
+      };
     } catch (error) {
       throw new Error(mapWriteError(error));
     }
   }
 
   async function readBytes(relativePath: string): Promise<Uint8Array> {
-    const supplied = resolveWorkspacePath(workspaceRoot, relativePath);
-    if (!supplied.ok) throw new Error("invalid_path");
+    const supplied = await targetPath(relativePath);
+    const info = await lstat(supplied.absolutePath);
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error("invalid_path");
     try {
-      return await readFile(supplied.value.absolutePath);
+      return await readFile(supplied.absolutePath);
     } catch (error) {
       throw new Error(mapWriteError(error));
     }
@@ -73,14 +81,14 @@ export function createWindowsWriteAdapter(options: Readonly<{ workspaceRoot: str
 
   /** Snapshot shape used by apply_patch preflight. */
   async function inspectPatchTarget(relativePath: string): Promise<PatchTargetSnapshot> {
-    const supplied = resolveWorkspacePath(workspaceRoot, relativePath);
-    if (!supplied.ok) throw new Error("invalid_path");
+    const supplied = await targetPath(relativePath);
+    const before = await inspectTarget(relativePath);
 
     let bytes: Uint8Array;
     let sha256: string | null;
     try {
-      bytes = await readFile(supplied.value.absolutePath);
-      const { createHash } = await import("node:crypto");
+      if (!before.exists) throw Object.assign(new Error("not_found"), { code: "ENOENT" });
+      bytes = await readFile(supplied.absolutePath);
       sha256 = createHash("sha256").update(bytes).digest("hex");
     } catch (error) {
       if (isNotFound(error)) {
@@ -91,11 +99,13 @@ export function createWindowsWriteAdapter(options: Readonly<{ workspaceRoot: str
           encoding: "utf-8",
           lineEnding: "lf",
           bytes: new Uint8Array(),
+          ...(before.stateKey === undefined ? {} : { stateKey: before.stateKey }),
         };
       }
       throw new Error(mapWriteError(error));
     }
     const format = detectFormat(bytes);
+    if (sha256 !== before.sha256) throw new Error("file_conflict");
     return {
       path: relativePath,
       exists: true,
@@ -103,19 +113,20 @@ export function createWindowsWriteAdapter(options: Readonly<{ workspaceRoot: str
       encoding: format.encoding,
       lineEnding: format.lineEnding,
       bytes,
+      ...(before.stateKey === undefined ? {} : { stateKey: before.stateKey }),
     };
   }
 
   /**
    * Write finished bytes with a same-volume temp file and atomic rename.
    *
-   * `expectedSha256` is the hash captured at planning time; a mismatch means the
-   * target changed and nothing is written.
+   * Recheck the bound content and identity before staging and before replacement.
+   * These checks do not provide an atomic compare-and-swap against external writers.
    */
   async function writeBytes(
     relativePath: string,
     bytes: Uint8Array,
-    expectedSha256?: string | null,
+    expected?: string | null | Readonly<{ sha256: string | null; stateKey?: string }>,
   ): Promise<WriteResult> {
     const supplied = resolveWorkspacePath(workspaceRoot, relativePath);
     if (!supplied.ok) return { ok: false, code: "invalid_path" };
@@ -124,15 +135,23 @@ export function createWindowsWriteAdapter(options: Readonly<{ workspaceRoot: str
     const target = supplied.value.absolutePath;
     const directory = path.dirname(target);
 
-    if (expectedSha256 !== undefined) {
-      let current: string | null;
+    async function unchanged() {
+      if (expected === undefined) return true;
       try {
-        current = (await inspectTarget(relativePath)).sha256;
+        const current = await inspectTarget(relativePath);
+        return typeof expected === "object" && expected !== null
+          ? current.sha256 === expected.sha256 && current.stateKey === expected.stateKey
+          : current.sha256 === expected;
       } catch {
-        return { ok: false, code: "file_conflict" };
+        return false;
       }
-      if (current !== expectedSha256) return { ok: false, code: "file_conflict" };
     }
+    try {
+      await targetPath(relativePath);
+    } catch {
+      return { ok: false, code: "invalid_path" };
+    }
+    if (!(await unchanged())) return { ok: false, code: "file_conflict" };
 
     const tempPath = path.join(
       directory,
@@ -153,6 +172,10 @@ export function createWindowsWriteAdapter(options: Readonly<{ workspaceRoot: str
     }
 
     try {
+      if (!(await unchanged())) {
+        await unlink(tempPath).catch(() => undefined);
+        return { ok: false, code: "file_conflict" };
+      }
       await rename(tempPath, target);
     } catch (error) {
       await unlink(tempPath).catch(() => undefined);
