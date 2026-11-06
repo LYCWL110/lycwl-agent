@@ -249,6 +249,8 @@ export type ComposerIntent =
   | Readonly<{ kind: "start_run"; text: string }>
   | Readonly<{ kind: "queue_input"; text: string }>
   | Readonly<{ kind: "withdraw"; inputId: string }>
+  /** Open the provider browser. Only available when no Run is in flight. */
+  | Readonly<{ kind: "open_config" }>
   | Readonly<{ kind: "reject"; reason: "empty" | "run_active" }>;
 
 export function interpretComposer(
@@ -258,6 +260,14 @@ export function interpretComposer(
 ): ComposerIntent {
   const trimmed = text.trim();
   if (trimmed.length === 0) return { kind: "reject", reason: "empty" };
+  // A configuration change selects the next Run, so it must not be issued while one
+  // is in flight: changing the route mid-Run would break the C03 binding.
+  if (trimmed === "/config") {
+    if (view.runStatus === "active" || view.waitingKind !== null) {
+      return { kind: "reject", reason: "run_active" };
+    }
+    return { kind: "open_config" };
+  }
   if (view.runStatus === "active" || view.waitingKind !== null) {
     if (!options.activeRunAcceptsInput) return { kind: "reject", reason: "run_active" };
     return { kind: "queue_input", text: trimmed };

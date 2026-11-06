@@ -25,6 +25,11 @@ export type TuiController = Readonly<{
   declineQuestion: () => Promise<void>;
   cancelRun: () => Promise<void>;
   lastResult: () => CoordinatorResult | null;
+  /**
+   * True once when the user asked to open the provider browser. The caller
+   * consumes it, because opening the browser needs the config store and vault.
+   */
+  takeConfigRequest: () => boolean;
 }>;
 
 export function createTuiController(deps: TuiSessionDeps): TuiController {
@@ -43,6 +48,8 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   let activeRun: Promise<CoordinatorResult> | null = null;
   /** Why the last answer was rejected, shown in the question panel. */
   let answerError: string | null = null;
+  /** Set when the composer asked to open the provider browser. */
+  let configRequested = false;
 
   function applyResult(result: CoordinatorResult): void {
     lastResult = result;
@@ -84,6 +91,12 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     if (intent.kind === "reject" || intent.kind === "withdraw") return;
     if (intent.kind === "queue_input") {
       await deps.coordinator.queueInput(intent.text);
+      return;
+    }
+    if (intent.kind === "open_config") {
+      // The controller reports the request; the caller owns the browser because it
+      // needs the config store and the vault, which the controller does not have.
+      configRequested = true;
       return;
     }
     runStatus = "active";
@@ -171,6 +184,12 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     declineQuestion,
     cancelRun,
     lastResult: () => lastResult,
+    /** Consume a pending open-config request, if any. */
+    takeConfigRequest: () => {
+      const requested = configRequested;
+      configRequested = false;
+      return requested;
+    },
   };
 }
 
