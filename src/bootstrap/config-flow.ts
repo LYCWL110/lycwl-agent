@@ -137,28 +137,29 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
     // Session starts, which is what the first-run screen cannot do.
     error = null;
     busy = false;
+    const savedProtocol = await readSavedProtocol();
     phase = {
       kind: "browser",
       state: createBrowserState({
         providerLabel: new URL(draft.baseUrl).hostname,
         protocols: [...SUPPORTED_PROTOCOLS],
-        currentProtocol: "anthropic_messages",
+        currentProtocol: savedProtocol,
         models: [draft.model],
         currentModel: draft.model,
       }),
     };
     instance?.rerender(element());
-    void maybeFetchModels(draft);
+    void maybeFetchModels(draft, savedProtocol);
   }
 
   /** Fetch the provider's model list, keeping the browser usable on failure. */
-  async function maybeFetchModels(draft: SetupDraft): Promise<void> {
+  async function maybeFetchModels(draft: SetupDraft, protocol: SupportedProtocol): Promise<void> {
     if (options.fetchModels === undefined) return;
     const apiKey = await readKey(draft.credentialRef);
     if (apiKey === null) return;
     try {
       const models = await options.fetchModels({
-        protocol: "anthropic_messages",
+        protocol,
         baseUrl: draft.baseUrl,
         apiKey,
       });
@@ -177,6 +178,19 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
       };
       instance?.rerender(element());
     }
+  }
+
+  /** Read the protocol from the saved document, falling back to the default. */
+  async function readSavedProtocol(): Promise<SupportedProtocol> {
+    const loaded = await options.configStore.load();
+    if (!loaded.ok) return SUPPORTED_PROTOCOLS[0];
+    const settings = parseSettings(loaded.value.text) as {
+      provider?: { protocol?: unknown };
+    };
+    const candidate = settings.provider?.protocol;
+    return (SUPPORTED_PROTOCOLS as readonly string[]).includes(String(candidate))
+      ? (candidate as SupportedProtocol)
+      : SUPPORTED_PROTOCOLS[0];
   }
 
   async function readKey(reference: string): Promise<string | null> {

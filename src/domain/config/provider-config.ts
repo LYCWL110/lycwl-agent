@@ -55,9 +55,17 @@ export type ProviderConfigResult =
   | Readonly<{ ok: true; value: ProviderConfig }>
   | Readonly<{ ok: false; code: ProviderConfigFailure; field?: string }>;
 
-/** Where the request actually goes, given the protocol. */
+/**
+ * Where the request actually goes, given the protocol.
+ *
+ * Users routinely paste a base URL that already ends in `/v1`, which is what most
+ * provider consoles display. Appending `/v1/...` to that produced `/v1/v1/messages`
+ * and a 404, so an existing version segment is respected rather than duplicated.
+ */
 export function protocolEndpoint(baseUrl: string, protocol: SupportedProtocol): string {
-  const base = baseUrl.replace(/\/+$/, "");
+  const trimmed = baseUrl.replace(/\/+$/, "");
+  // Treat a trailing /v1 or /v1beta as the version root already being present.
+  const base = /\/v1(beta)?$/i.test(trimmed) ? trimmed.replace(/\/v1(beta)?$/i, "") : trimmed;
   if (protocol === "openai_chat") return `${base}/v1/chat/completions`;
   if (protocol === "openai_responses") return `${base}/v1/responses`;
   return `${base}/v1/messages`;

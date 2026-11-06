@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { fetchModelList } from "../adapters/providers/model-list.ts";
 import { createConfigStore, defaultConfigDirectory } from "../adapters/windows/config-store.ts";
 import { createFileVault } from "../adapters/windows/file-credential-vault.ts";
 import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
@@ -92,6 +93,7 @@ if (configureFirst) {
     ].join("\n"),
   );
   const flow = startConfigFlow({
+    fetchModels: fetchModelsForBrowser,
     configStore,
     vault,
     workspaceRoot: process.cwd(),
@@ -122,6 +124,7 @@ if (priorEvents > 0) {
 // so the app is unmounted first and the flow starts a fresh Session afterwards.
 function openConfig(): void {
   const flow = startConfigFlow({
+    fetchModels: fetchModelsForBrowser,
     configStore,
     vault,
     workspaceRoot: process.cwd(),
@@ -136,6 +139,29 @@ function openConfig(): void {
     },
   });
   void flow.done;
+}
+
+/**
+ * Fetch the provider's model list for the configuration browser.
+ *
+ * This is the one place a configuration-time network request happens. A failure
+ * returns an empty list so the browser stays usable with a hand-typed name.
+ */
+async function fetchModelsForBrowser(input: {
+  protocol: string;
+  baseUrl: string;
+  apiKey: string;
+}): Promise<readonly string[]> {
+  const result = await fetchModelList({
+    protocol: input.protocol as never,
+    baseUrl: input.baseUrl,
+    apiKey: input.apiKey,
+  });
+  if (!result.ok) {
+    process.stderr.write(`model list unavailable (${result.code}); type a model name\n`);
+    return [];
+  }
+  return result.models;
 }
 
 async function startSession(): Promise<void> {
