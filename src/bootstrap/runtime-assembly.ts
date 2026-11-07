@@ -4,13 +4,19 @@ import {
 } from "../adapters/providers/anthropic-provider.ts";
 import { OpenAiChatProvider } from "../adapters/providers/openai-chat-provider.ts";
 import { OpenAiResponsesProvider } from "../adapters/providers/openai-responses-provider.ts";
+import { providerHttpsPost } from "../adapters/providers/provider-http.ts";
 import { createFileVault } from "../adapters/windows/file-credential-vault.ts";
 import {
   type ProviderConfig,
   protocolEndpoint,
   readProviderConfig,
 } from "../domain/config/provider-config.ts";
+import type { OwnedKeyRegistry } from "../domain/security/owned-key-guard.ts";
 import type { ModelProvider } from "../ports/model-provider.ts";
+import {
+  assertProtectedValue,
+  ProtectedDeliveryError,
+} from "../services/security/guarded-delivery.ts";
 
 /**
  * Real runtime composition.
@@ -37,6 +43,8 @@ export type RuntimeAssembly =
       ok: true;
       provider: ModelProvider;
       config: ProviderConfig;
+      ownedKeys: OwnedKeyRegistry;
+      refreshOwnedKeys: () => Promise<void>;
       /** Non-fatal notes worth showing, e.g. plaintext credential storage. */
       warnings: readonly string[];
     }>
@@ -75,6 +83,42 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
   const config = parsed.value;
 
   const vault = createFileVault({ directory: options.dataDirectory });
+  let protectedKeys: OwnedKeyRegistry["keys"] = [];
+  const ownedKeys: OwnedKeyRegistry = {
+    get keys() {
+      return protectedKeys;
+    },
+  };
+  const refreshOwnedKeys = async () => {
+    const loaded = await vault.readProviderProtection();
+    if (!loaded.ok) throw new ProtectedDeliveryError("guard_failure");
+    // Retain every value seen by this runtime even if the vault is externally replaced.
+    const byValue = new Map(protectedKeys.map((key) => [key.value, key]));
+    for (const key of loaded.value.keys) {
+      const utf16le = Buffer.from(key.value, "utf16le");
+      const representations = new Set([
+        key.value,
+        JSON.stringify(key.value).slice(1, -1),
+        encodeURIComponent(key.value),
+        Buffer.from(key.value, "utf8").toString("base64"),
+        Buffer.from(key.value, "utf8").toString("base64").replace(/=+$/, ""),
+        Buffer.from(key.value, "utf8").toString("base64url"),
+        Buffer.from(key.value, "utf8")
+          .toString("base64url")
+          .padEnd(Math.ceil(Buffer.byteLength(key.value, "utf8") / 3) * 4, "="),
+        utf16le.toString("latin1"),
+        Buffer.from(utf16le).swap16().toString("latin1"),
+        `Bearer ${key.value}`,
+      ]);
+      for (const value of representations) byValue.set(value, { ...key, value });
+    }
+    protectedKeys = [...byValue.values()];
+  };
+  try {
+    await refreshOwnedKeys();
+  } catch {
+    return { ok: false, code: "credential_missing", detail: "protection_unavailable" };
+  }
 
   // Check the credential exists before handing back a Provider. Otherwise the
   // first attempt fails as "authentication" and looks like a wrong key rather
@@ -102,8 +146,24 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
   // Resolve per call so a rotation applies without rebuilding the Run. A failure
   // becomes "not configured", never an empty secret.
   const resolveApiKey = async () => {
+    await refreshOwnedKeys();
     const read = await vault.read(reference);
+    if (read.ok && !ownedKeys.keys.some((key) => key.value === read.value))
+      throw new ProtectedDeliveryError("guard_failure");
     return read.ok ? read.value : null;
+  };
+  const post: NonNullable<AssembleOptions["post"]> = async (request) => {
+    await refreshOwnedKeys();
+    // Authentication headers belong to the trusted adapter. Message/tool/schema
+    // bodies do not, including escaped JSON strings and restored history.
+    try {
+      assertProtectedValue(ownedKeys, JSON.parse(request.bodyText));
+      assertProtectedValue(ownedKeys, request.url);
+    } catch (error) {
+      if (error instanceof ProtectedDeliveryError) throw error;
+      throw new ProtectedDeliveryError("guard_failure");
+    }
+    return (options.post ?? providerHttpsPost)(request);
   };
 
   const provider: ModelProvider =
@@ -117,7 +177,7 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
             ? {}
             : { reasoningEffort: config.reasoningEffort }),
           tools: options.toolDefinitions,
-          ...(options.post === undefined ? {} : { post: options.post }),
+          post,
           ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
         })
       : config.protocol === "openai_chat"
@@ -130,7 +190,7 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
               ? {}
               : { reasoningEffort: config.reasoningEffort }),
             tools: options.toolDefinitions,
-            ...(options.post === undefined ? {} : { post: options.post }),
+            post,
             ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
           })
         : new AnthropicProvider({
@@ -139,9 +199,9 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
             endpoint: protocolEndpoint(config.baseUrl, config.protocol),
             maxTokens: config.maxOutputTokens,
             tools: options.toolDefinitions,
-            ...(options.post === undefined ? {} : { post: options.post }),
+            post,
             ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
           });
 
-  return { ok: true, provider, config, warnings };
+  return { ok: true, provider, config, warnings, ownedKeys, refreshOwnedKeys };
 }

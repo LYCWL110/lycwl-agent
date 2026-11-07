@@ -39,6 +39,7 @@ export type SkillDiscoveryResult =
         | "disabled"
         | "not_found"
         | "unreadable"
+        | "approval_required"
         | "invalid_skill_id"
         | "too_many_skills"
         | "file_too_large"
@@ -97,8 +98,26 @@ export function createSkillDiscovery(options: Readonly<{ workspaceRoot: string }
           return { ok: false, code: "invalid_skill_id", detail: skillId };
         }
         const skillPath = `${SKILLS_DIRECTORY}/${skillId}/${SKILL_FILE}`;
-        const text = await reader.readText(skillPath);
-        if (text === null) continue;
+        const read = await reader.readFile(skillPath, {
+          unapproved: true,
+          maxBytes: SKILLS_LIMITS.maxFileBytes,
+        });
+        if (!read.ok) {
+          if (read.code === "not_found") continue;
+          return {
+            ok: false,
+            code:
+              read.code === "approval_required" || read.code === "file_too_large"
+                ? read.code
+                : "unreadable",
+          };
+        }
+        let text: string;
+        try {
+          text = new TextDecoder("utf-8", { fatal: true }).decode(read.bytes);
+        } catch {
+          return { ok: false, code: "unreadable" };
+        }
         sources.push({
           skillId,
           text,

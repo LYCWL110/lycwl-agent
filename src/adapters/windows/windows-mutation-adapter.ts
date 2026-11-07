@@ -34,6 +34,32 @@ export type MutationAdapterFailure =
 export function createWindowsMutationAdapter(options: Readonly<{ workspaceRoot: string }>) {
   const { workspaceRoot } = options;
 
+  async function checkedPath(requested: string) {
+    const supplied = resolveWorkspacePath(workspaceRoot, requested);
+    if (!supplied.ok || !supplied.value.withinWorkspace) throw new Error("invalid_path");
+    const parent = path.dirname(supplied.value.absolutePath);
+    const resolvedParent = await realpath(parent);
+    const checked = resolveWorkspacePath(workspaceRoot, resolvedParent);
+    if (!checked.ok || !checked.value.withinWorkspace) throw new Error("invalid_path");
+    // Refuse reparse ancestors, including aliases that happen to resolve inside.
+    // A stable lexical path must not conceal the actual mutation destination.
+    let current = parent;
+    while (true) {
+      const stats = await lstat(current, { bigint: true });
+      if (!stats.isDirectory() || stats.isSymbolicLink())
+        throw new Error("reparse_point_unsupported");
+      if (sameIdentityText(current, workspaceRoot)) break;
+      const next = path.dirname(current);
+      if (next === current) throw new Error("invalid_path");
+      current = next;
+    }
+    const parentStats = await lstat(resolvedParent, { bigint: true });
+    return {
+      absolutePath: path.join(resolvedParent, path.basename(supplied.value.absolutePath)),
+      parentKey: `${resolvedParent}:${parentStats.dev}:${parentStats.ino}`,
+    };
+  }
+
   async function versionOf(target: string): Promise<string> {
     const resolved = await realpath(target);
     const checked = resolveWorkspacePath(workspaceRoot, resolved);
@@ -107,21 +133,19 @@ export function createWindowsMutationAdapter(options: Readonly<{ workspaceRoot: 
 
   /** Delete exactly one ordinary file or one empty directory. */
   async function deletePath(relativePath: string): Promise<void> {
-    const supplied = resolveWorkspacePath(workspaceRoot, relativePath);
-    if (!supplied.ok) throw new Error("invalid_path");
-    if (!supplied.value.withinWorkspace) throw new Error("invalid_path");
+    const supplied = await checkedPath(relativePath);
 
-    const stats = await lstat(supplied.value.absolutePath, { bigint: true });
+    const stats = await lstat(supplied.absolutePath, { bigint: true });
     if (stats.isSymbolicLink()) throw new Error("reparse_point_unsupported");
 
     if (stats.isDirectory()) {
-      const children = await readdir(supplied.value.absolutePath);
+      const children = await readdir(supplied.absolutePath);
       if (children.length > 0) throw new Error("directory_not_empty");
-      await rmdir(supplied.value.absolutePath);
+      await rmdir(supplied.absolutePath);
       return;
     }
     if (!stats.isFile()) throw new Error("not_a_regular_file");
-    await unlink(supplied.value.absolutePath);
+    await unlink(supplied.absolutePath);
   }
 
   async function inspectRename(from: string, to: string): Promise<RenameFacts> {
@@ -145,8 +169,10 @@ export function createWindowsMutationAdapter(options: Readonly<{ workspaceRoot: 
       return empty;
     }
 
-    const fromPath = suppliedFrom.value.absolutePath;
-    const toPath = suppliedTo.value.absolutePath;
+    const source = await checkedPath(from);
+    const destination = await checkedPath(to);
+    const fromPath = source.absolutePath;
+    const toPath = destination.absolutePath;
 
     let sourceStats: Awaited<ReturnType<typeof lstat>>;
     try {
@@ -186,7 +212,7 @@ export function createWindowsMutationAdapter(options: Readonly<{ workspaceRoot: 
       aliasAmbiguous,
       ...(!sourceStats.isSymbolicLink()
         ? {
-            stateKey: `${await versionOf(fromPath)}:${await realpath(path.dirname(toPath))}:${manifestKey}`,
+            stateKey: `${await versionOf(fromPath)}:${source.parentKey}:${destination.parentKey}:${manifestKey}`,
           }
         : {}),
     };
@@ -201,8 +227,10 @@ export function createWindowsMutationAdapter(options: Readonly<{ workspaceRoot: 
       throw new Error("invalid_path");
     }
 
-    const fromPath = suppliedFrom.value.absolutePath;
-    const toPath = suppliedTo.value.absolutePath;
+    const source = await checkedPath(from);
+    const destination = await checkedPath(to);
+    const fromPath = source.absolutePath;
+    const toPath = destination.absolutePath;
 
     const sourceStats = await lstat(fromPath, { bigint: true });
     if (sourceStats.isSymbolicLink()) throw new Error("reparse_point_unsupported");
@@ -225,6 +253,11 @@ export function createWindowsMutationAdapter(options: Readonly<{ workspaceRoot: 
       throw new Error("tree_too_large");
     }
 
+    if (
+      (await checkedPath(from)).parentKey !== source.parentKey ||
+      (await checkedPath(to)).parentKey !== destination.parentKey
+    )
+      throw new Error("invalid_path");
     await rename(fromPath, toPath);
   }
 

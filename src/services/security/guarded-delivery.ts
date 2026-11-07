@@ -1,5 +1,33 @@
 import { createStreamGuard, type OwnedKeyRegistry } from "../../domain/security/owned-key-guard.ts";
 
+export class ProtectedDeliveryError extends Error {
+  readonly reason: "owned_key_detected" | "guard_failure";
+  constructor(reason: "owned_key_detected" | "guard_failure") {
+    super("protected_delivery_blocked");
+    this.reason = reason;
+  }
+}
+
+/** Check decoded string fields as well as their serialized representation. */
+export function assertProtectedValue(registry: OwnedKeyRegistry, value: unknown): void {
+  try {
+    const serialized = JSON.stringify(value, (key, entry: unknown) => {
+      for (const text of [key, ...(typeof entry === "string" ? [entry] : [])]) {
+        const guarded = guardText(registry, text);
+        if (guarded.kind === "blocked") throw new ProtectedDeliveryError(guarded.reason);
+      }
+      return entry;
+    });
+    if (serialized !== undefined) {
+      const guarded = guardText(registry, serialized);
+      if (guarded.kind === "blocked") throw new ProtectedDeliveryError(guarded.reason);
+    }
+  } catch (error) {
+    if (error instanceof ProtectedDeliveryError) throw error;
+    throw new ProtectedDeliveryError("guard_failure");
+  }
+}
+
 /**
  * Owned-key guard applied to a protected text exit (C10).
  *

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { OwnedKeyRegistry } from "../../domain/security/owned-key-guard.ts";
 
 import {
   CREDENTIAL_LIMITS,
@@ -57,7 +58,12 @@ type StoredEntry = Readonly<{
   updatedAtUtc: string;
 }>;
 
-type StoredFile = Readonly<{ schemaVersion: 1; entries: readonly StoredEntry[] }>;
+type StoredFile = Readonly<{
+  schemaVersion: 1;
+  entries: readonly StoredEntry[];
+  /** Protective copies have no sending authority and are never auto-deleted. */
+  retiredProviderKeys?: readonly StoredEntry[];
+}>;
 
 export type FileVault = CredentialVault &
   Readonly<{
@@ -65,6 +71,7 @@ export type FileVault = CredentialVault &
     filePath: string;
     /** True when restrictive permissions could not be applied on this platform. */
     permissionWarning: () => boolean;
+    readProviderProtection: () => Promise<CredentialResult<OwnedKeyRegistry>>;
   }>;
 
 export function createFileVault(options: FileVaultOptions): FileVault {
@@ -77,7 +84,11 @@ export function createFileVault(options: FileVaultOptions): FileVault {
   > {
     let raw: string;
     try {
-      raw = await readFile(filePath, "utf8");
+      const bytes = await readFile(filePath);
+      if (bytes.byteLength > FILE_VAULT_LIMITS.maxFileBytes) {
+        return { ok: false, code: "vault_unavailable" };
+      }
+      raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     } catch (error) {
       if (isNotFound(error)) return { ok: true, file: { schemaVersion: 1, entries: [] } };
       return { ok: false, code: "vault_unavailable" };
@@ -134,6 +145,31 @@ export function createFileVault(options: FileVaultOptions): FileVault {
   return {
     filePath,
     permissionWarning: () => permissionWarned,
+    async readProviderProtection() {
+      const loaded = await loadAll();
+      if (!loaded.ok) return loaded;
+      return {
+        ok: true,
+        value: {
+          keys: [
+            ...loaded.file.entries
+              .filter((entry) => entry.purpose === "provider_api_key")
+              .map((entry) => ({
+                keyId: `${entry.reference}:${entry.revision}`,
+                value: entry.secret,
+                revision: entry.revision,
+                state: "sending" as const,
+              })),
+            ...(loaded.file.retiredProviderKeys ?? []).map((entry) => ({
+              keyId: `${entry.reference}:${entry.revision}`,
+              value: entry.secret,
+              revision: entry.revision,
+              state: "retired" as const,
+            })),
+          ],
+        },
+      };
+    },
 
     async read(reference: CredentialReference): Promise<CredentialResult<string>> {
       const invalid = validateReference(reference.reference);
@@ -180,7 +216,15 @@ export function createFileVault(options: FileVaultOptions): FileVault {
         return { ok: false, code: "purpose_mismatch" };
       }
 
-      const revision = (existing?.revision ?? 0) + 1;
+      const retiredProviderKeys = [...(loaded.file.retiredProviderKeys ?? [])];
+      if (existing?.purpose === "provider_api_key") retiredProviderKeys.push(existing);
+      const revision =
+        Math.max(
+          existing?.revision ?? 0,
+          ...retiredProviderKeys
+            .filter((entry) => entry.reference === input.reference)
+            .map((entry) => entry.revision),
+        ) + 1;
       const next: StoredEntry = {
         purpose: input.purpose,
         reference: input.reference,
@@ -191,7 +235,11 @@ export function createFileVault(options: FileVaultOptions): FileVault {
       const entries = loaded.file.entries.filter(
         (entry) => !(entry.reference === input.reference && entry.purpose === input.purpose),
       );
-      const failure = await persist({ schemaVersion: 1, entries: [...entries, next] });
+      const failure = await persist({
+        schemaVersion: 1,
+        entries: [...entries, next],
+        retiredProviderKeys,
+      });
       if (failure !== null) return { ok: false, code: failure };
       return { ok: true, value: { reference: input.reference, purpose: input.purpose, revision } };
     },
@@ -206,7 +254,13 @@ export function createFileVault(options: FileVaultOptions): FileVault {
       if (entries.length === loaded.file.entries.length) {
         return { ok: false, code: "not_found" };
       }
-      const failure = await persist({ schemaVersion: 1, entries });
+      const retiredProviderKeys = [
+        ...(loaded.file.retiredProviderKeys ?? []),
+        ...loaded.file.entries.filter(
+          (entry) => entry.reference === reference && entry.purpose === "provider_api_key",
+        ),
+      ];
+      const failure = await persist({ schemaVersion: 1, entries, retiredProviderKeys });
       if (failure !== null) return { ok: false, code: failure };
       return { ok: true, value: null };
     },
@@ -238,7 +292,32 @@ function parseStoredFile(value: unknown): StoredFile | null {
       updatedAtUtc: item["updatedAtUtc"],
     });
   }
-  return { schemaVersion: 1, entries: parsed };
+  const retired = record["retiredProviderKeys"];
+  if (retired !== undefined && !Array.isArray(retired)) return null;
+  const retiredParsed: StoredEntry[] = [];
+  for (const entry of retired ?? []) {
+    if (typeof entry !== "object" || entry === null) return null;
+    const item = entry as Record<string, unknown>;
+    if (
+      item["purpose"] !== "provider_api_key" ||
+      typeof item["reference"] !== "string" ||
+      typeof item["secret"] !== "string" ||
+      item["secret"].length === 0 ||
+      typeof item["updatedAtUtc"] !== "string" ||
+      !Number.isSafeInteger(item["revision"]) ||
+      (item["revision"] as number) < 1
+    )
+      return null;
+    retiredParsed.push({
+      purpose: "provider_api_key",
+      reference: item["reference"],
+      revision: item["revision"] as number,
+      secret: item["secret"],
+      updatedAtUtc: item["updatedAtUtc"],
+    });
+  }
+  if (parsed.some((entry) => entry.secret.length === 0)) return null;
+  return { schemaVersion: 1, entries: parsed, retiredProviderKeys: retiredParsed };
 }
 
 function isNotFound(error: unknown): boolean {

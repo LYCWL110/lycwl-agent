@@ -42,7 +42,11 @@ import type {
   ProviderToolCall,
 } from "../../ports/model-provider.ts";
 import type { ToolExecutionRequest, ToolExecutor } from "../../ports/tool-executor.ts";
-import { guardText, guardToolResultText } from "../../services/security/guarded-delivery.ts";
+import {
+  assertProtectedValue,
+  guardToolResultText,
+  ProtectedDeliveryError,
+} from "../../services/security/guarded-delivery.ts";
 import {
   estimateArtifactTokens,
   parseCompactionArtifact,
@@ -102,6 +106,8 @@ export type CoordinatorDependencies = Readonly<{
    * instead of rewriting it.
    */
   ownedKeys?: OwnedKeyRegistry;
+  /** Refresh protective copies before a new Run and each model attempt. */
+  refreshOwnedKeys?: () => Promise<void>;
   /**
    * Sourced, untrusted material placed before the user's task, such as project
    * guidance. It is a separate user turn, never merged into the system prompt: a
@@ -580,23 +586,31 @@ export class RuntimeCoordinator {
       guidanceSources: new Set<string>(),
       guidanceText: projectContext ?? null,
     };
-    await this.#record(context, "run_started", { kind: "run_started", input });
-    const binding = this.#deps.runBinding;
-    if (binding !== undefined) {
-      await this.#record(context, "run_model_binding", {
-        kind: "run_model_binding",
-        providerId: binding.providerId,
-        modelId: binding.modelId,
-        protocolId: binding.protocolId,
-        adapterVersion: binding.adapterVersion,
-        endpointFingerprint: binding.endpointFingerprint,
-        catalogSnapshotId: binding.catalog.snapshotId,
-        capabilitySnapshotId: binding.capabilities.snapshotId,
-        credentialRef: binding.credential.credentialRef,
-        credentialRevision: binding.credential.revision,
-      });
-    }
     this.#activeContext = context;
+    try {
+      await this.#deps.refreshOwnedKeys?.();
+      await this.#record(context, "run_started", { kind: "run_started", input });
+      const binding = this.#deps.runBinding;
+      if (binding !== undefined) {
+        await this.#record(context, "run_model_binding", {
+          kind: "run_model_binding",
+          providerId: binding.providerId,
+          modelId: binding.modelId,
+          protocolId: binding.protocolId,
+          adapterVersion: binding.adapterVersion,
+          endpointFingerprint: binding.endpointFingerprint,
+          catalogSnapshotId: binding.catalog.snapshotId,
+          capabilitySnapshotId: binding.capabilities.snapshotId,
+          credentialRef: binding.credential.credentialRef,
+          credentialRevision: binding.credential.revision,
+        });
+      }
+    } catch (error) {
+      if (error instanceof ProtectedDeliveryError)
+        return this.#blockDelivery(context, error.reason);
+      this.#activeContext = null;
+      throw error;
+    }
 
     const result = await this.#loop(context);
     if (context.run.state !== "waiting") this.#activeContext = null;
@@ -653,6 +667,7 @@ export class RuntimeCoordinator {
     try {
       while (context.run.state === "active") {
         if (context.cancelRequested) return this.#cancel(context);
+        if (context.deliveryBlocked) return this.#blockDelivery(context, "owned_key_detected");
 
         const round = addModelRound(context.budget);
         if (!round.ok) return this.#fail(context, round.code);
@@ -676,37 +691,18 @@ export class RuntimeCoordinator {
         if (completion.kind === "terminal") return completion.result;
         if (completion.kind === "waiting") return completion.result;
         if (completion.kind === "failed") return completion.result;
+        await this.#deps.refreshOwnedKeys?.();
+        if (this.#deps.ownedKeys !== undefined) {
+          assertProtectedValue(this.#deps.ownedKeys, completion);
+        }
 
         const toolCallIds = completion.toolCalls.map((call) => call.providerToolCallId);
         if (new Set(toolCallIds).size !== toolCallIds.length) {
           return this.#fail(context, "duplicate_provider_tool_call_id");
         }
 
-        // C10: the recorded model text is a protected exit. A blocked response
-        // never dispatches its calls and never claims a clean completion.
-        const guardRegistry = this.#deps.ownedKeys;
-        const guardedCompletionText =
-          guardRegistry === undefined || completion.text === null
-            ? completion.text
-            : (() => {
-                const guarded = guardText(guardRegistry, completion.text);
-                if (guarded.kind === "blocked") {
-                  context.deliveryBlocked = true;
-                  return null;
-                }
-                return guarded.text;
-              })();
-        if (
-          guardRegistry !== undefined &&
-          completion.text !== null &&
-          guardedCompletionText === null
-        ) {
-          await this.#record(context, "tool_result_delivery_blocked", {
-            kind: "tool_result_delivery_blocked",
-            reason: "owned_key_detected",
-          });
-          return this.#fail(context, "model_text_blocked");
-        }
+        // The complete response (including tool names/arguments) passed the guard.
+        const guardedCompletionText = completion.text;
         await this.#record(context, "model_response_validated", {
           kind: "model_response_validated",
           modelRequestId,
@@ -760,33 +756,20 @@ export class RuntimeCoordinator {
         }
 
         if (completion.toolCalls.length === 0) {
-          // C10: the final assistant text is also a protected exit.
-          const registry = this.#deps.ownedKeys;
-          const guarded =
-            registry === undefined || completion.text === null
-              ? { kind: "delivered" as const, text: completion.text }
-              : guardText(registry, completion.text);
-          if (guarded.kind === "blocked") {
-            context.deliveryBlocked = true;
-            await this.#record(context, "tool_result_delivery_blocked", {
-              kind: "tool_result_delivery_blocked",
-              reason: guarded.reason,
-            });
-            return this.#fail(context, "model_text_blocked");
-          }
           const finished = finishRun(context.run, "completed");
           if (!finished.ok) return this.#fail(context, finished.code);
-          context.run = finished.value;
           await this.#record(context, "run_completed", {
             kind: "run_completed",
             text: guardedCompletionText,
           });
-          return this.#result(context, "completed", guarded.text, null);
+          context.run = finished.value;
+          return this.#result(context, "completed", guardedCompletionText, null);
         }
 
         for (const [index, call] of completion.toolCalls.entries()) {
           const callResult = await this.#executeCall(context, call);
           if (callResult.kind === "stop") return callResult.result;
+          if (context.deliveryBlocked) return this.#blockDelivery(context, "owned_key_detected");
           if (context.stopSiblings) {
             context.stopSiblings = false;
             for (const remaining of completion.toolCalls.slice(index + 1)) {
@@ -807,7 +790,9 @@ export class RuntimeCoordinator {
           }
         }
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof ProtectedDeliveryError)
+        return this.#blockDelivery(context, error.reason);
       return this.#fail(context, "unexpected_internal_error");
     }
 
@@ -876,6 +861,13 @@ export class RuntimeCoordinator {
           ? {}
           : { resolveCredentialRevision: this.#deps.resolveCredentialRevision }),
         onRequestStarted: async (requestId, attemptNo, credentialRevision) => {
+          await this.#deps.refreshOwnedKeys?.();
+          if (this.#deps.ownedKeys !== undefined) {
+            assertProtectedValue(
+              this.#deps.ownedKeys,
+              overrideConversation ?? context.conversation,
+            );
+          }
           // C03: an attempt may only advance the revision of the same credential
           // reference. A resolver that reports a different reference would mean a
           // silent identity change inside a Run, which must not be sent.
@@ -1253,6 +1245,9 @@ export class RuntimeCoordinator {
         deferApprovals: this.#deps.suspendOnApproval ?? false,
         deferQuestions: this.#deps.suspendOnApproval ?? false,
         ...(this.#deps.ownedKeys === undefined ? {} : { ownedKeys: this.#deps.ownedKeys }),
+        ...(this.#deps.refreshOwnedKeys === undefined
+          ? {}
+          : { refreshOwnedKeys: this.#deps.refreshOwnedKeys }),
         onEvent: async (type, payload) => {
           await this.#record(context, type, payload as InternalEvent["payload"]);
         },
@@ -1260,6 +1255,7 @@ export class RuntimeCoordinator {
       call,
     );
     context.cancelledDuring = null;
+    if ("deliveryBlocked" in outcome && outcome.deliveryBlocked) context.deliveryBlocked = true;
 
     if (outcome.kind === "unknown")
       this.#appendToolResult(context, call, "outcome_unknown", outcome.safeCode);
@@ -1373,6 +1369,10 @@ export class RuntimeCoordinator {
         ids: this.#deps.ids,
         signal: context.abortController.signal,
         deferApprovals: this.#deps.suspendOnApproval ?? false,
+        ...(this.#deps.ownedKeys === undefined ? {} : { ownedKeys: this.#deps.ownedKeys }),
+        ...(this.#deps.refreshOwnedKeys === undefined
+          ? {}
+          : { refreshOwnedKeys: this.#deps.refreshOwnedKeys }),
         onEvent: async (type, payload) => {
           await this.#record(context, type, payload as InternalEvent["payload"]);
         },
@@ -1386,6 +1386,7 @@ export class RuntimeCoordinator {
         decision,
       },
     );
+    if ("deliveryBlocked" in outcome && outcome.deliveryBlocked) context.deliveryBlocked = true;
 
     if (outcome.kind === "unknown")
       this.#appendToolResult(context, pending.call, "outcome_unknown", outcome.safeCode);
@@ -1562,6 +1563,7 @@ export class RuntimeCoordinator {
     type: InternalEvent["type"],
     payload: InternalEvent["payload"],
   ): Promise<void> {
+    await this.#deps.refreshOwnedKeys?.();
     const input: EventInput = {
       sessionId: context.sessionId,
       runId: context.runId,
@@ -1571,6 +1573,7 @@ export class RuntimeCoordinator {
       timestampUtc: this.#deps.nowUtc(),
       payload,
     };
+    if (this.#deps.ownedKeys !== undefined) assertProtectedValue(this.#deps.ownedKeys, input);
     const event = await this.#deps.eventLog.append(input);
     context.events.push(event);
     context.lastEventId = event.eventId;
@@ -1646,6 +1649,34 @@ export class RuntimeCoordinator {
       await this.#record(context, "run_failed", { kind: "run_failed", safeCode });
     }
     return this.#result(context, "failed", null, safeCode);
+  }
+
+  async #blockDelivery(
+    context: MutableRunContext,
+    reason: "owned_key_detected" | "guard_failure",
+  ): Promise<CoordinatorResult> {
+    context.deliveryBlocked = true;
+    const waitToken = this.#deps.ids.create();
+    const waiting = waitRun(context.run, "recovery_review", waitToken, 1);
+    if (waiting.ok) context.run = waiting.value;
+    try {
+      await this.#record(context, "tool_result_delivery_blocked", {
+        kind: "tool_result_delivery_blocked",
+        reason,
+      });
+      await this.#record(context, "run_waiting", {
+        kind: "run_waiting",
+        reason: "recovery",
+        safeCode: "protected_delivery_blocked",
+        waitToken,
+        requestVersion: 1,
+      });
+    } catch (error) {
+      // Short keys may collide with even the safe diagnostic vocabulary.
+      // Withhold that record too; never fall back to unguarded persistence.
+      if (!(error instanceof ProtectedDeliveryError)) throw error;
+    }
+    return this.#result(context, "waiting", null, "protected_delivery_blocked");
   }
 
   #result(

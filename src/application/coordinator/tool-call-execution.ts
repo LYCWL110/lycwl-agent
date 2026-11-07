@@ -28,12 +28,14 @@ export type ToolCallOutcome =
       toolName: string;
       status: "succeeded" | "failed" | "denied";
       text: string | null;
+      deliveryBlocked?: boolean;
     }>
   | Readonly<{
       kind: "unknown";
       providerToolCallId: string;
       toolName: string;
       safeCode: string;
+      deliveryBlocked?: boolean;
     }>
   | Readonly<{ kind: "invalid"; safeCode: string }>
   | Readonly<{
@@ -82,6 +84,7 @@ export type ToolCallDependencies = Readonly<{
   deferQuestions?: boolean;
   /** C10 owned-key registry applied to persisted tool result text. */
   ownedKeys?: OwnedKeyRegistry;
+  refreshOwnedKeys?: () => Promise<void>;
   signal?: AbortSignal;
   onEvent: (
     type:
@@ -483,6 +486,7 @@ async function dispatchAndExecute(
   // C10: the persisted tool result is a protected exit too. A blocked text is
   // withheld from the event while the real status is preserved.
   const registry = dependencies.ownedKeys;
+  await dependencies.refreshOwnedKeys?.();
   const delivery =
     registry === undefined
       ? { text: result.text ?? null, deliveryBlocked: false as const }
@@ -502,6 +506,7 @@ async function dispatchAndExecute(
       providerToolCallId: call.providerToolCallId,
       toolName: call.toolName,
       safeCode: "tool_outcome_unknown",
+      deliveryBlocked: delivery.deliveryBlocked,
     };
   }
   return {
@@ -509,6 +514,7 @@ async function dispatchAndExecute(
     providerToolCallId: call.providerToolCallId,
     toolName: call.toolName,
     status: result.status,
-    text: result.text,
+    text: delivery.text,
+    deliveryBlocked: delivery.deliveryBlocked,
   };
 }

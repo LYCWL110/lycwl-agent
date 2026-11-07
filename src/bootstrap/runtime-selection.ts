@@ -196,6 +196,8 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     warnings: budgetWarning === null ? assembly.warnings : [...assembly.warnings, budgetWarning],
     coordinator: new RuntimeCoordinator({
       provider: assembly.provider,
+      ownedKeys: assembly.ownedKeys,
+      refreshOwnedKeys: assembly.refreshOwnedKeys,
       tools: createWorkspaceTools({
         workspaceRoot: options.workspaceRoot,
         // No interactive channel is attached to this gate, so it denies. Tools

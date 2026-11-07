@@ -50,6 +50,7 @@ export type GuidanceLoadResult =
         | "case_ambiguous_candidates"
         | "too_deep"
         | "invalid_workspace_root"
+        | "approval_required"
         | "unreadable";
       detail?: string;
     }>;
@@ -113,11 +114,28 @@ export function createGuidanceLoader(options: Readonly<{ workspaceRoot: string }
       // an estimate would let a file that is too large reach the injector.
       const raw: { candidate: GuidanceCandidate; text: string; bytes: number }[] = [];
       for (const candidate of discovered.candidates) {
-        const text = await reader.readText(candidate.path);
-        if (text === null) {
+        // Automatic discovery grants no sensitive/outside read authority.
+        const read = await reader.readFile(candidate.path, {
+          unapproved: true,
+          maxBytes: PROJECT_GUIDANCE_LIMITS.maxFileBytes,
+        });
+        if (!read.ok) {
+          return {
+            ok: false,
+            code:
+              read.code === "approval_required" || read.code === "file_too_large"
+                ? read.code
+                : "unreadable",
+            detail: candidate.path,
+          };
+        }
+        let text: string;
+        try {
+          text = new TextDecoder("utf-8", { fatal: true }).decode(read.bytes);
+        } catch {
           return { ok: false, code: "unreadable", detail: candidate.path };
         }
-        raw.push({ candidate, text, bytes: utf8Length(text) });
+        raw.push({ candidate, text, bytes: read.bytes.byteLength });
       }
 
       const budget = checkGuidanceBudget(raw.map((entry) => entry.bytes));
@@ -196,23 +214,6 @@ function parentOf(value: string): string {
   if (index <= 0) return value;
   if (index === 2 && /^[A-Za-z]:\\/.test(value)) return value.slice(0, 3);
   return value.slice(0, index);
-}
-
-/**
- * Count UTF-8 bytes without importing a runtime module into domain-adjacent code
- * paths that must stay platform-neutral.
- */
-function utf8Length(text: string): number {
-  let bytes = 0;
-  for (const character of text) {
-    const codePoint = character.codePointAt(0);
-    if (codePoint === undefined) continue;
-    if (codePoint < 0x80) bytes += 1;
-    else if (codePoint < 0x800) bytes += 2;
-    else if (codePoint < 0x10000) bytes += 3;
-    else bytes += 4;
-  }
-  return bytes;
 }
 
 function sha256Hex(text: string): string {

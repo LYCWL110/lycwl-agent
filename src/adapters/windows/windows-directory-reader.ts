@@ -1,6 +1,7 @@
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { FileSnapshotFacts } from "../../services/files/consistent-snapshot.ts";
+import { decideResolvedReadPermission } from "../../services/permission/resolved-read-policy.ts";
 import { resolveWorkspacePath } from "../../services/permission/workspace-path.ts";
 import type { SearchEntry } from "../tools/search-tools.ts";
 
@@ -39,6 +40,7 @@ export type FileReadResult =
         | "symbolic_link"
         | "file_too_large"
         | "file_changed"
+        | "approval_required"
         | "read_failed";
     }>;
 
@@ -100,7 +102,10 @@ export function createWindowsFileReader(options: Readonly<{ workspaceRoot: strin
    * Read one regular file with identity checks before and after, refusing links
    * and oversized targets. Reuses the same facts shape as the injected flow.
    */
-  async function readFile(relativePath: string): Promise<FileReadResult> {
+  async function readFile(
+    relativePath: string,
+    readOptions: Readonly<{ unapproved?: boolean; maxBytes?: number }> = {},
+  ): Promise<FileReadResult> {
     const supplied = resolveWorkspacePath(workspaceRoot, relativePath);
     if (!supplied.ok) return { ok: false, code: "invalid_path" };
 
@@ -121,7 +126,19 @@ export function createWindowsFileReader(options: Readonly<{ workspaceRoot: strin
     }
     if (before.isSymbolicLink()) return { ok: false, code: "symbolic_link" };
     if (!before.isFile()) return { ok: false, code: "not_a_regular_file" };
-    if (before.size > BigInt(MAX_READ_BYTES)) return { ok: false, code: "file_too_large" };
+    if (
+      readOptions.unapproved &&
+      decideResolvedReadPermission(workspaceRoot, {
+        requestedPath: supplied.value.absolutePath,
+        resolvedPath: resolved.value.absolutePath,
+        isDirectory: false,
+        isSymbolicLink: false,
+      }).outcome !== "allowed"
+    ) {
+      return { ok: false, code: "approval_required" };
+    }
+    const maxBytes = Math.min(readOptions.maxBytes ?? MAX_READ_BYTES, MAX_READ_BYTES);
+    if (before.size > BigInt(maxBytes)) return { ok: false, code: "file_too_large" };
 
     let handle: Awaited<ReturnType<typeof open>>;
     try {
@@ -146,7 +163,7 @@ export function createWindowsFileReader(options: Readonly<{ workspaceRoot: strin
       ) {
         return { ok: false, code: "file_changed" };
       }
-      if (bytes.byteLength > MAX_READ_BYTES) return { ok: false, code: "file_too_large" };
+      if (bytes.byteLength > maxBytes) return { ok: false, code: "file_too_large" };
 
       return {
         ok: true,
