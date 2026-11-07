@@ -82,6 +82,11 @@ export type InternalEventPayload =
       attemptNo: number;
       toolCallCount: number;
       text: string | null;
+      toolCalls?: readonly Readonly<{
+        providerToolCallId: string;
+        toolName: string;
+        arguments: unknown;
+      }>[];
     }>
   | Readonly<{
       kind: "tool_call_received";
@@ -133,6 +138,7 @@ export type InternalEventPayload =
   | Readonly<{
       kind: "tool_call_cancelled";
       toolCallId: string;
+      providerToolCallId?: string;
       toolName: string;
       reason: "user_input_superseded" | "run_cancelled" | "sibling_stopped";
     }>

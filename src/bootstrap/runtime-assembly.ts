@@ -163,6 +163,7 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
       if (error instanceof ProtectedDeliveryError) throw error;
       throw new ProtectedDeliveryError("guard_failure");
     }
+    if (request.signal?.aborted) return { ok: false, code: "cancelled" };
     return (options.post ?? providerHttpsPost)(request);
   };
 

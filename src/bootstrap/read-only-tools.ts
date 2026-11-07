@@ -199,12 +199,20 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
           if (outcome.cancelled)
             return { kind: "unknown", safeCode: "shell_cancelled_outcome_unknown" };
           return outcome.timedOut
-            ? { kind: "timed_out", stdout: outcome.stdout, stderr: outcome.stderr }
+            ? {
+                kind: "timed_out",
+                stdout: outcome.stdout,
+                stderr: outcome.stderr,
+                rawBytes: outcome.rawBytes,
+                captureComplete: outcome.captureComplete,
+              }
             : {
                 kind: "completed",
                 exitCode: outcome.exitCode,
                 stdout: outcome.stdout,
                 stderr: outcome.stderr,
+                rawBytes: outcome.rawBytes,
+                captureComplete: outcome.captureComplete,
               };
         },
       })
@@ -408,8 +416,13 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
       for (const delegate of delegates) delegate.discardApproval?.(id);
     },
     async cancelAll() {
-      backgroundRegistry?.disposeAll();
-      await lspRegistry.close();
+      const results = await Promise.allSettled([
+        Promise.resolve().then(() => backgroundRegistry?.disposeAll()),
+        lspRegistry.close(),
+      ]);
+      if (results.some((result) => result.status === "rejected")) {
+        throw new Error("session_cleanup_failed");
+      }
     },
 
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {

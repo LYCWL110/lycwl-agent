@@ -14,6 +14,7 @@ export type StartTuiOptions = Readonly<{
   modeLabel?: string;
   /** Called when the composer asked to open configuration. */
   onConfigRequest?: () => void;
+  onCleanupError?: (code: string) => void;
   /** Injected terminal streams/mount for lifecycle verification. */
   mount?: (element: ReactElement, options: RenderOptions) => Pick<Instance, "rerender" | "unmount">;
 }>;
@@ -26,6 +27,7 @@ export function startTui(
   let instance: Pick<Instance, "rerender" | "unmount"> | null = null;
   let lastProjection = "";
   let stopped = false;
+  let closing = false;
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
   function unmount(): void {
@@ -33,6 +35,21 @@ export function startTui(
     stopped = true;
     if (refreshTimer !== null) clearInterval(refreshTimer);
     instance?.unmount();
+  }
+
+  async function closeSession(openConfiguration = false): Promise<void> {
+    if (closing || stopped) return;
+    closing = true;
+    try {
+      await controller.close();
+      unmount();
+      if (openConfiguration) onConfigRequest?.();
+    } catch {
+      unmount();
+      (options.onCleanupError ?? ((code) => process.stderr.write(`${code}\n`)))(
+        "session_cleanup_failed",
+      );
+    }
   }
 
   const element = (): ReactElement =>
@@ -46,8 +63,7 @@ export function startTui(
           // A /config request must be consumed before the view is redrawn, so
           // the browser mounts instead of the stale app.
           if (controller.takeConfigRequest()) {
-            unmount();
-            onConfigRequest?.();
+            void closeSession(true);
             return;
           }
           refresh();
@@ -69,7 +85,7 @@ export function startTui(
         void controller.cancelRun().then(refresh);
       },
       onQuit: () => {
-        unmount();
+        void closeSession();
       },
     });
 

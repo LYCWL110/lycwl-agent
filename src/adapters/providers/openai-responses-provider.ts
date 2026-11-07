@@ -71,12 +71,15 @@ export class OpenAiResponsesProvider implements ModelProvider {
   }
 
   async complete(request: ProviderRequest): Promise<ProviderCompletion> {
+    if (request.signal?.aborted) return { kind: "cancelled", safeCode: "provider_cancelled" };
     const apiKey = await this.#resolveKey();
     if (apiKey === null) {
       return { kind: "authentication_failure", safeCode: "openai_responses_key_not_configured" };
     }
 
+    if (request.signal?.aborted) return { kind: "cancelled", safeCode: "provider_cancelled" };
     const posted = await this.#post({
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
       url: protocolEndpoint(this.#options.baseUrl, "openai_responses"),
       headers: {
         "content-type": "application/json",

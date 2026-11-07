@@ -5,6 +5,7 @@ export type ProviderToolCall = Readonly<{
 }>;
 
 export type ProviderCompletion =
+  | Readonly<{ kind: "cancelled"; safeCode: string }>
   | Readonly<{
       kind: "completed";
       toolCalls: readonly ProviderToolCall[];
@@ -47,6 +48,7 @@ export type ProviderRequest = Readonly<{
   modelRequestId: string;
   attemptNo: number;
   conversation: readonly ProviderConversationItem[];
+  signal?: AbortSignal;
 }>;
 
 export interface ModelProvider {

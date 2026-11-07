@@ -15,6 +15,7 @@ import type { ProviderCompletion } from "../../ports/model-provider.ts";
  */
 
 export type TransportFailureCode =
+  | "cancelled"
   | "connect_failed"
   | "tls_failed"
   | "timeout"
@@ -28,6 +29,7 @@ export type TransportFailureCode =
  * URL cannot help.
  */
 export function transportFailure(code: TransportFailureCode): ProviderCompletion {
+  if (code === "cancelled") return { kind: "cancelled", safeCode: "provider_cancelled" };
   if (code === "invalid_endpoint" || code === "request_too_large") {
     return { kind: "invalid_response", safeCode: `provider_${code}` };
   }

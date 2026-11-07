@@ -32,6 +32,7 @@ export type ProviderHttpRequest = Readonly<{
   url: string;
   headers: Readonly<Record<string, string>>;
   bodyText: string;
+  signal?: AbortSignal;
   connectTimeoutMs?: number;
   totalTimeoutMs?: number;
   maxResponseBytes?: number;
@@ -43,6 +44,7 @@ export type ProviderHttpRequest = Readonly<{
 }>;
 
 export type ProviderHttpFailure =
+  | "cancelled"
   | "connect_failed"
   | "tls_failed"
   | "timeout"
@@ -74,6 +76,7 @@ export async function providerHttpsPost(input: ProviderHttpRequest): Promise<Pro
 export async function providerHttpsGet(
   input: Omit<ProviderHttpRequest, "bodyText"> & { bodyText?: string },
 ): Promise<ProviderHttpResult> {
+  if (input.signal?.aborted) return { ok: false, code: "cancelled" };
   return providerHttpsRequest("GET", { ...input, bodyText: "" });
 }
 
@@ -110,6 +113,7 @@ async function providerHttpsRequest(
       if (settled) return;
       settled = true;
       clearTimeout(totalTimer);
+      input.signal?.removeEventListener("abort", abort);
       resolve(result);
     };
 
@@ -118,6 +122,15 @@ async function providerHttpsRequest(
       request?.destroy();
     }, totalTimeoutMs);
     totalTimer.unref?.();
+    const abort = (): void => {
+      finish({ ok: false, code: "cancelled" });
+      request?.destroy();
+    };
+    input.signal?.addEventListener("abort", abort, { once: true });
+    if (input.signal?.aborted) {
+      abort();
+      return;
+    }
 
     try {
       request = httpsRequest(
@@ -203,7 +216,8 @@ async function providerHttpsRequest(
       finish({ ok: false, code: code === "ETIMEDOUT" ? "timeout" : "connect_failed" });
     });
 
-    request.end(input.bodyText);
+    if (input.signal?.aborted) abort();
+    else request.end(input.bodyText);
   });
 }
 

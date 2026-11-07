@@ -87,6 +87,21 @@ const NEVER_SENT_SEARCH_CODES: ReadonlySet<string> = new Set([
 ]);
 
 export function createWebTools(dependencies: WebToolDependencies): ToolExecutor {
+  const snapshots = new Map<string, string>();
+  async function fetchSnapshot(request: ToolExecutionRequest): Promise<string | null> {
+    const validated = validateWebFetch(request.arguments);
+    if (!validated.ok) return null;
+    const addresses = await dependencies.resolveAddresses(validated.value.host);
+    if (addresses.length === 0) return null;
+    return JSON.stringify({
+      request: validated.value,
+      addresses: [
+        ...new Set(
+          addresses.map((address) => `${address.family}:${address.address.toLowerCase()}`),
+        ),
+      ].sort(),
+    });
+  }
   return {
     getDefinition(toolName: string): ToolDefinition | null {
       return DEFINITIONS.find((definition) => definition.name === toolName) ?? null;
@@ -107,6 +122,7 @@ export function createWebTools(dependencies: WebToolDependencies): ToolExecutor 
         ].join("\n");
       }
       if (request.toolName !== WEB_FETCH_DEFINITION.name) return null;
+      snapshots.delete(request.toolCallId);
 
       const validated = validateWebFetch(request.arguments);
       if (!validated.ok) return `web_fetch: ${validated.code}`;
@@ -117,7 +133,32 @@ export function createWebTools(dependencies: WebToolDependencies): ToolExecutor 
         return "web_fetch: dns_resolution_failed";
       }
       if (addresses.length === 0) return "web_fetch: dns_resolution_empty";
+      snapshots.set(
+        request.toolCallId,
+        JSON.stringify({
+          request: validated.value,
+          addresses: [
+            ...new Set(
+              addresses.map((address) => `${address.family}:${address.address.toLowerCase()}`),
+            ),
+          ].sort(),
+        }),
+      );
       return formatFetchPreview(validated.value, classifyAddresses(addresses));
+    },
+
+    async revalidateApproval(request) {
+      if (request.toolName !== WEB_FETCH_DEFINITION.name) return true;
+      try {
+        const current = await fetchSnapshot(request);
+        return current !== null && current === snapshots.get(request.toolCallId);
+      } catch {
+        return false;
+      }
+    },
+
+    discardApproval(toolCallId) {
+      snapshots.delete(toolCallId);
     },
 
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
@@ -125,7 +166,9 @@ export function createWebTools(dependencies: WebToolDependencies): ToolExecutor 
         return executeSearch(dependencies, request.arguments, request.toolCallId);
       }
       if (request.toolName === WEB_FETCH_DEFINITION.name) {
-        return executeFetch(dependencies, request.arguments);
+        const snapshot = snapshots.get(request.toolCallId);
+        snapshots.delete(request.toolCallId);
+        return executeFetch(dependencies, request.arguments, snapshot);
       }
       return { status: "failed", safeCode: "unknown_tool", text: null };
     },
@@ -172,6 +215,7 @@ async function executeSearch(
 async function executeFetch(
   dependencies: WebToolDependencies,
   args: unknown,
+  approvedSnapshot: string | undefined,
 ): Promise<ToolExecutionResult> {
   const validated = validateWebFetch(args);
   if (!validated.ok) return { status: "failed", safeCode: validated.code, text: null };
@@ -187,6 +231,15 @@ async function executeFetch(
   }
 
   const classified = classifyAddresses(addresses);
+  const currentSnapshot = JSON.stringify({
+    request: validated.value,
+    addresses: [
+      ...new Set(addresses.map((address) => `${address.family}:${address.address.toLowerCase()}`)),
+    ].sort(),
+  });
+  if (approvedSnapshot === undefined || approvedSnapshot !== currentSnapshot) {
+    return { status: "failed", safeCode: "fetch_approval_changed", text: null };
+  }
   const approvedSet = classified.map((entry) => entry.address);
   // The approval is bound to this address set; a change needs a new call.
   let run: WebFetchRun;

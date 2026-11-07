@@ -290,6 +290,8 @@ async function executeOutput(
     .join("");
   const header = [
     `background_output: ${page.value.segments.length} segment(s)`,
+    `taskId=${task.taskId}`,
+    `processExecutionId=${task.processExecutionId}`,
     `caughtUp=${page.value.caughtUp}`,
     `taskEnded=${page.value.taskEnded}`,
     `captureComplete=${page.value.captureComplete}`,

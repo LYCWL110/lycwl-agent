@@ -1,41 +1,30 @@
-import type { BackgroundTask, OutputRecord } from "../../domain/process/background.ts";
-import type { ShellRequest } from "../../domain/process/shell.ts";
+import {
+  BACKGROUND_LIMITS,
+  type BackgroundTask,
+  type OutputRecord,
+} from "../../domain/process/background.ts";
 import type { BackgroundToolDependencies } from "../tools/background-tools.ts";
 import type { PowerShellCapturePaths } from "./powershell-command.ts";
-import { createProcessSupervisor } from "./process-supervisor.ts";
+import {
+  type CaptureOutput,
+  createProcessSupervisor,
+  MAX_CAPTURE_BYTES,
+} from "./process-supervisor.ts";
 
-/**
- * Real background task supervision on top of the G02 process supervisor.
- *
- * A background task keeps its Job and process handles until it is stopped or
- * observed to have exited. Output is read from the supervisor's own bounded
- * capture files, so a runaway producer cannot grow unbounded memory here.
- */
 export type BackgroundRegistry = Readonly<{
   dependencies: BackgroundToolDependencies;
-  /** Task ids still holding a live process and job handle. */
   liveTaskIds: () => readonly string[];
-  /** Release every task; used on Session close and in tests. */
   disposeAll: () => void;
 }>;
-
-type StreamState = {
-  /** Bytes already captured into published records. */
-  capturedBytes: number;
-  /** Partial multi-byte character held until the next poll completes it. */
-  pending: Buffer;
-};
 
 type Entry = {
   task: BackgroundTask;
   processId: number;
-  executionId: string;
-  stdout: StreamState;
-  stderr: StreamState;
-  /** Wall-clock deadline; the task is terminated once it passes. */
   deadlineMs: number;
-  /** Set once the task is deliberately stopped; keeps the state sticky. */
-  stopped: boolean;
+  released: boolean;
+  stdoutBytes: number;
+  stderrBytes: number;
+  retainedBytes: number;
 };
 
 export function createBackgroundRegistry(
@@ -51,90 +40,85 @@ export function createBackgroundRegistry(
   const timers = new Map<string, NodeJS.Timeout>();
   let counter = 0;
 
-  function nextId(prefix: string): string {
-    counter += 1;
-    return `${prefix}-${counter}`;
+  function clearTimer(taskId: string): void {
+    const timer = timers.get(taskId);
+    if (timer !== undefined) clearInterval(timer);
+    timers.delete(taskId);
   }
 
-  function refresh(entry: Entry): BackgroundTask {
-    // Enforce the confirmed timeout at the same points the task is observed, so a
-    // task cannot run indefinitely just because nobody polls it in between.
-    if (Date.now() >= entry.deadlineMs && supervisor.isAlive(entry.processId)) {
-      // Capture whatever was produced before terminating: stopping the job
-      // removes its handles and the capture would otherwise be lost.
-      const { stdout, stderr } = supervisor.readOutput(entry.processId);
-      const partial = [
-        ...appendStream(entry, "stdout", stdout),
-        ...appendStream(entry, "stderr", stderr),
-      ];
-      entry.task = {
-        ...entry.task,
-        records: [...entry.task.records, ...partial],
-        state: "stopped",
-        timedOut: true,
-      };
-      supervisor.stop(entry.processId);
-      return { ...entry.task, exitCode: null, captureComplete: true };
+  function publish(entry: Entry, output: CaptureOutput): void {
+    const records: OutputRecord[] = [...entry.task.records];
+    let complete = entry.task.captureComplete && output.captureComplete;
+    for (const stream of ["stdout", "stderr"] as const) {
+      const bytes = Buffer.from(output[stream], "utf8");
+      const key = stream === "stdout" ? "stdoutBytes" : "stderrBytes";
+      let offset = entry[key];
+      if (bytes.length < offset) {
+        complete = false;
+        continue;
+      }
+      while (offset < bytes.length) {
+        let end = Math.min(
+          bytes.length,
+          offset + BACKGROUND_LIMITS.maxRecordBytes,
+          offset + MAX_CAPTURE_BYTES - entry.retainedBytes,
+        );
+        while (end > offset && end < bytes.length && ((bytes[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+        if (end === offset) {
+          complete = false;
+          break;
+        }
+        const length = end - offset;
+        records.push({
+          recordIndex: records.length,
+          stream,
+          streamByteStart: offset,
+          byteLength: length,
+          text: bytes.subarray(offset, end).toString("utf8"),
+        });
+        entry.retainedBytes += length;
+        offset = end;
+      }
+      entry[key] = offset;
     }
+    entry.task = { ...entry.task, records, captureComplete: complete };
+  }
 
+  function release(entry: Entry): CaptureOutput {
+    try {
+      const output = supervisor.stop(entry.processId);
+      entry.released = true;
+      clearTimer(entry.task.taskId);
+      return output;
+    } catch (error) {
+      entry.task = { ...entry.task, state: "unknown", captureComplete: false };
+      clearTimer(entry.task.taskId);
+      throw error;
+    }
+  }
+
+  function refresh(entry: Entry, stopRequested = false): BackgroundTask {
+    if (entry.released) return entry.task;
     const alive = supervisor.isAlive(entry.processId);
     const exitCode = supervisor.exitCodeOf(entry.processId);
-    const { stdout, stderr } = supervisor.readOutput(entry.processId);
-
-    // Append only bytes that have not been published yet. Record indices and
-    // stream byte offsets are stable, so a returned cursor keeps meaning.
-    const newRecords = [
-      ...appendStream(entry, "stdout", stdout),
-      ...appendStream(entry, "stderr", stderr),
-    ];
-
-    return {
-      ...entry.task,
-      state: entry.stopped || entry.task.timedOut ? "stopped" : alive ? "running" : "exited",
-      exitCode,
-      records: [...entry.task.records, ...newRecords],
-      captureComplete: true,
-      timedOut: entry.task.timedOut,
-    };
-  }
-
-  /**
-   * Publish the new tail of one stream as an immutable record.
-   *
-   * The supervisor's capture read returns the whole file each time, so this
-   * slices from the already-published byte count. A trailing incomplete UTF-8
-   * sequence is held back rather than emitted as a replacement character.
-   */
-  function appendStream(
-    entry: Entry,
-    stream: "stdout" | "stderr",
-    text: string,
-  ): readonly OutputRecord[] {
-    const state = stream === "stdout" ? entry.stdout : entry.stderr;
-    const full = Buffer.concat([state.pending, Buffer.from(text, "utf8")]);
-    const alreadyPublished = state.capturedBytes - state.pending.length;
-    if (full.length <= alreadyPublished) return [];
-
-    const fresh = full.subarray(alreadyPublished);
-    const usable = trimIncompleteUtf8(fresh);
-    if (usable.length === 0) {
-      state.pending = fresh;
-      state.capturedBytes = alreadyPublished + fresh.length;
-      return [];
+    const output = supervisor.readOutput(entry.processId);
+    const timedOut = alive && Date.now() >= entry.deadlineMs;
+    const limited = output.outputLimitExceeded || !output.captureComplete;
+    if (!alive || timedOut || limited || stopRequested) {
+      // Read once more after termination, before deleting capture files.
+      const final = release(entry);
+      publish(entry, final);
+      entry.task = {
+        ...entry.task,
+        state: alive ? "stopped" : "exited",
+        exitCode: alive ? null : exitCode,
+        timedOut,
+        captureComplete: entry.task.captureComplete && !limited && !final.outputLimitExceeded,
+      };
+    } else {
+      publish(entry, output);
     }
-
-    state.pending = fresh.subarray(usable.length);
-    state.capturedBytes = alreadyPublished + fresh.length;
-
-    return [
-      {
-        recordIndex: entry.task.records.length,
-        stream,
-        streamByteStart: alreadyPublished,
-        byteLength: usable.length,
-        text: usable.toString("utf8"),
-      },
-    ];
+    return entry.task;
   }
 
   const dependencies: BackgroundToolDependencies = {
@@ -143,10 +127,9 @@ export function createBackgroundRegistry(
     ...(options.providerCredentialNames === undefined
       ? {}
       : { providerCredentialNames: options.providerCredentialNames }),
-
-    async startProcess(request: ShellRequest, environment, label, toolCallId) {
-      const taskId = nextId("task");
-      const executionId = nextId("exec");
+    async startProcess(request, environment, label, toolCallId) {
+      const taskId = `task-${++counter}`;
+      const executionId = `exec-${++counter}`;
       const capturePaths = options.captureFor?.(toolCallId);
       const start = supervisor.start({
         command: request.command,
@@ -156,7 +139,6 @@ export function createBackgroundRegistry(
         ...(capturePaths === undefined ? {} : { capturePaths }),
       });
       if (!start.ok) return { kind: "unknown", safeCode: start.code };
-
       const task: BackgroundTask = {
         taskId,
         processExecutionId: executionId,
@@ -167,111 +149,54 @@ export function createBackgroundRegistry(
         captureComplete: true,
         timedOut: false,
       };
-      entries.set(taskId, {
+      const entry: Entry = {
         task,
         processId: start.handle.processId,
-        executionId,
         deadlineMs: Date.now() + request.timeoutMs,
-        stopped: false,
-        stdout: { capturedBytes: 0, pending: Buffer.alloc(0) },
-        stderr: { capturedBytes: 0, pending: Buffer.alloc(0) },
-      });
-
-      // Enforce the deadline even when nobody polls: a runaway background task
-      // must not outlive its approved timeout.
-      const timer = setTimeout(() => {
-        const entry = entries.get(taskId);
-        if (entry === undefined) return;
-        if (!supervisor.isAlive(entry.processId)) return;
-        const { stdout, stderr } = supervisor.readOutput(entry.processId);
-        const partial = [
-          ...appendStream(entry, "stdout", stdout),
-          ...appendStream(entry, "stderr", stderr),
-        ];
-        entry.task = {
-          ...entry.task,
-          records: [...entry.task.records, ...partial],
-          state: "stopped",
-          timedOut: true,
-        };
-        supervisor.stop(entry.processId);
-        timers.delete(taskId);
-      }, request.timeoutMs);
-      timer.unref?.();
+        released: false,
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        retainedBytes: 0,
+      };
+      entries.set(taskId, entry);
+      // Observe exit and output growth even if the model never polls the task.
+      const timer = setInterval(() => {
+        try {
+          refresh(entry);
+        } catch {
+          entry.task = { ...entry.task, state: "unknown", captureComplete: false };
+          clearTimer(taskId);
+        }
+      }, 50);
+      timer.unref();
       timers.set(taskId, timer);
-
       return { kind: "started", task };
     },
-
-    async getTask(taskId: string): Promise<BackgroundTask | null> {
+    async getTask(taskId) {
       const entry = entries.get(taskId);
-      if (entry === undefined) return null;
-      const refreshed = refresh(entry);
-      entry.task = refreshed;
-      return refreshed;
+      return entry === undefined ? null : refresh(entry);
     },
-
-    async stopTask(taskId: string): Promise<void> {
+    async stopTask(taskId) {
       const entry = entries.get(taskId);
-      if (entry === undefined) return;
-      clearTimer(taskId);
-
-      // Capture output before stopping: the handles are released on stop.
-      const { stdout, stderr } = supervisor.readOutput(entry.processId);
-      const partial = [
-        ...appendStream(entry, "stdout", stdout),
-        ...appendStream(entry, "stderr", stderr),
-      ];
-      supervisor.stop(entry.processId);
-      entry.stopped = true;
-      entry.task = {
-        ...entry.task,
-        records: [...entry.task.records, ...partial],
-        state: "stopped",
-        exitCode: null,
-        timedOut: false,
-        captureComplete: true,
-      };
+      if (entry !== undefined) refresh(entry, true);
     },
   };
-
-  function clearTimer(taskId: string): void {
-    const timer = timers.get(taskId);
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      timers.delete(taskId);
-    }
-  }
 
   return {
     dependencies,
-    liveTaskIds: () => [...entries.keys()],
+    liveTaskIds: () => [...entries].filter(([, entry]) => !entry.released).map(([id]) => id),
     disposeAll: () => {
-      for (const taskId of [...timers.keys()]) clearTimer(taskId);
-      for (const entry of entries.values()) supervisor.stop(entry.processId);
+      let failed = false;
+      for (const entry of entries.values()) {
+        try {
+          refresh(entry, true);
+        } catch {
+          failed = true;
+        }
+      }
+      if (failed) throw new Error("background_cleanup_unconfirmed");
+      for (const taskId of timers.keys()) clearTimer(taskId);
       entries.clear();
     },
   };
-}
-
-/**
- * Number of leading bytes that form complete UTF-8 sequences. A trailing
- * partial sequence is excluded so it can be completed on the next poll instead
- * of being emitted as a replacement character.
- */
-function trimIncompleteUtf8(bytes: Buffer): Buffer {
-  if (bytes.length === 0) return bytes;
-
-  // Find the last lead byte and check whether its sequence is complete.
-  let index = bytes.length - 1;
-  while (index >= 0 && (bytes[index] ?? 0) & 0xc0) {
-    if (((bytes[index] ?? 0) & 0xc0) === 0xc0) break;
-    index -= 1;
-  }
-  // `index` now points at a lead byte or a 1-byte ASCII character.
-  const lead = bytes[index] ?? 0;
-  const needed =
-    (lead & 0x80) === 0 ? 1 : (lead & 0xe0) === 0xc0 ? 2 : (lead & 0xf0) === 0xe0 ? 3 : 4;
-  const available = bytes.length - index;
-  return available < needed ? bytes.subarray(0, index) : bytes;
 }

@@ -53,6 +53,7 @@ import {
   prepareCompaction,
   validateArtifact,
 } from "./compaction-service.ts";
+import { retainRecentGroups } from "./conversation-rebuild.ts";
 import type { EventInput, EventLog } from "./event-log.ts";
 import type { InternalEvent } from "./internal-events.ts";
 import { completeWithBoundedRetries } from "./model-attempts.ts";
@@ -138,6 +139,8 @@ export type CoordinatorDependencies = Readonly<{
    * budgeting or compaction happens.
    */
   contextBudget?: ContextBudget;
+  /** A known history/capacity failure must stop before contacting the Provider. */
+  preflightFailure?: "protocol_history_incompatible" | "context_capacity_insufficient";
   /**
    * Fixed Session identity. When present, every Run this coordinator starts
    * appends to the same Session event log, so a restart can replay the history.
@@ -362,6 +365,20 @@ export class RuntimeCoordinator {
     context.pendingQuestion?.resolve();
     await this.#deps.tools.cancelAll?.();
     return { ok: true, duplicate: false };
+  }
+
+  /** Session resources outlive completed Runs, but never a closed Session. */
+  async closeSession(commandId: string): Promise<void> {
+    const context = this.#activeContext;
+    const cancelled = await this.cancelRun(commandId);
+    if (!cancelled.ok) await this.#deps.tools.cancelAll?.();
+    else if (
+      context?.run.state === "waiting" &&
+      (context.run.reason === "configuration" || context.run.reason === "recovery_review")
+    ) {
+      await this.#cancel(context);
+      this.#activeContext = null;
+    }
   }
 
   /**
@@ -612,7 +629,10 @@ export class RuntimeCoordinator {
       throw error;
     }
 
-    const result = await this.#loop(context);
+    const result =
+      this.#deps.preflightFailure === undefined
+        ? await this.#loop(context)
+        : await this.#fail(context, this.#deps.preflightFailure);
     if (context.run.state !== "waiting") this.#activeContext = null;
     return result;
   }
@@ -687,8 +707,8 @@ export class RuntimeCoordinator {
         context.cancelledDuring = "model_request";
         const completion = await this.#completeWithRetries(context, modelRequestId);
         context.cancelledDuring = null;
-        if (context.cancelRequested) return this.#cancel(context);
         if (completion.kind === "terminal") return completion.result;
+        if (context.cancelRequested) return this.#cancel(context);
         if (completion.kind === "waiting") return completion.result;
         if (completion.kind === "failed") return completion.result;
         await this.#deps.refreshOwnedKeys?.();
@@ -709,6 +729,7 @@ export class RuntimeCoordinator {
           attemptNo: completion.attemptNo,
           toolCallCount: completion.toolCalls.length,
           text: guardedCompletionText,
+          toolCalls: completion.toolCalls,
         });
 
         // Section 8: the assistant turn belongs in the history. Without it the
@@ -748,6 +769,7 @@ export class RuntimeCoordinator {
             await this.#record(context, "tool_call_cancelled", {
               kind: "tool_call_cancelled",
               toolCallId: this.#deps.ids.create(),
+              providerToolCallId: call.providerToolCallId,
               toolName: call.toolName,
               reason: "user_input_superseded",
             });
@@ -782,6 +804,7 @@ export class RuntimeCoordinator {
               await this.#record(context, "tool_call_cancelled", {
                 kind: "tool_call_cancelled",
                 toolCallId: this.#deps.ids.create(),
+                providerToolCallId: remaining.providerToolCallId,
                 toolName: remaining.toolName,
                 reason: "sibling_stopped",
               });
@@ -857,6 +880,7 @@ export class RuntimeCoordinator {
       {
         provider: this.#deps.provider,
         sleep: this.#deps.sleep ?? sleep,
+        signal: context.abortController.signal,
         ...(this.#deps.resolveCredentialRevision === undefined
           ? {}
           : { resolveCredentialRevision: this.#deps.resolveCredentialRevision }),
@@ -906,6 +930,9 @@ export class RuntimeCoordinator {
       overrideConversation ?? context.conversation,
     );
 
+    if (outcome.kind === "cancelled" || context.cancelRequested) {
+      return { kind: "terminal", result: await this.#cancel(context) };
+    }
     if (outcome.kind === "completed") return outcome;
     if (outcome.kind === "authentication_failure") {
       const waitToken = this.#deps.ids.create();
@@ -1107,6 +1134,9 @@ export class RuntimeCoordinator {
         { kind: "user", text: prepared.value.prompt },
       ]);
       if (auxiliary.kind !== "completed") {
+        if (context.cancelRequested || auxiliary.kind === "terminal") {
+          return { kind: "stop", result: auxiliary.result };
+        }
         await this.#record(context, "context_compaction_rejected", {
           kind: "context_compaction_rejected",
           reason: "invalid_artifact",
@@ -1152,7 +1182,7 @@ export class RuntimeCoordinator {
       }
 
       // Publish: replace the summarised prefix with the artifact as a sourced turn.
-      const recent = context.conversation.slice(-planned.recentSuffixGroupIds.length);
+      const recent = retainRecentGroups(context.conversation, planned.recentSuffixGroupIds.length);
       const artifactText = renderArtifact(validated.artifact);
       context.conversation = [
         { kind: "user", text: artifactText },
@@ -1604,6 +1634,8 @@ export class RuntimeCoordinator {
   }
 
   async #cancel(context: MutableRunContext): Promise<CoordinatorResult> {
+    if (context.run.state === "cancelled")
+      return this.#result(context, "cancelled", null, "run_cancelled");
     const outstanding = new Map<string, ProviderToolCall>();
     for (const item of context.conversation) {
       if (item.kind === "assistant")
@@ -1626,12 +1658,36 @@ export class RuntimeCoordinator {
       await this.#record(context, "tool_call_cancelled", {
         kind: "tool_call_cancelled",
         toolCallId: payload.toolCallId,
+        providerToolCallId: payload.providerToolCallId,
         toolName: payload.toolName,
         reason: "run_cancelled",
       });
     }
-    for (const call of outstanding.values())
+    const cancelledCalls = new Set(
+      context.events
+        .slice(
+          context.events.findLastIndex(
+            ({ payload }) => payload.kind === "model_response_validated",
+          ),
+        )
+        .flatMap(({ payload }) =>
+          payload.kind === "tool_call_cancelled" && payload.providerToolCallId !== undefined
+            ? [payload.providerToolCallId]
+            : [],
+        ),
+    );
+    for (const call of outstanding.values()) {
+      if (!cancelledCalls.has(call.providerToolCallId)) {
+        await this.#record(context, "tool_call_cancelled", {
+          kind: "tool_call_cancelled",
+          toolCallId: this.#deps.ids.create(),
+          providerToolCallId: call.providerToolCallId,
+          toolName: call.toolName,
+          reason: "run_cancelled",
+        });
+      }
       this.#appendToolResult(context, call, "cancelled", "not_attempted: run cancelled");
+    }
     const finished = finishRun(context.run, "cancelled");
     if (!finished.ok) return this.#fail(context, finished.code);
     context.run = finished.value;
@@ -1706,9 +1762,16 @@ export class RuntimeCoordinator {
   }
 }
 
-function sleep(delayMs: number): Promise<void> {
+function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    setTimeout(resolve, delayMs);
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, delayMs);
+    signal?.addEventListener("abort", finish, { once: true });
+    if (signal?.aborted) finish();
   });
 }
 

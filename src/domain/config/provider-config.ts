@@ -168,7 +168,7 @@ export function validateProviderConfig(input: {
   // guessing one would produce a budget the model does not actually have.
   const rawWindow = input.contextWindow;
   let contextWindow: number | null = null;
-  if (rawWindow !== undefined) {
+  if (rawWindow !== undefined && rawWindow !== null) {
     if (
       typeof rawWindow !== "number" ||
       !Number.isSafeInteger(rawWindow) ||
@@ -229,6 +229,7 @@ export function readProviderConfig(settings: unknown): ProviderConfigResult {
     model: record["model"],
     credentialRef: record["credentialRef"],
     maxOutputTokens: record["maxOutputTokens"],
+    contextWindow: record["contextWindow"],
     reasoningEffort: record["reasoningEffort"],
   });
 }

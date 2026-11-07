@@ -169,25 +169,23 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   const checkpoints = new JsonlCheckpointStore(sessionRoot, digests);
 
   // Rebuild prior conversation so a resumed Session continues with its history.
-  // A rebuild failure is reported and the Run starts fresh rather than guessing at
-  // a repaired history.
+  // A rebuild failure blocks sending; it must not silently start fresh.
   const prior = await rebuildPriorConversation(eventLog, options.sessionId);
 
-  // Compute the C04 budget only from a verified window. A capacity failure leaves
-  // budgeting off rather than substituting a guess.
+  // Unknown capacity is distinct from a known window that cannot fit the prompt.
   const computed = computeContextBudget({
     window: assembly.config.contextWindow,
     modelMaxOutput: assembly.config.maxOutputTokens,
     userMaxOutput: assembly.config.maxOutputTokens,
     // The fixed part is the guidance block plus the tool schemas; both are sent
     // every request and are not reducible by summarisation.
-    fixed: conservativeEstimate(estimateFixedTokens(guidance.block, toolDefinitions)),
+    fixed: conservativeEstimate(estimateFixedTokens(contextBlock, toolDefinitions)),
   });
   const contextBudget = computed.ok ? computed.value : null;
   const budgetWarning =
     computed.ok || computed.code === "model_context_unknown"
       ? null
-      : `context budgeting disabled (${computed.code})`;
+      : `model requests blocked (${computed.code})`;
 
   return {
     kind: "real",
@@ -212,6 +210,11 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
       checkpoints,
       ids,
       nowUtc: () => new Date().toISOString(),
+      ...(prior.summary.kind === "failed"
+        ? { preflightFailure: "protocol_history_incompatible" as const }
+        : !computed.ok && computed.code !== "model_context_unknown"
+          ? { preflightFailure: "context_capacity_insufficient" as const }
+          : {}),
       suspendOnApproval: true,
       ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
       ...(prior.conversation.length === 0 ? {} : { priorConversation: prior.conversation }),
@@ -331,10 +334,14 @@ async function loadGuidance(
 /** Estimated tokens of the parts sent on every request and never summarised. */
 function estimateFixedTokens(
   guidanceBlock: string,
-  tools: readonly Readonly<{ description: string }>[],
+  tools: readonly Readonly<{
+    name: string;
+    description: string;
+    inputSchema: Readonly<Record<string, unknown>>;
+  }>[],
 ): number {
   let total = Math.ceil(guidanceBlock.length / 4);
-  for (const tool of tools) total += Math.ceil(tool.description.length / 4) + 50;
+  for (const tool of tools) total += Math.ceil(JSON.stringify(tool).length / 4) + 50;
   return total;
 }
 

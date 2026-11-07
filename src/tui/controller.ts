@@ -24,6 +24,7 @@ export type TuiController = Readonly<{
   answer: (text: string) => Promise<void>;
   declineQuestion: () => Promise<void>;
   cancelRun: () => Promise<void>;
+  close: () => Promise<void>;
   lastResult: () => CoordinatorResult | null;
   /**
    * True once when the user asked to open the provider browser. The caller
@@ -50,6 +51,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   let answerError: string | null = null;
   /** Set when the composer asked to open the provider browser. */
   let configRequested = false;
+  let closing: Promise<void> | null = null;
 
   function rememberEvents(incoming: readonly InternalEvent[]): readonly InternalEvent[] {
     const known = new Set(events.map((event) => event.eventId));
@@ -93,6 +95,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   }
 
   async function submit(text: string): Promise<void> {
+    if (closing !== null) return;
     const intent = interpretComposer(view(), text);
     draft = "";
     if (intent.kind === "reject" || intent.kind === "withdraw") return;
@@ -182,6 +185,20 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     await settleActiveRun();
   }
 
+  function close(): Promise<void> {
+    if (closing === null) {
+      commandCounter += 1;
+      closing = (async () => {
+        try {
+          await deps.coordinator.closeSession(`tui-close-${commandCounter}`);
+        } finally {
+          await settleActiveRun();
+        }
+      })();
+    }
+    return closing;
+  }
+
   return {
     view,
     submit,
@@ -190,6 +207,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     answer,
     declineQuestion,
     cancelRun,
+    close,
     lastResult: () => lastResult,
     /** Consume a pending open-config request, if any. */
     takeConfigRequest: () => {

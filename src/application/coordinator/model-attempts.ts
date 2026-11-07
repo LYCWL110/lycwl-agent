@@ -6,6 +6,7 @@ import type {
 } from "../../ports/model-provider.ts";
 
 export type ModelAttemptOutcome =
+  | Readonly<{ kind: "cancelled"; safeCode: string }>
   | Readonly<{
       kind: "completed";
       attemptNo: number;
@@ -18,7 +19,8 @@ export type ModelAttemptOutcome =
 
 export type ModelAttemptDependencies = Readonly<{
   provider: ModelProvider;
-  sleep: (delayMs: number) => Promise<void>;
+  sleep: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+  signal?: AbortSignal;
   onRequestStarted: (
     modelRequestId: string,
     attemptNo: number,
@@ -50,6 +52,7 @@ export async function completeWithBoundedRetries(
   conversation: readonly ProviderConversationItem[],
 ): Promise<ModelAttemptOutcome> {
   for (let attemptNo = 1; attemptNo <= MAX_TRANSIENT_RETRIES + 1; attemptNo += 1) {
+    if (dependencies.signal?.aborted) return cancelled();
     const request = beginModelRequest(modelRequestId, attemptNo);
     if (!request.ok) {
       return { kind: "invalid_response", safeCode: request.code };
@@ -65,23 +68,31 @@ export async function completeWithBoundedRetries(
         return { kind: "invalid_response", safeCode: "credential_binding_failed" };
       }
     }
+    if (dependencies.signal?.aborted) return cancelled();
     const started = await dependencies.onRequestStarted(
       modelRequestId,
       attemptNo,
       credentialRevision,
     );
+    if (dependencies.signal?.aborted) return cancelled();
     if (!started.ok) {
       // A refused pre-send check is not a transient failure: nothing was sent.
       return { kind: "invalid_response", safeCode: started.safeCode };
     }
-    const completion = await dependencies.provider.complete({
-      modelRequestId,
-      attemptNo,
-      // Snapshot the conversation: the Run keeps appending to its own array, and a
-      // provider that held the live reference would observe later turns inside a
-      // request it already sent. A retry must also see exactly what was sent.
-      conversation: [...conversation],
-    });
+    const completion = await untilAborted(
+      dependencies.provider.complete({
+        modelRequestId,
+        attemptNo,
+        // Snapshot the conversation: the Run keeps appending to its own array, and a
+        // provider that held the live reference would observe later turns inside a
+        // request it already sent. A retry must also see exactly what was sent.
+        conversation: [...conversation],
+        ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
+      }),
+      dependencies.signal,
+    );
+    if (completion === null || dependencies.signal?.aborted) return cancelled();
+    if (completion.kind === "cancelled") return completion;
 
     if (completion.kind === "completed") {
       return {
@@ -109,8 +120,41 @@ export async function completeWithBoundedRetries(
       retryAfterMs,
       safeCode: completion.safeCode,
     });
-    if (retryAfterMs > 0) await dependencies.sleep(retryAfterMs);
+    if (dependencies.signal?.aborted) return cancelled();
+    if (retryAfterMs > 0) {
+      await untilAborted(
+        dependencies.sleep(retryAfterMs, dependencies.signal),
+        dependencies.signal,
+      );
+    }
   }
 
   return { kind: "invalid_response", safeCode: "attempt_limit" };
+}
+
+function cancelled(): ModelAttemptOutcome {
+  return { kind: "cancelled", safeCode: "model_request_cancelled" };
+}
+
+/** Late completions from adapters that ignore the signal cannot resume the Run. */
+async function untilAborted<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T | null> {
+  if (signal === undefined) return operation;
+  return new Promise((resolve, reject) => {
+    const abort = (): void => {
+      signal.removeEventListener("abort", abort);
+      resolve(null);
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    operation.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
 }

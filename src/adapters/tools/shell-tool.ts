@@ -18,8 +18,21 @@ export const SHELL_RAW_CAP_BYTES = 8 * 1024 * 1024;
 export const SHELL_MODEL_CAP_UNITS = 20_000;
 
 export type ShellRunOutcome =
-  | Readonly<{ kind: "completed"; exitCode: number; stdout: string; stderr: string }>
-  | Readonly<{ kind: "timed_out"; stdout: string; stderr: string }>
+  | Readonly<{
+      kind: "completed";
+      exitCode: number;
+      stdout: string;
+      stderr: string;
+      rawBytes?: number;
+      captureComplete?: boolean;
+    }>
+  | Readonly<{
+      kind: "timed_out";
+      stdout: string;
+      stderr: string;
+      rawBytes?: number;
+      captureComplete?: boolean;
+    }>
   | Readonly<{ kind: "unknown"; safeCode: string }>;
 
 export type ShellToolDependencies = Readonly<{
@@ -112,13 +125,15 @@ export function createShellTool(dependencies: ShellToolDependencies): ToolExecut
         return { status: "outcome_unknown", safeCode: outcome.safeCode };
       }
 
-      const combined = outcome.stdout.length + outcome.stderr.length;
-      if (combined > SHELL_RAW_CAP_BYTES) {
+      const combined =
+        outcome.rawBytes ??
+        Buffer.byteLength(outcome.stdout, "utf8") + Buffer.byteLength(outcome.stderr, "utf8");
+      if (combined > SHELL_RAW_CAP_BYTES || outcome.captureComplete === false) {
         // Evidence is incomplete; never claim the full output was captured.
         return {
           status: "failed",
-          safeCode: "output_limit_exceeded",
-          text: truncateForModel(outcome.stdout, outcome.stderr),
+          safeCode: combined > SHELL_RAW_CAP_BYTES ? "output_limit_exceeded" : "capture_incomplete",
+          text: `${truncateForModel(outcome.stdout, outcome.stderr)}\n[capture incomplete; command effects are not rolled back]`,
         };
       }
 

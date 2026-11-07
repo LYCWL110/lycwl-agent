@@ -1,216 +1,194 @@
-import type { ProviderConversationItem } from "../../ports/model-provider.ts";
+import { validateNeutralHistory } from "../../domain/model-request/neutral-history.ts";
+import type { ProviderConversationItem, ProviderToolCall } from "../../ports/model-provider.ts";
 import type { InternalEvent } from "./internal-events.ts";
-
-/**
- * Rebuild a conversation from a Session's authoritative events.
- *
- * ADR-0054 recorded that persistence stored the record but a restart did not
- * reconstruct context, so "continuing a Session" meant only that the log survived.
- * This turns the log back into the neutral conversation the model needs.
- *
- * What can and cannot be recovered is a property of what the events carry:
- *
- * - user task text: recorded on `run_started`;
- * - assistant text: recorded on `model_response_validated`;
- * - tool calls: recorded on `tool_call_received`, including their arguments;
- * - tool results: recorded on `tool_execution_finished` with the delivered text.
- *
- * Anything the events do not carry is omitted rather than invented. A tool call
- * whose result was never recorded stays open, which is the honest state: the
- * conversation is then rejected by `validateNeutralHistory` rather than silently
- * repaired.
- */
 
 export type RebuildResult =
   | Readonly<{ ok: true; conversation: readonly ProviderConversationItem[]; runs: number }>
   | Readonly<{ ok: false; code: "unpaired_tool_call"; detail: string }>;
 
 /**
- * Rebuild the conversation for one Session.
- *
- * Only terminal Runs contribute. A Run that was still active or waiting when the
- * process stopped is skipped: its assistant turn may have no recorded response, and
- * inventing one would fabricate history.
+ * Replay terminal Runs in event order. Each validated response owns its calls;
+ * unfinished Runs are discarded as a unit, including their compaction changes.
  */
 export function rebuildConversation(events: readonly InternalEvent[]): RebuildResult {
-  const conversation: ProviderConversationItem[] = [];
+  let conversation: ProviderConversationItem[] = [];
+  let working: ProviderConversationItem[] | null = null;
+  let runId: string | null = null;
   let runs = 0;
+  let turn: { text: string | null; toolCalls: ProviderToolCall[]; kind: "assistant" } | null = null;
+  const expected = new Map<ProviderConversationItem, number>();
+  const internalCalls = new Map<string, ProviderToolCall>();
+  const openCalls = new Map<string, ProviderToolCall>();
+  const queued = new Map<string, string>();
+  const pendingInputs: string[] = [];
+  let invalid: string | null = null;
 
-  // Per-Run accumulation, flushed when the Run reaches a terminal event.
-  let pendingUser: string | null = null;
-  let assistantText: string | null = null;
-  let assistantSeen = false;
-  const calls: {
-    toolCallId: string;
-    providerToolCallId: string;
-    toolName: string;
-    arguments: unknown;
-  }[] = [];
-  /** Text of the assistant turn that issued the calls; later turns must not overwrite it. */
-  let callingTurnText: string | null = null;
-  let callingTurnSeen = false;
-  const results = new Map<
-    string,
-    {
-      status: "succeeded" | "failed" | "denied" | "cancelled" | "outcome_unknown";
-      text: string | null;
-      toolName: string | null;
+  const fail = (detail: string): RebuildResult => ({
+    ok: false,
+    code: "unpaired_tool_call",
+    detail,
+  });
+  const appendInputs = (): void => {
+    if (working === null || openCalls.size > 0) return;
+    for (const text of pendingInputs) working.push({ kind: "user", text });
+    pendingInputs.length = 0;
+  };
+  const finishCall = (
+    call: ProviderToolCall | undefined,
+    status: Extract<ProviderConversationItem, { kind: "tool_result" }>["status"],
+    text: string | null,
+  ): void => {
+    if (working === null || call === undefined || !openCalls.delete(call.providerToolCallId)) {
+      invalid = "tool result has no matching open call";
+      return;
     }
-  >();
-  let runTerminal = false;
-  /**
-   * Summary text applied by a compaction in this Run, or null. When set, the
-   * turns that preceded it are replaced by this summary: replaying them would
-   * undo the compaction the Run actually performed.
-   */
-  let compactionSummary: string | null = null;
-
-  const flush = (): void => {
-    if (!runTerminal) return;
-    if (compactionSummary !== null) {
-      // A compacted Run contributes its summary and its post-compaction turns.
-      conversation.push({ kind: "user", text: compactionSummary });
-    } else if (pendingUser !== null) {
-      conversation.push({ kind: "user", text: pendingUser });
-    }
-
-    if (assistantSeen) {
-      conversation.push({
-        kind: "assistant",
-        // The turn that issued the calls is the one this group represents; a
-        // later assistant message belongs to the following turn.
-        text: callingTurnSeen ? callingTurnText : assistantText,
-        toolCalls: calls.map((call) => ({
-          providerToolCallId: call.providerToolCallId,
-          toolName: call.toolName,
-          arguments: call.arguments,
-        })),
-      });
-    }
-
-    for (const call of calls) {
-      const result = results.get(call.toolCallId);
-      if (result === undefined) continue;
-      conversation.push({
-        kind: "tool_result",
-        providerToolCallId: call.providerToolCallId,
-        toolName: result.toolName ?? call.toolName,
-        status: result.status,
-        text: result.text,
-      });
-    }
-
-    runs += 1;
-    pendingUser = null;
-    compactionSummary = null;
-    assistantText = null;
-    assistantSeen = false;
-    callingTurnText = null;
-    callingTurnSeen = false;
-    calls.length = 0;
-    results.clear();
-    runTerminal = false;
+    working.push({
+      kind: "tool_result",
+      providerToolCallId: call.providerToolCallId,
+      toolName: call.toolName,
+      status,
+      text,
+    });
+    appendInputs();
   };
 
   for (const event of events) {
-    switch (event.payload.kind) {
-      case "run_started":
-        // A new Run begins: flush whatever the previous one accumulated.
-        flush();
-        pendingUser = event.payload.input;
-        break;
+    const payload = event.payload;
+    if (payload.kind === "run_started") {
+      working = [...conversation, { kind: "user", text: payload.input }];
+      runId = event.runId;
+      turn = null;
+      expected.clear();
+      internalCalls.clear();
+      openCalls.clear();
+      queued.clear();
+      pendingInputs.length = 0;
+      invalid = null;
+      continue;
+    }
+    if (working === null || event.runId !== runId) continue;
+    switch (payload.kind) {
       case "model_response_validated":
-        assistantText = event.payload.text;
-        assistantSeen = true;
-        // The first validated response of a Run is the one whose calls are
-        // dispatched; a later response is the follow-up turn and must not
-        // overwrite this group's text.
-        if (!callingTurnSeen) {
-          callingTurnText = event.payload.text;
-          callingTurnSeen = true;
+        appendInputs();
+        turn = { kind: "assistant", text: payload.text, toolCalls: [...(payload.toolCalls ?? [])] };
+        working.push(turn);
+        expected.set(turn, payload.toolCallCount);
+        for (const call of turn.toolCalls) {
+          if (openCalls.has(call.providerToolCallId)) invalid = "duplicate open call";
+          openCalls.set(call.providerToolCallId, call);
         }
         break;
-      case "tool_call_received":
-        calls.push({
-          toolCallId: event.payload.toolCallId,
-          providerToolCallId: event.payload.providerToolCallId,
-          toolName: event.payload.toolName,
-          arguments: event.payload.arguments,
-        });
+      case "tool_call_received": {
+        if (turn === null) {
+          invalid = "tool call has no response";
+          break;
+        }
+        let call = turn.toolCalls.find(
+          (entry) => entry.providerToolCallId === payload.providerToolCallId,
+        );
+        if (call === undefined) {
+          // Older logs carry calls only on the received event.
+          call = {
+            providerToolCallId: payload.providerToolCallId,
+            toolName: payload.toolName,
+            arguments: payload.arguments,
+          };
+          turn.toolCalls.push(call);
+          openCalls.set(call.providerToolCallId, call);
+        }
+        internalCalls.set(payload.toolCallId, call);
         break;
+      }
       case "tool_execution_finished":
-        results.set(event.payload.toolCallId, {
-          status: event.payload.status,
-          text: event.payload.text,
-          toolName: event.payload.toolName ?? null,
-        });
+        finishCall(internalCalls.get(payload.toolCallId), payload.status, payload.text);
         break;
       case "tool_execution_denied":
-        results.set(event.payload.toolCallId, {
-          status: "denied",
-          text: null,
-          toolName: event.payload.toolName,
-        });
+        finishCall(internalCalls.get(payload.toolCallId), "denied", null);
         break;
       case "tool_call_cancelled":
-        results.set(event.payload.toolCallId, {
-          status: "cancelled",
-          text: null,
-          toolName: event.payload.toolName,
-        });
+        finishCall(
+          internalCalls.get(payload.toolCallId) ??
+            (payload.providerToolCallId === undefined
+              ? undefined
+              : openCalls.get(payload.providerToolCallId)),
+          "cancelled",
+          null,
+        );
         break;
-      case "context_compacted":
-        // The Run replaced its earlier turns with this summary. Rebuilding the
-        // originals would present a history the model no longer holds.
-        compactionSummary = event.payload.summaryText;
+      case "run_input_queued":
+        queued.set(payload.inputId, payload.text);
         break;
+      case "run_input_withdrawn":
+        queued.delete(payload.inputId);
+        break;
+      case "run_input_batch_consumed":
+        for (const id of payload.inputIds) {
+          const text = queued.get(id);
+          if (text === undefined) invalid = "consumed input has no queued source";
+          else pendingInputs.push(text);
+          queued.delete(id);
+        }
+        // Cancellation events can follow consumption in the durable log. Keep
+        // user text after the call/result group, matching the live conversation.
+        appendInputs();
+        break;
+      case "context_compacted": {
+        const valid = validateNeutralHistory(
+          working.map((item, index) => ({ ...item, sourceId: `replay-${index}` })),
+        );
+        if (!valid.ok) invalid = valid.detail;
+        const recent = retainRecentGroups(working, payload.recentSuffixGroupIds.length);
+        working = [{ kind: "user", text: payload.summaryText }, ...recent];
+        turn = null;
+        break;
+      }
       case "run_completed":
       case "run_failed":
-      case "run_cancelled":
-        runTerminal = true;
-        flush();
+      case "run_cancelled": {
+        appendInputs();
+        for (const [item, count] of expected) {
+          if (item.kind === "assistant" && item.toolCalls.length !== count) {
+            invalid = "recorded response is missing tool calls";
+          }
+        }
+        const valid = validateNeutralHistory(
+          working.map((item, index) => ({ ...item, sourceId: `replay-${index}` })),
+        );
+        if (invalid !== null) return fail(invalid);
+        if (!valid.ok) return fail(valid.detail);
+        conversation = working;
+        working = null;
+        runs += 1;
         break;
+      }
       default:
         break;
     }
   }
-
-  // An unfinished Run is dropped, not guessed at.
-  const dangling = calls.find((call) => !results.has(call.toolCallId));
-  if (dangling !== undefined && runTerminal) {
-    return {
-      ok: false,
-      code: "unpaired_tool_call",
-      detail: `call ${dangling.providerToolCallId} has no recorded result`,
-    };
-  }
-
   return { ok: true, conversation, runs };
 }
 
-/**
- * Keep the trailing part of a rebuilt conversation within a budget.
- *
- * The most recent turns matter most for continuing work, so truncation removes the
- * oldest entries. A cut is only made at a turn boundary: starting the history with a
- * tool result would produce a conversation that answers a call nobody made.
- */
+/** Retain whole assistant/call/result groups, rather than slicing by item count. */
+export function retainRecentGroups(
+  conversation: readonly ProviderConversationItem[],
+  count: number,
+): readonly ProviderConversationItem[] {
+  if (count <= 0) return [];
+  const starts: number[] = [];
+  for (const [index, item] of conversation.entries()) {
+    if (item.kind !== "tool_result") starts.push(index);
+  }
+  const start = starts[Math.max(0, starts.length - count)] ?? conversation.length;
+  return conversation.slice(start);
+}
+
 export function trimConversation(
   conversation: readonly ProviderConversationItem[],
   maxItems: number,
 ): readonly ProviderConversationItem[] {
   if (maxItems <= 0) return [];
   if (conversation.length <= maxItems) return [...conversation];
-
   let start = conversation.length - maxItems;
-  // Advance to a safe boundary: a user turn, or an assistant turn that begins a
-  // group. A tool result or a bare assistant turn without its preceding user turn is
-  // not a valid start.
-  while (start < conversation.length) {
-    const item = conversation[start];
-    if (item === undefined) break;
-    if (item.kind === "user") break;
-    start += 1;
-  }
+  while (start < conversation.length && conversation[start]?.kind !== "user") start += 1;
   return conversation.slice(start);
 }

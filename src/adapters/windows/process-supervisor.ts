@@ -1,4 +1,12 @@
-import { closeSync, existsSync, openSync, readSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  openSync,
+  readSync,
+  statSync,
+  unlinkSync,
+} from "node:fs";
 import { unlink } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import {
@@ -42,8 +50,9 @@ import {
  * process is terminated and closed without ever running.
  *
  * Output is captured through temporary files rather than pipes: this keeps the
- * implementation free of inherited-handle bookkeeping while still bounding what
- * reaches the model, and the caller applies its own byte and text caps.
+ * implementation free of inherited-handle bookkeeping. Polling observes the
+ * combined byte limit and terminates excess producers; retained reads share one
+ * cap. Disk writes can overshoot between observations.
  *
  * Supervision failure is fatal for the affected operation: the caller disables
  * the tool rather than downgrading to an unsupervised spawn.
@@ -81,6 +90,9 @@ export type SpawnOutcome =
       timedOut: boolean;
       cancelled: boolean;
       processId: number;
+      rawBytes: number;
+      captureComplete: boolean;
+      outputLimitExceeded: boolean;
     }>
   | Readonly<{ kind: "failed"; code: SupervisorFailure }>;
 
@@ -208,25 +220,26 @@ export function createProcessSupervisor() {
    * Terminate the whole job tree and release handles. Applied twice it is a
    * no-op, so a completion notification and a user stop cannot conflict.
    */
-  function stop(processId: number): void {
+  function stop(processId: number): CaptureOutput {
     const entry = running.get(processId);
-    if (entry === undefined) return;
+    if (entry === undefined) return emptyOutput();
     TerminateJobObject(entry.job, 1);
     CloseHandle(entry.job);
     const stopped = WaitForSingleObject(entry.process, 5000) === WAIT_OBJECT_0;
     CloseHandle(entry.process);
     running.delete(processId);
     if (!stopped) throw new Error("process_termination_unconfirmed");
+    const output = readCaptureOutput(entry.stdoutPath, entry.stderrPath);
+    removeCapture(entry.stdoutPath);
+    removeCapture(entry.stderrPath);
+    return output;
   }
 
   /** Read the current capture files without removing them. */
-  function readOutput(processId: number): Readonly<{ stdout: string; stderr: string }> {
+  function readOutput(processId: number): CaptureOutput {
     const entry = running.get(processId);
-    if (entry === undefined) return { stdout: "", stderr: "" };
-    return {
-      stdout: readCaptureFile(entry.stdoutPath),
-      stderr: readCaptureFile(entry.stderrPath),
-    };
+    if (entry === undefined) return emptyOutput();
+    return readCaptureOutput(entry.stdoutPath, entry.stderrPath);
   }
   return { runToCompletion, start, isAlive, exitCodeOf, stop, readOutput };
   /**
@@ -296,15 +309,22 @@ export function createProcessSupervisor() {
 
     const deadline = Date.now() + request.timeoutMs;
     let wait = WaitForSingleObject(hProcess, 0);
-    while (wait === WAIT_TIMEOUT && Date.now() < deadline && !request.signal?.aborted) {
+    let outputLimitExceeded = captureSize(stdoutPath, stderrPath) > MAX_CAPTURE_BYTES;
+    while (
+      wait === WAIT_TIMEOUT &&
+      Date.now() < deadline &&
+      !request.signal?.aborted &&
+      !outputLimitExceeded
+    ) {
       await delay(25);
       wait = WaitForSingleObject(hProcess, 0);
+      outputLimitExceeded = captureSize(stdoutPath, stderrPath) > MAX_CAPTURE_BYTES;
     }
     let timedOut = false;
     const cancelled = request.signal?.aborted === true;
     let terminationConfirmed = true;
     if (wait === WAIT_TIMEOUT) {
-      timedOut = !cancelled;
+      timedOut = !cancelled && !outputLimitExceeded;
       TerminateJobObject(job, 1);
       terminationConfirmed = WaitForSingleObject(hProcess, 5000) === WAIT_OBJECT_0;
     } else if (wait !== WAIT_OBJECT_0) {
@@ -321,8 +341,7 @@ export function createProcessSupervisor() {
     CloseHandle(hProcess);
     CloseHandle(job);
 
-    const stdout = readCaptureFile(stdoutPath);
-    const stderr = readCaptureFile(stderrPath);
+    const output = readCaptureOutput(stdoutPath, stderrPath);
     await unlink(stdoutPath).catch(() => undefined);
     await unlink(stderrPath).catch(() => undefined);
     if (!terminationConfirmed || exitCode === STILL_ACTIVE)
@@ -331,8 +350,9 @@ export function createProcessSupervisor() {
     return {
       kind: "completed",
       exitCode: timedOut ? 1 : exitCode,
-      stdout,
-      stderr,
+      ...output,
+      outputLimitExceeded: outputLimitExceeded || output.outputLimitExceeded,
+      captureComplete: !outputLimitExceeded && output.captureComplete,
       timedOut,
       cancelled,
       processId,
@@ -345,16 +365,69 @@ export type ProcessSupervisor = ReturnType<typeof createProcessSupervisor>;
 /** Read a capture file with a hard bound so a huge producer cannot exhaust memory. */
 export const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 
-function readCaptureFile(filePath: string): string {
-  if (!existsSync(filePath)) return "";
+export type CaptureOutput = Readonly<{
+  stdout: string;
+  stderr: string;
+  rawBytes: number;
+  captureComplete: boolean;
+  outputLimitExceeded: boolean;
+}>;
+
+function emptyOutput(): CaptureOutput {
+  return { stdout: "", stderr: "", rawBytes: 0, captureComplete: true, outputLimitExceeded: false };
+}
+
+function removeCapture(filePath: string): void {
+  try {
+    unlinkSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+function captureSize(stdoutPath: string, stderrPath: string): number {
+  try {
+    return (
+      (existsSync(stdoutPath) ? statSync(stdoutPath).size : 0) +
+      (existsSync(stderrPath) ? statSync(stderrPath).size : 0)
+    );
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+/** Disk may overshoot between polls; retained data always shares one byte cap. */
+function readCaptureOutput(stdoutPath: string, stderrPath: string): CaptureOutput {
+  try {
+    const stdout = readCaptureFile(stdoutPath, MAX_CAPTURE_BYTES);
+    const stderr = readCaptureFile(stderrPath, MAX_CAPTURE_BYTES - stdout.bytes.length);
+    const rawBytes = stdout.size + stderr.size;
+    return {
+      stdout: decodeCapture(stdout.bytes),
+      stderr: decodeCapture(stderr.bytes),
+      rawBytes,
+      captureComplete: rawBytes === stdout.bytes.length + stderr.bytes.length,
+      outputLimitExceeded: rawBytes > MAX_CAPTURE_BYTES,
+    };
+  } catch {
+    return { ...emptyOutput(), captureComplete: false };
+  }
+}
+
+function decodeCapture(bytes: Buffer): string {
+  const utf16 = bytes[0] === 0xff && bytes[1] === 0xfe;
+  const decoder = new TextDecoder(utf16 ? "utf-16le" : "utf-8", { fatal: true });
+  return decoder.decode(utf16 ? bytes.subarray(2) : bytes, { stream: true });
+}
+
+function readCaptureFile(filePath: string, budget: number): { bytes: Buffer; size: number } {
+  if (!existsSync(filePath)) return { bytes: Buffer.alloc(0), size: 0 };
   const fd = openSync(filePath, "r");
   try {
-    const buffer = Buffer.alloc(MAX_CAPTURE_BYTES);
-    const read = readSync(fd, buffer, 0, MAX_CAPTURE_BYTES, 0);
-    const bytes = buffer.subarray(0, read);
-    return bytes[0] === 0xff && bytes[1] === 0xfe
-      ? bytes.subarray(2).toString("utf16le")
-      : bytes.toString("utf8").replace(/^\uFEFF/, "");
+    const size = fstatSync(fd).size;
+    const buffer = Buffer.alloc(Math.min(size, budget));
+    const read = readSync(fd, buffer, 0, buffer.length, 0);
+    return { bytes: buffer.subarray(0, read), size };
   } finally {
     closeSync(fd);
   }
