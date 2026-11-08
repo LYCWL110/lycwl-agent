@@ -92,6 +92,11 @@ export type WorkspaceToolsOptions = Readonly<{
   ownedKeys?: OwnedKeyRegistry;
   refreshOwnedKeys?: () => Promise<void>;
   evidenceStore?: EvidenceStore;
+  /**
+   * Connected MCP servers, already approved and started by the caller. Their tools
+   * are namespaced and every call still needs its own approval.
+   */
+  mcp?: ToolExecutor;
 }>;
 
 export function createReadOnlyWorkspaceTools(options: WorkspaceToolsOptions): ToolExecutor {
@@ -422,6 +427,8 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     );
   }
 
+  if (options.mcp !== undefined) delegates.push(options.mcp);
+
   function resolveDelegate(toolName: string): ToolExecutor | null {
     for (const delegate of delegates) {
       if (delegate.getDefinition(toolName) !== null) return delegate;
@@ -504,6 +511,9 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
           await backgroundRegistry?.flush();
         }),
         lspRegistry.close(),
+        Promise.resolve().then(async () => {
+          await options.mcp?.cancelAll?.();
+        }),
       ]);
       if (results.some((result) => result.status === "rejected")) {
         throw new Error("session_cleanup_failed");

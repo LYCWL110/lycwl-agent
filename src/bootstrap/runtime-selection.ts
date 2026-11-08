@@ -1,5 +1,6 @@
 import path from "node:path";
 import { createFileEvidenceStore } from "../adapters/persistence/file-evidence-store.ts";
+import { createMcpTools, mcpToolDefinitions } from "../adapters/tools/mcp-tools.ts";
 import {
   createGuidanceLoader,
   type GuidanceBlock,
@@ -12,13 +13,16 @@ import type { ProviderConfig } from "../domain/config/provider-config.ts";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.ts";
 import type { OwnedKeyRegistry } from "../domain/security/owned-key-guard.ts";
 import { availableTools, COORDINATOR_TOOL_NAMES } from "../domain/tool-catalog/tool-catalog.ts";
+import type { ApprovalGate } from "../ports/approval-gate.ts";
 import type { InternalEvent } from "../ports/event-log.ts";
 import type { ProviderConversationItem } from "../ports/model-provider.ts";
 import type { SensitiveSource } from "../ports/sensitive-context.ts";
 import { assertProtectedValue } from "../services/security/guarded-delivery.ts";
 import { createDemoRuntime } from "./demo-runtime.ts";
+import { startMcpServers } from "./mcp-startup.ts";
 import { createWorkspaceTools } from "./read-only-tools.ts";
 import { assembleRuntime, type RuntimeAssemblyFailure } from "./runtime-assembly.ts";
+import { readMcpDeclarations } from "./terminal-approval.ts";
 
 /**
  * Choose and build the runtime for a launch.
@@ -86,6 +90,14 @@ export type SelectRuntimeOptions = Readonly<{
   sessionId?: string;
   post?: Parameters<typeof assembleRuntime>[0]["post"];
   trustedCaPem?: string;
+  /**
+   * Approval channel for MCP server startup. Servers must be approved before the
+   * TUI exists, so this cannot use the coordinator's suspend path. Absent means no
+   * MCP server can start.
+   */
+  mcpApprovals?: ApprovalGate;
+  /** Injected for tests. */
+  spawnMcp?: typeof import("node:child_process").spawn;
 }>;
 
 export async function selectRuntime(options: SelectRuntimeOptions): Promise<RuntimeSelection> {
@@ -99,6 +111,33 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
 
   const enableWrites = options.enableWrites === true;
   const enableProcesses = options.enableProcesses === true;
+
+  // MCP servers are third-party processes. They start only when a declaration
+  // exists AND an approval channel was supplied; a build with no channel cannot
+  // start one, which is the safe default for a scripted launch.
+  const mcpDeclared = readMcpDeclarations(options.settings);
+  const mcpStarted =
+    mcpDeclared === undefined || options.mcpApprovals === undefined
+      ? null
+      : await startMcpServers({
+          declared: mcpDeclared,
+          workspaceRoot: options.workspaceRoot,
+          approvals: options.mcpApprovals,
+          ...(options.spawnMcp === undefined ? {} : { spawnProcess: options.spawnMcp }),
+        });
+  const mcpExecutor =
+    mcpStarted !== null && mcpStarted.ok && mcpStarted.connections.length > 0
+      ? createMcpTools(mcpStarted.connections)
+      : undefined;
+  const mcpWarnings =
+    mcpStarted === null
+      ? mcpDeclared === undefined
+        ? []
+        : ["mcp: servers are declared but no approval channel is available; none started"]
+      : mcpStarted.ok
+        ? mcpStarted.warnings
+        : [`mcp: no server started (${mcpStarted.code})`];
+
   const tools = createWorkspaceTools({
     workspaceRoot: options.workspaceRoot,
     // This gate answers inline requests that do not go through the suspend path,
@@ -110,6 +149,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     enableWrites,
     enableProcesses,
     enableSkills: options.enableSkills === true,
+    ...(mcpExecutor === undefined ? {} : { mcp: mcpExecutor }),
   });
 
   // Advertise only tools this composition actually exposes under the current
@@ -119,11 +159,22 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   const catalog = availableTools(
     (name) => name === COORDINATOR_TOOL_NAMES.ask_user || tools.getDefinition(name) !== null,
   );
-  const toolDefinitions = catalog.map((entry) => ({
-    name: entry.name,
-    description: entry.description,
-    inputSchema: entry.inputSchema as unknown as Readonly<Record<string, unknown>>,
-  }));
+  const toolDefinitions = [
+    ...catalog.map((entry) => ({
+      name: entry.name,
+      description: entry.description,
+      inputSchema: entry.inputSchema as unknown as Readonly<Record<string, unknown>>,
+    })),
+    // MCP tool schemas come from the server, not from the built-in catalog, so they
+    // are appended rather than looked up. The namespaced name is what the model calls.
+    ...(mcpStarted !== null && mcpStarted.ok
+      ? mcpToolDefinitions(mcpStarted.connections).map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: {} as Readonly<Record<string, unknown>>,
+        }))
+      : []),
+  ];
 
   const assembly = await assembleRuntime({
     settings: options.settings,
@@ -338,6 +389,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
       enableWrites,
       warnings: [
         ...assembly.warnings,
+        ...mcpWarnings,
         ...(budgetWarning === null ? [] : [budgetWarning]),
         ...(evidenceMissing
           ? ["stored evidence is incomplete or unavailable; verification remains blocked"]
@@ -373,6 +425,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
           ownedKeys: assembly.ownedKeys,
           refreshOwnedKeys: assembly.refreshOwnedKeys,
           evidenceStore,
+          ...(mcpExecutor === undefined ? {} : { mcp: mcpExecutor }),
         }),
         approvals: { decide: async () => "denied" },
         eventLog,

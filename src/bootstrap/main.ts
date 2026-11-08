@@ -12,6 +12,7 @@ import { startTui } from "../tui/main.ts";
 import { hasProvider, startConfigFlow } from "./config-flow.ts";
 import { describeSelection, selectRuntime } from "./runtime-selection.ts";
 import { canResumeSession, selectSessionLaunch } from "./session-launch.ts";
+import { createTerminalApproval } from "./terminal-approval.ts";
 
 /**
  * `lycwl` entry point.
@@ -175,6 +176,16 @@ async function startSession(): Promise<void> {
     enableSkills: args.includes("--skills"),
     enableProcesses: args.includes("--shell"),
     sessionId,
+    // A declared MCP server must be approved before its process is spawned, which
+    // is before the TUI exists. This gate is denial-by-default and is not remembered
+    // across launches.
+    ...(current === null
+      ? {}
+      : {
+          mcpApprovals: createTerminalApproval({
+            write: (text) => process.stderr.write(`${text}\n`),
+          }),
+        }),
   });
   process.stderr.write(`${describeSelection(chosen).join("\n")}\n\n`);
   startTui(
