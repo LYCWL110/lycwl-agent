@@ -210,7 +210,7 @@ export type DemoRuntime = Readonly<{
   provider: DemoProvider;
 }>;
 
-export function createDemoRuntime(workspaceRoot: string): DemoRuntime {
+export function createDemoRuntime(workspaceRoot: string, sessionId?: string): DemoRuntime {
   const eventLog = new InMemoryEventLog(demoIds, demoDigests);
   const provider = new DemoProvider();
 
@@ -227,6 +227,7 @@ export function createDemoRuntime(workspaceRoot: string): DemoRuntime {
     ids: demoIds,
     nowUtc: () => new Date().toISOString(),
     suspendOnApproval: true,
+    ...(sessionId === undefined ? {} : { sessionId }),
   });
 
   return { coordinator, eventLog, provider };

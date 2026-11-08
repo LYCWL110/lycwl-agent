@@ -1,3 +1,7 @@
+import {
+  protocolReasoningEfforts,
+  type ReasoningEffort,
+} from "../../domain/config/provider-config.ts";
 import type {
   ModelProvider,
   ProviderCompletion,
@@ -53,6 +57,7 @@ export type AnthropicAdapterOptions = Readonly<{
   endpoint?: string;
   apiVersion?: string;
   maxTokens?: number;
+  reasoningEffort?: ReasoningEffort;
   /** Tool definitions available for this Run. Empty means no tools. */
   tools?: readonly AnthropicToolDefinition[];
   /** Optional system prompt. Trusted Harness rules only; never project text. */
@@ -73,6 +78,11 @@ export class AnthropicProvider implements ModelProvider {
 
   async complete(request: ProviderRequest): Promise<ProviderCompletion> {
     if (request.signal?.aborted) return { kind: "cancelled", safeCode: "provider_cancelled" };
+    if (
+      this.#options.reasoningEffort !== undefined &&
+      !protocolReasoningEfforts("anthropic_messages").includes(this.#options.reasoningEffort)
+    )
+      return { kind: "invalid_response", safeCode: "anthropic_reasoning_effort_invalid" };
     const apiKey = await this.#resolveKey();
     if (apiKey === null) {
       return { kind: "authentication_failure", safeCode: "anthropic_key_not_configured" };
@@ -131,6 +141,9 @@ export function buildRequestBody(
   return {
     model: options.model,
     max_tokens: options.maxTokens ?? ANTHROPIC_DEFAULTS.maxTokens,
+    ...(options.reasoningEffort === undefined || options.reasoningEffort === "default"
+      ? {}
+      : { output_config: { effort: options.reasoningEffort } }),
     ...(options.system === undefined ? {} : { system: options.system }),
     messages: toAnthropicMessages(conversation),
     ...(options.tools === undefined || options.tools.length === 0

@@ -1,14 +1,15 @@
 #!/usr/bin/env node
-import { fetchModelList } from "../adapters/providers/model-list.ts";
+import { fetchModelDetails, fetchModelList } from "../adapters/providers/model-list.ts";
 import { createConfigStore, defaultConfigDirectory } from "../adapters/windows/config-store.ts";
 import { createFileVault } from "../adapters/windows/file-credential-vault.ts";
 import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
+import type { CatalogModel } from "../domain/config/model-catalog.ts";
 import { readProviderConfig } from "../domain/config/provider-config.ts";
 import { createTuiController } from "../tui/controller.ts";
 import { startTui } from "../tui/main.ts";
 import { hasProvider, startConfigFlow } from "./config-flow.ts";
 import { describeSelection, selectRuntime } from "./runtime-selection.ts";
-import { selectSessionLaunch } from "./session-launch.ts";
+import { canResumeSession, selectSessionLaunch } from "./session-launch.ts";
 
 /**
  * `lycwl` entry point.
@@ -72,7 +73,7 @@ if (!launch.ok) {
   process.stderr.write(`${launch.message}\n`);
   process.exit(1);
 }
-const sessionId = launch.sessionId;
+let sessionId = launch.sessionId;
 
 if (!process.stdin.isTTY) {
   process.stderr.write(
@@ -101,6 +102,7 @@ if (configureFirst) {
   );
   const flow = startConfigFlow({
     fetchModels: fetchModelsForBrowser,
+    fetchModel: fetchModelDetails,
     configStore,
     vault,
     workspaceRoot: process.cwd(),
@@ -119,9 +121,11 @@ process.stderr.write(`${launch.mode === "new" ? "new" : "resuming"} session ${se
 
 // Reopen configuration from inside the Session. The browser replaces the app,
 // so the app is unmounted first and the flow rebuilds this same Session afterwards.
-function openConfig(): void {
+function openConfig(initialPage: "setup" | "model" = "setup"): void {
   const flow = startConfigFlow({
+    initialPage,
     fetchModels: fetchModelsForBrowser,
+    fetchModel: fetchModelDetails,
     configStore,
     vault,
     workspaceRoot: process.cwd(),
@@ -148,13 +152,13 @@ async function fetchModelsForBrowser(input: {
   protocol: string;
   baseUrl: string;
   apiKey: string;
-}): Promise<readonly string[] | Readonly<{ ok: false; code: string }>> {
+}): Promise<readonly (string | CatalogModel)[] | Readonly<{ ok: false; code: string }>> {
   const result = await fetchModelList({
     protocol: input.protocol as never,
     baseUrl: input.baseUrl,
     apiKey: input.apiKey,
   });
-  return result.ok ? result.models : result;
+  return result.ok ? (result.catalog ?? result.models) : result;
 }
 
 async function startSession(): Promise<void> {
@@ -171,15 +175,28 @@ async function startSession(): Promise<void> {
     sessionId,
   });
   process.stderr.write(`${describeSelection(chosen).join("\n")}\n\n`);
-  startTui(createTuiController({ coordinator: chosen.coordinator }), {
-    ...(chosen.kind === "real" ? { modelLabel: chosen.config.model } : {}),
-    modeLabel: args.includes("--shell")
-      ? "shell"
-      : args.includes("--write")
-        ? "workspace-write"
-        : "read-only",
-    onConfigRequest: openConfig,
-  });
+  startTui(
+    createTuiController({
+      coordinator: chosen.coordinator,
+      ...(chosen.kind === "real" ? { initialEvents: chosen.historyEvents } : {}),
+      canResumeSession: (id) => canResumeSession(dataDirectory, id),
+    }),
+    {
+      ...(chosen.kind === "real" ? { modelLabel: chosen.config.model } : {}),
+      modeLabel: args.includes("--shell")
+        ? "shell"
+        : args.includes("--write")
+          ? "workspace-write"
+          : "read-only",
+      onConfigRequest: openConfig,
+      sessionId,
+      onSessionRequest: (requestedId) => {
+        sessionId = requestedId ?? crypto.randomUUID();
+        process.stderr.write(`${requestedId === null ? "new" : "resuming"} session ${sessionId}\n`);
+        void startSession();
+      },
+    },
+  );
 }
 
 void startSession();

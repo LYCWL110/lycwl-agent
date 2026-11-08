@@ -24,8 +24,16 @@ export const REASONING_EFFORTS = [
   "medium",
   "high",
   "xhigh",
+  "max",
 ] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+/** Values representable by each implemented protocol, independent of model support. */
+export function protocolReasoningEfforts(protocol: string): readonly ReasoningEffort[] {
+  return protocol === "anthropic_messages"
+    ? ["default", "low", "medium", "high", "xhigh", "max"]
+    : REASONING_EFFORTS;
+}
 
 export const PROVIDER_CONFIG_LIMITS = Object.freeze({
   maxModelLength: 200,
@@ -116,8 +124,9 @@ export function validateProviderConfig(input: {
   if (
     input.reasoningEffort !== undefined &&
     (typeof input.reasoningEffort !== "string" ||
-      !(REASONING_EFFORTS as readonly string[]).includes(input.reasoningEffort) ||
-      (input.protocol === "anthropic_messages" && input.reasoningEffort !== "default"))
+      !(protocolReasoningEfforts(input.protocol) as readonly string[]).includes(
+        input.reasoningEffort,
+      ))
   ) {
     return { ok: false, code: "invalid_reasoning_effort", field: "reasoningEffort" };
   }

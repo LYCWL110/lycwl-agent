@@ -40,6 +40,7 @@ export type BackgroundTask = Readonly<{
   records: readonly OutputRecord[];
   captureComplete: boolean;
   timedOut: boolean;
+  deliveryBlocked?: "owned_key_detected" | "guard_failure";
 }>;
 
 export type BackgroundFailure =

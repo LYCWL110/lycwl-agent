@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { lstat } from "node:fs/promises";
+import path from "node:path";
+import { isSessionId } from "../domain/identity/session-id.ts";
 
 export type SessionLaunch =
   | Readonly<{ ok: true; sessionId: string; mode: "new" | "resume" }>
@@ -12,12 +15,7 @@ export function selectSessionLaunch(
   const index = args.indexOf("--resume");
   if (index === -1) return { ok: true, sessionId: createId(), mode: "new" };
   const id = args[index + 1];
-  if (
-    args.lastIndexOf("--resume") !== index ||
-    id === undefined ||
-    !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/u.test(id) ||
-    /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/iu.test(id)
-  ) {
+  if (args.lastIndexOf("--resume") !== index || id === undefined || !isSessionId(id)) {
     return {
       ok: false,
       code: "invalid_resume",
@@ -25,4 +23,23 @@ export function selectSessionLaunch(
     };
   }
   return { ok: true, sessionId: id, mode: "resume" };
+}
+
+/** Inspect the existing log layout without loading transcript text or creating records. */
+export async function canResumeSession(dataDirectory: string, sessionId: string): Promise<boolean> {
+  if (!isSessionId(sessionId)) return false;
+  try {
+    let directory = dataDirectory;
+    for (const segment of ["sessions", "sessions", sessionId]) {
+      directory = path.join(directory, segment);
+      const info = await lstat(directory);
+      if (!info.isDirectory() || info.isSymbolicLink()) return false;
+    }
+    const info = await lstat(path.join(directory, "events.jsonl"));
+    return info.isFile() && !info.isSymbolicLink() && info.size > 0;
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")
+      return false;
+    throw error;
+  }
 }

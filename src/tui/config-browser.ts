@@ -2,7 +2,7 @@
  * Provider configuration browser.
  *
  * Adapts Miyu's provider/group/model browser (`src/config_tui/providers.rs`) into
- * provider/protocol/model columns for this Harness, with independent cursors and scroll
+ * provider/protocol/model/reasoning columns, with independent cursors and scroll
  * offsets, a filter mode, a status line that distinguishes information from error,
  * and an undoable delete.
  *
@@ -10,7 +10,11 @@
  * without a terminal. The renderer reads this state; it does not own it.
  */
 
-import { REASONING_EFFORTS, type ReasoningEffort } from "../domain/config/provider-config.ts";
+import type { CatalogModel } from "../domain/config/model-catalog.ts";
+import {
+  protocolReasoningEfforts,
+  type ReasoningEffort,
+} from "../domain/config/provider-config.ts";
 import { characters, editText } from "./text-edit.ts";
 
 export const BROWSER_LIMITS = Object.freeze({
@@ -19,16 +23,22 @@ export const BROWSER_LIMITS = Object.freeze({
   maxModelLength: 200,
 });
 
-export type Column = "provider" | "protocol" | "model";
+export type Column = "provider" | "protocol" | "model" | "reasoning";
 
-export const COLUMNS: readonly Column[] = Object.freeze(["provider", "protocol", "model"]);
+export const COLUMNS: readonly Column[] = Object.freeze([
+  "provider",
+  "protocol",
+  "model",
+  "reasoning",
+]);
 
-export type ModelEntry = Readonly<{
-  /** Identifier sent to the provider. */
-  id: string;
-  /** Where the entry came from, so a fetched model is not mistaken for a custom one. */
-  source: "custom" | "fetched";
-}>;
+export type ModelEntry = CatalogModel &
+  Readonly<{
+    /** Identifier sent to the provider. */
+    id: string;
+    /** Where the entry came from, so a fetched model is not mistaken for a custom one. */
+    source: "custom" | "fetched";
+  }>;
 
 export type BrowserState = Readonly<{
   /** Fixed for now: one provider identity is configured per Session. */
@@ -75,7 +85,7 @@ export function createBrowserState(seed: BrowserSeed): BrowserState {
     models,
     modelIndex,
     activeColumn: "protocol",
-    scroll: { provider: 0, protocol: 0, model: 0 },
+    scroll: { provider: 0, protocol: 0, model: 0, reasoning: 0 },
     filter: "",
     filterMode: false,
     filterCursor: 0,
@@ -162,17 +172,12 @@ export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
   }
   if (typeof key === "object") {
     if (key.value === "r") {
-      if (state.protocols[state.protocolIndex] === "anthropic_messages")
-        return {
-          state: withStatus(state, "Reasoning effort is unavailable for this protocol", false),
-          commit: null,
-          cancel: false,
-        };
-      const index = REASONING_EFFORTS.indexOf(state.reasoningEffort);
+      const choices = reasoningChoices(state);
+      const index = choices.indexOf(state.reasoningEffort);
       return {
         state: {
           ...state,
-          reasoningEffort: REASONING_EFFORTS[(index + 1) % REASONING_EFFORTS.length] ?? "default",
+          reasoningEffort: choices[(index + 1) % choices.length] ?? "default",
         },
         commit: null,
         cancel: false,
@@ -225,7 +230,11 @@ export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
       return { state, commit: null, cancel: false };
     const index = COLUMNS.indexOf(state.activeColumn);
     const next = COLUMNS[(index + 1) % COLUMNS.length] ?? "protocol";
-    return { state: { ...state, activeColumn: next }, commit: null, cancel: false };
+    return {
+      state: { ...state, activeColumn: next },
+      commit: null,
+      cancel: false,
+    };
   }
 
   if (key === "undo") {
@@ -271,6 +280,13 @@ export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
         cancel: false,
       };
     }
+    if (!reasoningChoices(state).includes(state.reasoningEffort)) {
+      return {
+        state: withStatus(state, "Select a listed reasoning level before saving", true),
+        commit: null,
+        cancel: false,
+      };
+    }
     return {
       state,
       commit: {
@@ -295,7 +311,11 @@ export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
     const index = COLUMNS.indexOf(state.activeColumn);
     const delta = key === "left" ? -1 : 1;
     const next = COLUMNS[(index + delta + COLUMNS.length) % COLUMNS.length] ?? "protocol";
-    return { state: { ...state, activeColumn: next }, commit: null, cancel: false };
+    return {
+      state: { ...state, activeColumn: next },
+      commit: null,
+      cancel: false,
+    };
   }
 
   if (key === "up" || key === "down") {
@@ -306,16 +326,16 @@ export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
         state: {
           ...state,
           protocolIndex: next,
-          ...(state.protocols[next] === "anthropic_messages"
-            ? { reasoningEffort: "default" as const }
-            : {}),
           ...(next === state.protocolIndex
             ? {}
             : {
-                models: state.models.filter((entry) => entry.source === "custom"),
+                models: state.models
+                  .filter((entry) => entry.source === "custom")
+                  .map(({ id, source }) => ({ id, source })),
                 modelIndex: 0,
                 filter: "",
                 status: null,
+                undo: null,
               }),
           scroll: {
             ...scrollTo(state.scroll, "protocol", next),
@@ -330,7 +350,20 @@ export function applyKey(state: BrowserState, key: BrowserKey): BrowserOutcome {
       const visible = filteredModels(state).length;
       const next = clamp(state.modelIndex + delta, 0, Math.max(0, visible - 1));
       return {
-        state: { ...state, modelIndex: next, scroll: scrollTo(state.scroll, "model", next) },
+        state: {
+          ...state,
+          modelIndex: next,
+          scroll: scrollTo(state.scroll, "model", next),
+        },
+        commit: null,
+        cancel: false,
+      };
+    }
+    if (state.activeColumn === "reasoning") {
+      const choices = reasoningChoices(state);
+      const index = clamp(choices.indexOf(state.reasoningEffort) + delta, 0, choices.length - 1);
+      return {
+        state: { ...state, reasoningEffort: choices[index] ?? "default" },
         commit: null,
         cancel: false,
       };
@@ -347,6 +380,36 @@ export function filteredModels(state: BrowserState): readonly ModelEntry[] {
   const needle = state.filter.trim().toLowerCase();
   if (needle.length === 0) return state.models;
   return state.models.filter((entry) => entry.id.toLowerCase().includes(needle));
+}
+
+export function reasoningChoices(state: BrowserState): readonly ReasoningEffort[] {
+  const allowed = protocolReasoningEfforts(state.protocols[state.protocolIndex] ?? "");
+  const model = filteredModels(state)[state.modelIndex];
+  const declaration = model?.reasoningInvalid ? undefined : model?.reasoning;
+  if (declaration !== undefined)
+    return ["default", ...declaration.efforts.filter((effort) => allowed.includes(effort))];
+  return ["default"];
+}
+
+export function reasoningNotice(state: BrowserState): string {
+  const model = filteredModels(state)[state.modelIndex];
+  const declaration = model?.reasoningInvalid ? undefined : model?.reasoning;
+  if (declaration !== undefined)
+    return declaration.efforts.length === 0
+      ? "No selectable upstream effort levels"
+      : declaration.defaultEffort === undefined
+        ? "Upstream-declared levels"
+        : `Upstream levels; default ${declaration.defaultEffort}`;
+  return "No upstream levels; default only";
+}
+
+/** Refresh invalidates declarations and undo snapshots before a new request starts. */
+export function clearReasoningDeclarations(state: BrowserState): BrowserState {
+  return {
+    ...state,
+    models: state.models.map(({ id, source }) => ({ id, source })),
+    undo: null,
+  };
 }
 
 /**
@@ -403,19 +466,29 @@ export function addCustomModel(state: BrowserState, id: string): BrowserState {
 }
 
 /** Merge fetched model names, keeping custom entries first and deduplicating. */
-export function mergeFetchedModels(state: BrowserState, fetched: readonly string[]): BrowserState {
-  const seen = new Set(state.models.map((entry) => entry.id));
-  const added: ModelEntry[] = [];
-  for (const id of fetched) {
-    if (seen.has(id)) continue;
-    seen.add(id);
-    added.push({ id, source: "fetched" });
+export function mergeFetchedModels(
+  state: BrowserState,
+  fetched: readonly (string | CatalogModel)[],
+): BrowserState {
+  const incoming = new Map(
+    fetched.map((entry) =>
+      typeof entry === "string" ? ([entry, { id: entry }] as const) : ([entry.id, entry] as const),
+    ),
+  );
+  const models = state.models.map(({ id, source }) => ({ ...incoming.get(id), id, source }));
+  const seen = new Set(models.map((entry) => entry.id));
+  for (const entry of incoming.values()) {
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    models.push({ ...entry, source: "fetched" });
   }
+  const added = models.length - state.models.length;
   return {
     ...state,
-    models: [...state.models, ...added],
+    models,
+    undo: null,
     status: {
-      text: added.length === 0 ? "no new models" : `fetched ${added.length} model(s)`,
+      text: added === 0 ? "no new models" : `fetched ${added} model(s)`,
       isError: false,
     },
   };

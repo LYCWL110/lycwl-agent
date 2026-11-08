@@ -3,8 +3,11 @@ import {
   type BackgroundTask,
   type OutputRecord,
 } from "../../domain/process/background.ts";
+import {
+  checkProtectedExit,
+  type OwnedKeyRegistry,
+} from "../../domain/security/owned-key-guard.ts";
 import type { BackgroundToolDependencies } from "../tools/background-tools.ts";
-import type { PowerShellCapturePaths } from "./powershell-command.ts";
 import {
   type CaptureOutput,
   createProcessSupervisor,
@@ -32,13 +35,17 @@ export function createBackgroundRegistry(
     sessionMode: "read_only" | "workspace_write";
     inheritedEnvironment: Readonly<Record<string, string>>;
     providerCredentialNames?: readonly string[];
-    captureFor?: (toolCallId: string | undefined) => PowerShellCapturePaths | undefined;
+    ownedKeys?: OwnedKeyRegistry;
+    refreshOwnedKeys?: () => Promise<void>;
   }>,
 ): BackgroundRegistry {
-  const supervisor = createProcessSupervisor();
+  const supervisor = createProcessSupervisor(
+    options.ownedKeys === undefined ? {} : { ownedKeys: options.ownedKeys },
+  );
   const entries = new Map<string, Entry>();
   const timers = new Map<string, NodeJS.Timeout>();
   let counter = 0;
+  let cancellationVersion = 0;
 
   function clearTimer(taskId: string): void {
     const timer = timers.get(taskId);
@@ -47,6 +54,15 @@ export function createBackgroundRegistry(
   }
 
   function publish(entry: Entry, output: CaptureOutput): void {
+    if (output.deliveryBlocked !== null) {
+      entry.task = {
+        ...entry.task,
+        records: [],
+        captureComplete: false,
+        deliveryBlocked: output.deliveryBlocked,
+      };
+      return;
+    }
     const records: OutputRecord[] = [...entry.task.records];
     let complete = entry.task.captureComplete && output.captureComplete;
     for (const stream of ["stdout", "stderr"] as const) {
@@ -105,7 +121,7 @@ export function createBackgroundRegistry(
     const timedOut = alive && Date.now() >= entry.deadlineMs;
     const limited = output.outputLimitExceeded || !output.captureComplete;
     if (!alive || timedOut || limited || stopRequested) {
-      // Read once more after termination, before deleting capture files.
+      // Drain the remaining bounded pipe bytes after termination.
       const final = release(entry);
       publish(entry, final);
       entry.task = {
@@ -127,16 +143,18 @@ export function createBackgroundRegistry(
     ...(options.providerCredentialNames === undefined
       ? {}
       : { providerCredentialNames: options.providerCredentialNames }),
-    async startProcess(request, environment, label, toolCallId) {
+    async startProcess(request, environment, label, _toolCallId, signal) {
+      const startVersion = cancellationVersion;
+      await options.refreshOwnedKeys?.();
+      if (signal?.aborted || startVersion !== cancellationVersion)
+        return { kind: "unknown", safeCode: "background_start_cancelled" };
       const taskId = `task-${++counter}`;
       const executionId = `exec-${++counter}`;
-      const capturePaths = options.captureFor?.(toolCallId);
       const start = supervisor.start({
         command: request.command,
         cwd: request.cwd,
         executionId,
         environment,
-        ...(capturePaths === undefined ? {} : { capturePaths }),
       });
       if (!start.ok) return { kind: "unknown", safeCode: start.code };
       const task: BackgroundTask = {
@@ -173,8 +191,30 @@ export function createBackgroundRegistry(
       return { kind: "started", task };
     },
     async getTask(taskId) {
+      await options.refreshOwnedKeys?.();
       const entry = entries.get(taskId);
-      return entry === undefined ? null : refresh(entry);
+      if (entry === undefined) return null;
+      refresh(entry);
+      // Retained records must also honour rotations after the process has ended.
+      if (options.ownedKeys !== undefined && entry.task.deliveryBlocked === undefined) {
+        for (const stream of ["stdout", "stderr"] as const) {
+          const text = entry.task.records
+            .filter((record) => record.stream === stream)
+            .map((record) => record.text)
+            .join("");
+          const decision = checkProtectedExit(options.ownedKeys, text);
+          if (!decision.allowed) {
+            entry.task = {
+              ...entry.task,
+              records: [],
+              captureComplete: false,
+              deliveryBlocked: decision.reason,
+            };
+            break;
+          }
+        }
+      }
+      return entry.task;
     },
     async stopTask(taskId) {
       const entry = entries.get(taskId);
@@ -186,6 +226,7 @@ export function createBackgroundRegistry(
     dependencies,
     liveTaskIds: () => [...entries].filter(([, entry]) => !entry.released).map(([id]) => id),
     disposeAll: () => {
+      cancellationVersion++;
       let failed = false;
       for (const entry of entries.values()) {
         try {

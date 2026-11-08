@@ -2,7 +2,7 @@ import { type Instance, type RenderOptions, render } from "ink";
 import { createElement, type ReactElement } from "react";
 
 import { App } from "./app.ts";
-import type { TuiController } from "./controller.ts";
+import type { TuiController, TuiNavigationRequest } from "./controller.ts";
 
 /**
  * Mount the TUI. A caller must supply a controller wired to a real coordinator;
@@ -13,7 +13,9 @@ export type StartTuiOptions = Readonly<{
   modelLabel?: string;
   modeLabel?: string;
   /** Called when the composer asked to open configuration. */
-  onConfigRequest?: () => void;
+  onConfigRequest?: (page: "setup" | "model") => void;
+  onSessionRequest?: (sessionId: string | null) => void;
+  sessionId?: string;
   onCleanupError?: (code: string) => void;
   /** Injected terminal streams/mount for lifecycle verification. */
   mount?: (element: ReactElement, options: RenderOptions) => Pick<Instance, "rerender" | "unmount">;
@@ -37,13 +39,14 @@ export function startTui(
     instance?.unmount();
   }
 
-  async function closeSession(openConfiguration = false): Promise<void> {
+  async function closeSession(request: TuiNavigationRequest = { kind: "quit" }): Promise<void> {
     if (closing || stopped) return;
     closing = true;
     try {
       await controller.close();
       unmount();
-      if (openConfiguration) onConfigRequest?.();
+      if (request.kind === "config") onConfigRequest?.(request.page);
+      if (request.kind === "session") options.onSessionRequest?.(request.sessionId);
     } catch {
       unmount();
       (options.onCleanupError ?? ((code) => process.stderr.write(`${code}\n`)))(
@@ -58,15 +61,20 @@ export function startTui(
       animated: true,
       ...(modelLabel === undefined ? {} : { modelLabel }),
       ...(modeLabel === undefined ? {} : { modeLabel }),
+      ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+      onClosePanel: () => {
+        controller.closePanel();
+        refresh();
+      },
       onSubmit: (text) => {
-        void controller.submit(text).then(() => {
-          // A /config request must be consumed before the view is redrawn, so
-          // the browser mounts instead of the stale app.
-          if (controller.takeConfigRequest()) {
-            void closeSession(true);
+        return controller.submit(text).then((accepted) => {
+          const request = controller.takeNavigationRequest();
+          if (request !== null) {
+            void closeSession(request);
             return;
           }
           refresh();
+          return accepted;
         });
       },
       onApprove: () => {

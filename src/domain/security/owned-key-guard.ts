@@ -22,6 +22,8 @@ export type OwnedKey = Readonly<{
   keyId: string;
   /** The exact secret value. Never included in any diagnostic output. */
   value: string;
+  /** A reviewed binary representation stored losslessly as Latin-1 code units. */
+  byteEncoding?: "latin1";
   state: OwnedKeyState;
   revision: number;
 }>;
@@ -152,7 +154,11 @@ export function createStreamGuard(registry: OwnedKeyRegistry): StreamGuard {
         if (pending.length <= retain) {
           return { emitted: "", blocked: false, reason: null };
         }
-        const cut = pending.length - retain;
+        let cut = pending.length - retain;
+        // Never release half of a surrogate pair to a UTF-8 writer.
+        const before = pending.charCodeAt(cut - 1);
+        const after = pending.charCodeAt(cut);
+        if (before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff) cut -= 1;
         const emitted = pending.slice(0, cut);
         pending = pending.slice(cut);
         return { emitted, blocked: false, reason: null };

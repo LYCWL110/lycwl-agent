@@ -21,18 +21,23 @@ export type ToolExecutionRequest = Readonly<{
   approvalGranted?: boolean;
 }>;
 
-export type ToolExecutionResult =
-  | Readonly<{ status: "succeeded"; text: string | null }>
-  | Readonly<{ status: "failed"; safeCode: string; text: string | null }>
-  | Readonly<{
-      status: "outcome_unknown";
-      safeCode: string;
-      /**
-       * Bounded facts that are already known, such as which batch targets were
-       * applied before the unknown one. Never a success claim.
-       */
-      text?: string | null;
-    }>;
+export type ToolExecutionResult = Readonly<{
+  /** Early capture protection; preserves execution status and withholds payload. */
+  deliveryBlocked?: "owned_key_detected" | "guard_failure";
+}> &
+  (
+    | Readonly<{ status: "succeeded"; text: string | null }>
+    | Readonly<{ status: "failed"; safeCode: string; text: string | null }>
+    | Readonly<{
+        status: "outcome_unknown";
+        safeCode: string;
+        /**
+         * Bounded facts that are already known, such as which batch targets were
+         * applied before the unknown one. Never a success claim.
+         */
+        text?: string | null;
+      }>
+  );
 
 export interface ToolExecutor {
   getDefinition(toolName: string): ToolDefinition | null;

@@ -11,13 +11,20 @@ export type TerminalWheel = Readonly<{
   column: number;
   row: number;
 }>;
+export type TerminalClick = Readonly<{ column: number; row: number }>;
+export type TerminalMouse = TerminalWheel | TerminalClick;
 
 /** Observe SGR wheel reports without treating pasted escape sequences as actions. */
 export function createWheelDecoder(): (chunk: string) => readonly TerminalWheel[] {
+  const decode = createMouseDecoder();
+  return (chunk) => decode(chunk).filter((event): event is TerminalWheel => "direction" in event);
+}
+
+export function createMouseDecoder(): (chunk: string) => readonly TerminalMouse[] {
   let pending = "";
   let pasting = false;
   return (chunk) => {
-    const events: TerminalWheel[] = [];
+    const events: TerminalMouse[] = [];
     for (const character of chunk) {
       if (character === "\u001b") {
         pending = character;
@@ -45,6 +52,8 @@ export function createWheelDecoder(): (chunk: string) => readonly TerminalWheel[
         ) {
           events.push({ direction: button === 64 ? "up" : "down", column, row });
         }
+        if (!pasting && report[4] === "M" && Number(report[1]) === 0 && column > 0 && row > 0)
+          events.push({ column, row });
         pending = "";
         continue;
       }
@@ -60,15 +69,22 @@ export function createWheelDecoder(): (chunk: string) => readonly TerminalWheel[
   };
 }
 
-export function useTerminalWheel(onWheel: (event: TerminalWheel) => void): void {
+export function useTerminalWheel(
+  onWheel: (event: TerminalWheel) => void,
+  onClick?: (event: TerminalClick) => void,
+): void {
   const { stdin, isRawModeSupported } = useStdin();
   const { stdout } = useStdout();
   const handleWheel = useEffectEvent(onWheel);
+  const handleClick = useEffectEvent((event: TerminalClick) => onClick?.(event));
   useEffect(() => {
     if (!("isTTY" in stdout) || stdout.isTTY !== true || !isRawModeSupported) return;
-    const decode = createWheelDecoder();
+    const decode = createMouseDecoder();
     const receive = (chunk: string | Buffer): void => {
-      for (const event of decode(chunk.toString())) handleWheel(event);
+      for (const event of decode(chunk.toString())) {
+        if ("direction" in event) handleWheel(event);
+        else handleClick(event);
+      }
     };
     let closed = false;
     function close(): void {

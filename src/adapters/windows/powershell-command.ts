@@ -1,17 +1,5 @@
-import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
-
-export type PowerShellCapturePaths = Readonly<{ stdoutPath: string; stderrPath: string }>;
-
-export function createPowerShellCapturePaths(): PowerShellCapturePaths {
-  const token = randomBytes(12).toString("hex");
-  return {
-    stdoutPath: path.join(tmpdir(), `lycwl-out-${token}.log`),
-    stderrPath: path.join(tmpdir(), `lycwl-err-${token}.log`),
-  };
-}
 
 export function powershellExecutable(): string {
   const executable = path.join(
@@ -25,15 +13,16 @@ export function powershellExecutable(): string {
   return executable;
 }
 
-export function powershellCommand(command: string, stdout: string, stderr: string): string {
-  const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+export function powershellCommand(command: string): string {
   const script = [
-    "$OutputEncoding = [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)",
+    "try { $OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { exit 125 }",
+    "$ProgressPreference = 'SilentlyContinue'",
     "$global:LASTEXITCODE = 0",
-    `& {\n${command}\n} 1> ${quote(stdout)} 2> ${quote(stderr)}`,
+    `& {\n${command}\n}`,
     "$succeeded = $?",
     "if (-not $succeeded -and $LASTEXITCODE -eq 0) { exit 1 }",
     "exit $LASTEXITCODE",
   ].join("\n");
-  return `"${powershellExecutable()}" -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
+  const quoted = `"${script.replace(/(\\*)"/g, '$1$1\\"').replace(/\\+$/, "$&$&")}"`;
+  return `"${powershellExecutable()}" -NoProfile -NonInteractive -OutputFormat Text -Command ${quoted}`;
 }

@@ -2,6 +2,7 @@ import type {
   PendingApprovalView,
   PendingQuestionView,
 } from "../application/coordinator/runtime-coordinator.ts";
+import { isSessionId } from "../domain/identity/session-id.ts";
 import type { TodoList } from "../domain/planning/todo.ts";
 import type { InternalEvent } from "../ports/event-log.ts";
 
@@ -16,6 +17,7 @@ export type TranscriptEntry = Readonly<{
   text: string;
   /** Tool entries keep their terminal status so failures stay visible. */
   status: string | null;
+  tool?: Readonly<{ name: string; summary: string; details: string }>;
 }>;
 
 export type RunStatus = "idle" | "active" | "waiting" | "completed" | "failed" | "cancelled";
@@ -24,6 +26,8 @@ export type WaitingKind = "approval" | "question" | "configuration" | "other";
 export type RunActivity = "thinking" | "working";
 
 export type TuiViewState = Readonly<{
+  localPanel?: "help" | "session" | null;
+  commandNotice?: string | null;
   runStatus: RunStatus;
   waitingKind: WaitingKind | null;
   activity: RunActivity | null;
@@ -147,6 +151,7 @@ function deriveApprovalPreview(input: ViewInput): readonly string[] | null {
 function deriveWaitingKind(input: ViewInput): WaitingKind | null {
   if (input.pendingApproval !== null) return "approval";
   if (input.pendingQuestion !== null) return "question";
+  if (input.runStatus !== "active" && input.runStatus !== "waiting") return null;
   for (let index = input.events.length - 1; index >= 0; index -= 1) {
     const payload = input.events[index]?.payload;
     if (payload === undefined) continue;
@@ -171,11 +176,85 @@ function deriveWaitingKind(input: ViewInput): WaitingKind | null {
 
 function buildTranscript(events: readonly InternalEvent[]): readonly TranscriptEntry[] {
   const entries: TranscriptEntry[] = [];
-  const toolNames = new Map<string, string>();
+  const tools = new Map<string, number>();
+  const inputs = new Map<string, number>();
+  const requests = new Map<string, readonly string[]>();
+  const consumed = new Set<string>();
+  const inputRuns = new Map<number, string>();
+  const terminalRuns = new Set<string>();
+  const pausedRuns = new Set<string>();
+  const key = (runId: string, id: string) => `${runId}:${id}`;
+  function updateTool(
+    event: InternalEvent,
+    toolCallId: string,
+    name: string | undefined,
+    status: string,
+    result?: string | null,
+  ): void {
+    const id = key(event.runId, toolCallId);
+    let index = tools.get(id);
+    if (index === undefined) {
+      index = entries.length;
+      tools.set(id, index);
+      entries.push({
+        id: event.eventId,
+        kind: "tool",
+        text: `${name ?? "tool"} ${status}`,
+        status,
+        tool: { name: name ?? "tool", summary: name ?? "tool", details: "" },
+      });
+    }
+    const previous = entries[index];
+    if (previous === undefined) return;
+    const toolName = previous.tool?.name ?? name ?? "tool";
+    entries[index] = {
+      ...previous,
+      text: result ?? `${toolName} ${status}`,
+      status,
+      tool: {
+        name: toolName,
+        summary: previous.tool?.summary ?? toolName,
+        details: `${previous.tool?.details ?? ""}${result == null ? "" : `\n${result}`}`.trim(),
+      },
+    };
+  }
 
   for (const event of events) {
     const payload = event.payload;
     switch (payload.kind) {
+      case "run_input_queued":
+        inputs.set(key(event.runId, payload.inputId), entries.length);
+        inputRuns.set(entries.length, event.runId);
+        entries.push({ id: event.eventId, kind: "user", text: payload.text, status: "queued" });
+        break;
+      case "run_input_withdrawn": {
+        const index = inputs.get(key(event.runId, payload.inputId));
+        const previous = index === undefined ? undefined : entries[index];
+        if (previous !== undefined && index !== undefined)
+          entries[index] = { ...previous, status: "withdrawn" };
+        break;
+      }
+      case "run_input_batch_consumed":
+        for (const id of payload.inputIds) {
+          const inputKey = key(event.runId, id);
+          consumed.add(inputKey);
+          const index = inputs.get(inputKey);
+          const previous = index === undefined ? undefined : entries[index];
+          if (previous !== undefined && index !== undefined)
+            entries[index] = { ...previous, status: "ready" };
+        }
+        break;
+      case "model_request_started": {
+        const included = (payload.includedInputIds ?? []).map((id) => key(event.runId, id));
+        requests.set(key(event.runId, payload.modelRequestId), included);
+        for (const id of included) {
+          const index = inputs.get(id);
+          const previous = index === undefined ? undefined : entries[index];
+          if (previous !== undefined && index !== undefined && previous.status !== "sent")
+            entries[index] = { ...previous, status: "sending" };
+        }
+        break;
+      }
       case "run_started":
         entries.push({
           id: event.eventId,
@@ -185,6 +264,12 @@ function buildTranscript(events: readonly InternalEvent[]): readonly TranscriptE
         });
         break;
       case "model_response_validated":
+        for (const id of requests.get(key(event.runId, payload.modelRequestId)) ?? []) {
+          const index = inputs.get(id);
+          const previous = index === undefined ? undefined : entries[index];
+          if (previous !== undefined && index !== undefined && consumed.has(id))
+            entries[index] = { ...previous, status: "sent" };
+        }
         if (payload.text !== null && payload.text.length > 0) {
           entries.push({
             id: event.eventId,
@@ -194,42 +279,45 @@ function buildTranscript(events: readonly InternalEvent[]): readonly TranscriptE
           });
         }
         break;
-      case "tool_call_received":
-        toolNames.set(payload.toolCallId, payload.toolName);
-        entries.push({
-          id: event.eventId,
-          kind: "tool",
-          text: `${payload.toolName} requested`,
-          status: "requested",
-        });
+      case "tool_call_received": {
+        updateTool(event, payload.toolCallId, payload.toolName, "requested");
+        const index = tools.get(key(event.runId, payload.toolCallId));
+        const previous = index === undefined ? undefined : entries[index];
+        if (previous !== undefined && index !== undefined)
+          entries[index] = {
+            ...previous,
+            tool: {
+              name: payload.toolName,
+              summary: toolSummary(payload.toolName, payload.arguments),
+              details: JSON.stringify(payload.arguments, null, 2) ?? "",
+            },
+          };
+        break;
+      }
+      case "approval_requested":
+        updateTool(event, payload.toolCallId, payload.toolName, "awaiting approval");
+        break;
+      case "tool_execution_started":
+        updateTool(event, payload.toolCallId, payload.toolName, "running");
         break;
       case "tool_execution_finished": {
-        const name = toolNames.get(payload.toolCallId) ?? "tool";
-        entries.push({
-          id: event.eventId,
-          kind: "tool",
-          text: payload.text ?? `${name} ${payload.status}`,
-          status: payload.status,
-        });
+        updateTool(
+          event,
+          payload.toolCallId,
+          payload.toolName,
+          payload.status,
+          [payload.safeCode, payload.text].filter((text) => text != null).join("\n") || null,
+        );
         break;
       }
       case "tool_execution_denied":
-        entries.push({
-          id: event.eventId,
-          kind: "tool",
-          text: `${toolNames.get(payload.toolCallId) ?? "tool"} denied`,
-          status: "denied",
-        });
+        updateTool(event, payload.toolCallId, payload.toolName, "denied");
         break;
       case "tool_call_cancelled":
-        entries.push({
-          id: event.eventId,
-          kind: "tool",
-          text: `${payload.toolName} cancelled (${payload.reason})`,
-          status: "cancelled",
-        });
+        updateTool(event, payload.toolCallId, payload.toolName, "cancelled", payload.reason);
         break;
       case "run_waiting":
+        pausedRuns.add(event.runId);
         entries.push({
           id: event.eventId,
           kind: "system",
@@ -237,9 +325,14 @@ function buildTranscript(events: readonly InternalEvent[]): readonly TranscriptE
           status: null,
         });
         break;
+      case "run_resumed":
+        pausedRuns.delete(event.runId);
+        break;
       case "run_completed":
+        terminalRuns.add(event.runId);
         break;
       case "run_failed":
+        terminalRuns.add(event.runId);
         entries.push({
           id: event.eventId,
           kind: "system",
@@ -248,6 +341,7 @@ function buildTranscript(events: readonly InternalEvent[]): readonly TranscriptE
         });
         break;
       case "run_cancelled":
+        terminalRuns.add(event.runId);
         entries.push({
           id: event.eventId,
           kind: "system",
@@ -259,7 +353,31 @@ function buildTranscript(events: readonly InternalEvent[]): readonly TranscriptE
         break;
     }
   }
+  for (const index of inputs.values()) {
+    const entry = entries[index];
+    const runId = inputRuns.get(index);
+    if (
+      entry === undefined ||
+      runId === undefined ||
+      entry.status === "sent" ||
+      entry.status === "withdrawn"
+    )
+      continue;
+    if (terminalRuns.has(runId)) {
+      entries[index] = { ...entry, status: entry.status === "sending" ? "unknown" : "retained" };
+    } else if (pausedRuns.has(runId) && entry.status === "sending") {
+      entries[index] = { ...entry, status: "unknown" };
+    }
+  }
   return entries;
+}
+
+function toolSummary(name: string, args: unknown): string {
+  if (typeof args !== "object" || args === null) return name;
+  const fields = args as Record<string, unknown>;
+  const target =
+    fields["command"] ?? fields["path"] ?? fields["pattern"] ?? fields["query"] ?? fields["url"];
+  return typeof target === "string" ? `${name} ${target.replace(/\s+/gu, " ")}` : name;
 }
 
 /**
@@ -272,9 +390,35 @@ export type ComposerIntent =
   | Readonly<{ kind: "withdraw"; inputId: string }>
   /** Open the provider browser. Only available when no Run is in flight. */
   | Readonly<{ kind: "open_config" }>
-  | Readonly<{ kind: "reject"; reason: "empty" | "run_active" }>;
+  | Readonly<{ kind: "open_model" }>
+  | Readonly<{ kind: "open_panel"; panel: "help" | "session" }>
+  | Readonly<{ kind: "switch_session"; sessionId: string | null }>
+  | Readonly<{ kind: "cancel_run" }>
+  | Readonly<{ kind: "quit" }>
+  | Readonly<{
+      kind: "reject";
+      reason: "empty" | "run_active" | "unknown_command" | "invalid_command";
+    }>;
 
-export const COMPOSER_COMMANDS = [{ name: "/config", description: "Provider settings" }] as const;
+export const COMPOSER_COMMANDS = [
+  { name: "/config", description: "Provider settings", idleOnly: true },
+  { name: "/model", description: "Select model and reasoning", idleOnly: true },
+  { name: "/session", description: "Current, new or resume session", idleOnly: true },
+  { name: "/new", description: "Start a fresh session", idleOnly: true },
+  { name: "/help", description: "Show commands", idleOnly: false },
+  { name: "/cancel", description: "Cancel the current run", idleOnly: false },
+  { name: "/quit", description: "Close the application", idleOnly: false },
+] as const;
+
+export function commandEnabled(
+  view: TuiViewState,
+  command: (typeof COMPOSER_COMMANDS)[number],
+): boolean {
+  return (
+    !command.idleOnly ||
+    (view.runStatus !== "active" && view.runStatus !== "waiting" && view.waitingKind === null)
+  );
+}
 
 export function interpretComposer(
   view: TuiViewState,
@@ -283,14 +427,39 @@ export function interpretComposer(
 ): ComposerIntent {
   const trimmed = text.trim();
   if (trimmed.length === 0) return { kind: "reject", reason: "empty" };
-  // A configuration change selects the next Run, so it must not be issued while one
-  // is in flight: changing the route mid-Run would break the C03 binding.
-  if (trimmed === COMPOSER_COMMANDS[0].name) {
-    if (view.runStatus === "active" || view.waitingKind !== null) {
+  const [name, ...args] = trimmed.split(/\s+/u);
+  const command = COMPOSER_COMMANDS.find((entry) => entry.name === name);
+  if (command !== undefined) {
+    if (!commandEnabled(view, command)) {
       return { kind: "reject", reason: "run_active" };
     }
-    return { kind: "open_config" };
+    if (args.length > 0 && name !== "/session")
+      return { kind: "reject", reason: "invalid_command" };
+    switch (name) {
+      case "/config":
+        return { kind: "open_config" };
+      case "/model":
+        return { kind: "open_model" };
+      case "/session":
+        if (args.length === 0) return { kind: "open_panel", panel: "session" };
+        if (args.length === 2 && args[0] === "resume" && isSessionId(args[1] ?? ""))
+          return { kind: "switch_session", sessionId: args[1] ?? null };
+        if (args.length !== 1 || args[0] === "resume")
+          return { kind: "reject", reason: "invalid_command" };
+        if (args[0] === "new") return { kind: "switch_session", sessionId: null };
+        if (!isSessionId(args[0] ?? "")) return { kind: "reject", reason: "invalid_command" };
+        return { kind: "switch_session", sessionId: args[0] ?? null };
+      case "/new":
+        return { kind: "switch_session", sessionId: null };
+      case "/help":
+        return { kind: "open_panel", panel: "help" };
+      case "/cancel":
+        return { kind: "cancel_run" };
+      case "/quit":
+        return { kind: "quit" };
+    }
   }
+  if (/^\/[a-z]+(?:\s|$)/iu.test(trimmed)) return { kind: "reject", reason: "unknown_command" };
   if (view.runStatus === "active" || view.waitingKind !== null) {
     if (!options.activeRunAcceptsInput) return { kind: "reject", reason: "run_active" };
     return { kind: "queue_input", text: trimmed };

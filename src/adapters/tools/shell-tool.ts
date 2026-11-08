@@ -25,6 +25,7 @@ export type ShellRunOutcome =
       stderr: string;
       rawBytes?: number;
       captureComplete?: boolean;
+      deliveryBlocked?: "owned_key_detected" | "guard_failure" | null;
     }>
   | Readonly<{
       kind: "timed_out";
@@ -32,6 +33,7 @@ export type ShellRunOutcome =
       stderr: string;
       rawBytes?: number;
       captureComplete?: boolean;
+      deliveryBlocked?: "owned_key_detected" | "guard_failure" | null;
     }>
   | Readonly<{ kind: "unknown"; safeCode: string }>;
 
@@ -123,6 +125,17 @@ export function createShellTool(dependencies: ShellToolDependencies): ToolExecut
 
       if (outcome.kind === "unknown") {
         return { status: "outcome_unknown", safeCode: outcome.safeCode };
+      }
+      if (outcome.deliveryBlocked != null) {
+        const succeeded = outcome.kind === "completed" && outcome.exitCode === 0;
+        return succeeded
+          ? { status: "succeeded", text: null, deliveryBlocked: outcome.deliveryBlocked }
+          : {
+              status: "failed",
+              safeCode: outcome.kind === "timed_out" ? "shell_timeout" : "nonzero_exit",
+              text: null,
+              deliveryBlocked: outcome.deliveryBlocked,
+            };
       }
 
       const combined =

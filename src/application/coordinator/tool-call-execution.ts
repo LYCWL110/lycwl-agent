@@ -29,6 +29,7 @@ export type ToolCallOutcome =
       status: "succeeded" | "failed" | "denied";
       text: string | null;
       deliveryBlocked?: boolean;
+      deliveryBlockReason?: "owned_key_detected" | "guard_failure";
     }>
   | Readonly<{
       kind: "unknown";
@@ -36,6 +37,7 @@ export type ToolCallOutcome =
       toolName: string;
       safeCode: string;
       deliveryBlocked?: boolean;
+      deliveryBlockReason?: "owned_key_detected" | "guard_failure";
     }>
   | Readonly<{ kind: "invalid"; safeCode: string }>
   | Readonly<{
@@ -488,9 +490,11 @@ async function dispatchAndExecute(
   const registry = dependencies.ownedKeys;
   await dependencies.refreshOwnedKeys?.();
   const delivery =
-    registry === undefined
-      ? { text: result.text ?? null, deliveryBlocked: false as const }
-      : guardToolResultText(registry, result.status, result.text ?? null);
+    result.deliveryBlocked !== undefined
+      ? { text: null, deliveryBlocked: true as const, reason: result.deliveryBlocked }
+      : registry === undefined
+        ? { text: result.text ?? null, deliveryBlocked: false as const }
+        : guardToolResultText(registry, result.status, result.text ?? null);
   await dependencies.onEvent("tool_execution_finished", {
     kind: "tool_execution_finished",
     toolCallId,
@@ -507,6 +511,7 @@ async function dispatchAndExecute(
       toolName: call.toolName,
       safeCode: "tool_outcome_unknown",
       deliveryBlocked: delivery.deliveryBlocked,
+      ...(delivery.deliveryBlocked ? { deliveryBlockReason: delivery.reason } : {}),
     };
   }
   return {
@@ -516,5 +521,6 @@ async function dispatchAndExecute(
     status: result.status,
     text: delivery.text,
     deliveryBlocked: delivery.deliveryBlocked,
+    ...(delivery.deliveryBlocked ? { deliveryBlockReason: delivery.reason } : {}),
   };
 }

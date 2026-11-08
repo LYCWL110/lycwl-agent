@@ -7,8 +7,11 @@ import {
 import type { RuntimeCoordinator } from "../application/coordinator/runtime-coordinator.ts";
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.ts";
+import type { OwnedKeyRegistry } from "../domain/security/owned-key-guard.ts";
 import { availableTools, COORDINATOR_TOOL_NAMES } from "../domain/tool-catalog/tool-catalog.ts";
+import type { InternalEvent } from "../ports/event-log.ts";
 import type { ProviderConversationItem } from "../ports/model-provider.ts";
+import { assertProtectedValue } from "../services/security/guarded-delivery.ts";
 import { createDemoRuntime } from "./demo-runtime.ts";
 import { createWorkspaceTools } from "./read-only-tools.ts";
 import { assembleRuntime, type RuntimeAssemblyFailure } from "./runtime-assembly.ts";
@@ -36,6 +39,7 @@ export type RuntimeSelection =
       skills: SkillsSummary;
       /** Rebuilt history, for the launch summary. */
       prior: PriorSummary;
+      historyEvents: readonly InternalEvent[];
       /** Project guidance that was injected, for the launch summary. */
       guidance: GuidanceSummary;
       warnings: readonly string[];
@@ -84,7 +88,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   if (!options.hasSettings) {
     return {
       kind: "demo",
-      coordinator: createDemoRuntime(options.workspaceRoot).coordinator,
+      coordinator: createDemoRuntime(options.workspaceRoot, options.sessionId).coordinator,
       reason: "no_configuration",
     };
   }
@@ -137,7 +141,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   if (!assembly.ok) {
     return {
       kind: "demo",
-      coordinator: createDemoRuntime(options.workspaceRoot).coordinator,
+      coordinator: createDemoRuntime(options.workspaceRoot, options.sessionId).coordinator,
       reason: assembly.code,
       ...(assembly.detail === undefined ? {} : { detail: assembly.detail }),
     };
@@ -170,7 +174,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
 
   // Rebuild prior conversation so a resumed Session continues with its history.
   // A rebuild failure blocks sending; it must not silently start fresh.
-  const prior = await rebuildPriorConversation(eventLog, options.sessionId);
+  const prior = await rebuildPriorConversation(eventLog, options.sessionId, assembly.ownedKeys);
 
   // Unknown capacity is distinct from a known window that cannot fit the prompt.
   const computed = computeContextBudget({
@@ -204,6 +208,8 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
         ids,
         enableWrites,
         enableProcesses,
+        ownedKeys: assembly.ownedKeys,
+        refreshOwnedKeys: assembly.refreshOwnedKeys,
       }),
       approvals: { decide: async () => "denied" },
       eventLog,
@@ -250,6 +256,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     }),
     guidance: guidance.summary,
     prior: prior.summary,
+    historyEvents: prior.events,
     skills: skills.summary,
   };
 }
@@ -359,34 +366,43 @@ export type PriorSummary =
 async function rebuildPriorConversation(
   eventLog: InstanceType<typeof import("../adapters/persistence/jsonl-event-log.ts").JsonlEventLog>,
   sessionId: string | undefined,
-): Promise<Readonly<{ conversation: readonly ProviderConversationItem[]; summary: PriorSummary }>> {
+  ownedKeys: OwnedKeyRegistry,
+): Promise<
+  Readonly<{
+    conversation: readonly ProviderConversationItem[];
+    events: readonly InternalEvent[];
+    summary: PriorSummary;
+  }>
+> {
   if (sessionId === undefined) {
-    return { conversation: [], summary: { kind: "none" } };
+    return { conversation: [], events: [], summary: { kind: "none" } };
   }
   try {
     const stored = await eventLog.readWithRecovery(sessionId);
     if (!stored.ok) {
-      return { conversation: [], summary: { kind: "failed", code: stored.code } };
+      return { conversation: [], events: [], summary: { kind: "failed", code: stored.code } };
     }
+    assertProtectedValue(ownedKeys, stored.events);
     const { rebuildConversation, trimConversation } = await import(
       "../application/coordinator/conversation-rebuild.ts"
     );
     const rebuilt = rebuildConversation(stored.events);
     if (!rebuilt.ok) {
-      return { conversation: [], summary: { kind: "failed", code: rebuilt.code } };
+      return { conversation: [], events: [], summary: { kind: "failed", code: rebuilt.code } };
     }
     if (rebuilt.conversation.length === 0) {
-      return { conversation: [], summary: { kind: "none" } };
+      return { conversation: [], events: stored.events, summary: { kind: "none" } };
     }
     // Bound the rebuilt history so a long Session does not consume the whole
     // context before the new task is even considered.
     const trimmed = trimConversation(rebuilt.conversation, 40);
     return {
       conversation: trimmed,
+      events: stored.events,
       summary: { kind: "rebuilt", runs: rebuilt.runs, items: trimmed.length },
     };
   } catch {
-    return { conversation: [], summary: { kind: "failed", code: "rebuild_failed" } };
+    return { conversation: [], events: [], summary: { kind: "failed", code: "rebuild_failed" } };
   }
 }
 

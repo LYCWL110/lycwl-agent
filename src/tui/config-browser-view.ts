@@ -8,6 +8,8 @@ import {
   type BrowserKey,
   type BrowserState,
   filteredModels,
+  reasoningChoices,
+  reasoningNotice,
   visibleWindow,
 } from "./config-browser.ts";
 import { type Capabilities, colorFor, rowStyle } from "./palette.ts";
@@ -35,9 +37,19 @@ export function ConfigBrowser(props: ConfigBrowserProps): ReactElement {
   const viewport = useViewport(props.viewport);
   const width = Math.max(1, Math.min(84, viewport.columns - 4));
   const stacked = width < 62;
-  const providerWidth = stacked ? width : Math.floor(width * 0.25);
-  const protocolWidth = stacked ? width : Math.floor(width * 0.34);
-  const modelWidth = stacked ? width : width - providerWidth - protocolWidth - 2;
+  const paired =
+    stacked &&
+    width >= 28 &&
+    (state.activeColumn === "model" || state.activeColumn === "reasoning");
+  const providerWidth = stacked ? width : Math.floor(width * 0.16);
+  const protocolWidth = stacked ? width : Math.floor(width * 0.3);
+  const reasoningWidth = stacked && !paired ? width : 13;
+  const modelWidth = stacked
+    ? paired
+      ? width - reasoningWidth - 1
+      : width
+    : width - providerWidth - protocolWidth - reasoningWidth - 3;
+  const efforts = reasoningChoices(state);
   const editing = state.filterMode || state.modelInput !== null;
 
   useInput((input, key) => {
@@ -84,10 +96,18 @@ export function ConfigBrowser(props: ConfigBrowserProps): ReactElement {
       offset: state.scroll.model,
       selected: state.modelIndex,
     },
+    {
+      title: "Reasoning",
+      focused: state.activeColumn === "reasoning",
+      width: reasoningWidth,
+      values: efforts,
+      offset: 0,
+      selected: efforts.indexOf(state.reasoningEffort),
+    },
   ];
   return h(
     ConfigChrome,
-    { capabilities, viewport, title: "Provider / Model", animated: props.animated },
+    { capabilities, viewport, title: "Provider / Model / Reasoning", animated: props.animated },
     h(
       Box,
       { flexDirection: "column" },
@@ -97,9 +117,14 @@ export function ConfigBrowser(props: ConfigBrowserProps): ReactElement {
         : h(Text, colorProps(colorFor("dim", capabilities)), clipText(props.endpoint, width)),
       h(
         Box,
-        { flexDirection: stacked ? "column" : "row", marginTop: 1, gap: 1 },
+        { flexDirection: "row", marginTop: stacked ? 0 : 1, gap: 1 },
         ...columns
-          .filter((column) => !stacked || column.focused)
+          .filter(
+            (column) =>
+              !stacked ||
+              column.focused ||
+              (paired && (column.title === "Model" || column.title === "Reasoning")),
+          )
           .map((column) =>
             h(
               Box,
@@ -139,11 +164,14 @@ export function ConfigBrowser(props: ConfigBrowserProps): ReactElement {
           ),
       ),
       h(Text, colorProps(colorFor("faint", capabilities)), "─".repeat(width)),
-      h(
-        Text,
-        colorProps(colorFor("primary", capabilities)),
-        `Reasoning: ${state.protocols[state.protocolIndex] === "anthropic_messages" ? "unavailable" : state.reasoningEffort}`,
-      ),
+      h(Text, colorProps(colorFor("dim", capabilities)), reasoningNotice(state)),
+      !efforts.includes(state.reasoningEffort)
+        ? h(
+            Text,
+            colorProps(colorFor("tertiary", capabilities)),
+            `Current ${state.reasoningEffort}: select a listed level`,
+          )
+        : null,
       state.modelInput !== null
         ? h(
             Box,
@@ -176,11 +204,13 @@ export function ConfigBrowser(props: ConfigBrowserProps): ReactElement {
             colorProps(colorFor(state.status.isError ? "tertiary" : "success", capabilities)),
             state.status.text,
           ),
-      h(
-        Text,
-        colorProps(colorFor("dim", capabilities)),
-        props.busy ? "Saving…" : `${models.length} model(s)`,
-      ),
+      state.status !== null && !props.busy
+        ? null
+        : h(
+            Text,
+            colorProps(colorFor("dim", capabilities)),
+            props.busy ? "Saving…" : `${models.length} model(s)`,
+          ),
       h(
         Text,
         colorProps(colorFor("secondary", capabilities)),
@@ -193,7 +223,7 @@ export function ConfigBrowser(props: ConfigBrowserProps): ReactElement {
         : h(
             Text,
             colorProps(colorFor("dim", capabilities)),
-            "e edit  ·  / filter  ·  a add  ·  r reasoning  ·  Ctrl+R refresh",
+            "e edit · / filter · a add · r effort · Ctrl+R",
           ),
     ),
   );

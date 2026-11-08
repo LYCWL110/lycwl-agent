@@ -13,6 +13,7 @@ const kernel32 = koffi.load("kernel32.dll");
 export const CREATE_SUSPENDED = 0x0000_0004;
 export const CREATE_NO_WINDOW = 0x0800_0000;
 export const CREATE_UNICODE_ENVIRONMENT = 0x0000_0400;
+export const EXTENDED_STARTUPINFO_PRESENT = 0x0008_0000;
 export const STARTF_USESTDHANDLES = 0x0000_0100;
 
 export const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x0000_2000;
@@ -51,6 +52,31 @@ export const GetExitCodeProcess = kernel32.func(
 );
 export const CloseHandle = kernel32.func("bool __stdcall CloseHandle(void* hObject)");
 export const GetLastError = kernel32.func("uint32_t __stdcall GetLastError()");
+export const CreatePipe = kernel32.func(
+  "bool __stdcall CreatePipe(void* hReadPipe, void* hWritePipe, void* lpPipeAttributes, uint32_t nSize)",
+);
+export const SetHandleInformation = kernel32.func(
+  "bool __stdcall SetHandleInformation(void* hObject, uint32_t dwMask, uint32_t dwFlags)",
+);
+export const PeekNamedPipe = kernel32.func(
+  "bool __stdcall PeekNamedPipe(void* hNamedPipe, void* lpBuffer, uint32_t nBufferSize, void* lpBytesRead, void* lpTotalBytesAvail, void* lpBytesLeftThisMessage)",
+);
+export const ReadFile = kernel32.func(
+  "bool __stdcall ReadFile(void* hFile, void* lpBuffer, uint32_t nNumberOfBytesToRead, void* lpNumberOfBytesRead, void* lpOverlapped)",
+);
+export const InitializeProcThreadAttributeList = kernel32.func(
+  "bool __stdcall InitializeProcThreadAttributeList(void* lpAttributeList, uint32_t dwAttributeCount, uint32_t dwFlags, void* lpSize)",
+);
+export const UpdateProcThreadAttribute = kernel32.func(
+  "bool __stdcall UpdateProcThreadAttribute(void* lpAttributeList, uint32_t dwFlags, uintptr_t Attribute, void* lpValue, size_t cbSize, void* lpPreviousValue, void* lpReturnSize)",
+);
+export const DeleteProcThreadAttributeList = kernel32.func(
+  "void __stdcall DeleteProcThreadAttributeList(void* lpAttributeList)",
+);
+
+export function writePointer(buffer: Buffer, offset: number, value: unknown): void {
+  koffi.encode(buffer, offset, "void*", value);
+}
 
 /** Reads a Win32 HANDLE out of a PROCESS_INFORMATION buffer. */
 export function readHandle(pi: Buffer, offset: number): bigint {

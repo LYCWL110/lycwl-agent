@@ -66,6 +66,8 @@ export type InternalEventPayload =
       kind: "model_request_started";
       modelRequestId: string;
       attemptNo: number;
+      /** Supplementary inputs present in this main request; absent on older records. */
+      includedInputIds?: readonly string[];
       /** Credential revision actually used for this attempt, if a route is bound. */
       credentialRevision?: number;
     }>

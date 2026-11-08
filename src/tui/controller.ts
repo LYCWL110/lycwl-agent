@@ -1,5 +1,6 @@
 import type {
   CoordinatorResult,
+  QueueInputOutcome,
   RuntimeCoordinator,
 } from "../application/coordinator/runtime-coordinator.ts";
 import type { TodoList } from "../domain/planning/todo.ts";
@@ -14,11 +15,18 @@ import { deriveView, interpretComposer, type TuiViewState } from "./view-model.t
  */
 export type TuiSessionDeps = Readonly<{
   coordinator: RuntimeCoordinator;
+  initialEvents?: readonly InternalEvent[];
+  canResumeSession?: (sessionId: string) => Promise<boolean>;
 }>;
+
+export type TuiNavigationRequest =
+  | Readonly<{ kind: "config"; page: "setup" | "model" }>
+  | Readonly<{ kind: "session"; sessionId: string | null }>
+  | Readonly<{ kind: "quit" }>;
 
 export type TuiController = Readonly<{
   view: () => TuiViewState;
-  submit: (text: string) => Promise<void>;
+  submit: (text: string) => Promise<boolean | undefined>;
   approve: () => Promise<void>;
   deny: () => Promise<void>;
   answer: (text: string) => Promise<void>;
@@ -26,11 +34,8 @@ export type TuiController = Readonly<{
   cancelRun: () => Promise<void>;
   close: () => Promise<void>;
   lastResult: () => CoordinatorResult | null;
-  /**
-   * True once when the user asked to open the provider browser. The caller
-   * consumes it, because opening the browser needs the config store and vault.
-   */
-  takeConfigRequest: () => boolean;
+  takeNavigationRequest: () => TuiNavigationRequest | null;
+  closePanel: () => void;
 }>;
 
 export function createTuiController(deps: TuiSessionDeps): TuiController {
@@ -39,8 +44,8 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   let lastResult: CoordinatorResult | null = null;
   let draft = "";
   let commandCounter = 0;
-  let events: readonly InternalEvent[] = [];
-  let todo: TodoList = emptyTodoList();
+  let events: readonly InternalEvent[] = deps.initialEvents ?? [];
+  let todo: TodoList = deriveTodo(emptyTodoList(), events);
   /**
    * The Run promise for the active Run. `coordinator.run` does not resolve while
    * the Run is suspended, so an approval or question reply must await this rather
@@ -49,8 +54,10 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   let activeRun: Promise<CoordinatorResult> | null = null;
   /** Why the last answer was rejected, shown in the question panel. */
   let answerError: string | null = null;
-  /** Set when the composer asked to open the provider browser. */
-  let configRequested = false;
+  let navigation: TuiNavigationRequest | null = null;
+  let localPanel: "help" | "session" | null = null;
+  let commandNotice: string | null = null;
+  let checkingSession = false;
   let closing: Promise<void> | null = null;
 
   function rememberEvents(incoming: readonly InternalEvent[]): readonly InternalEvent[] {
@@ -82,33 +89,86 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
 
   function view(): TuiViewState {
     const live = deps.coordinator.currentRunProjection();
-    return deriveView({
-      runStatus: live?.status ?? runStatus,
-      safeCode,
-      events: live === null ? events : rememberEvents(live.events),
-      todo: todo.items.length === 0 ? null : todo,
-      pendingApproval: deps.coordinator.pendingApprovalView(),
-      pendingQuestion: deps.coordinator.pendingQuestionView(),
-      answerError,
-      draft,
-    });
+    return {
+      ...deriveView({
+        runStatus: live?.status ?? runStatus,
+        safeCode,
+        events: live === null ? events : rememberEvents(live.events),
+        todo: todo.items.length === 0 ? null : todo,
+        pendingApproval: deps.coordinator.pendingApprovalView(),
+        pendingQuestion: deps.coordinator.pendingQuestionView(),
+        answerError,
+        draft,
+      }),
+      localPanel,
+      commandNotice,
+    };
   }
 
-  async function submit(text: string): Promise<void> {
-    if (closing !== null) return;
+  async function submit(text: string): Promise<boolean | undefined> {
+    if (closing !== null || navigation !== null || checkingSession) return;
     const intent = interpretComposer(view(), text);
     draft = "";
-    if (intent.kind === "reject" || intent.kind === "withdraw") return;
+    commandNotice = null;
+    if (intent.kind === "reject") {
+      if (intent.reason !== "empty")
+        commandNotice = {
+          run_active: "Finish or cancel the current run first.",
+          unknown_command: "Unknown command. Use /help.",
+          invalid_command: "Invalid command. Use /help.",
+        }[intent.reason];
+      return;
+    }
+    if (intent.kind === "withdraw") return;
     if (intent.kind === "queue_input") {
-      await deps.coordinator.queueInput(intent.text);
+      let queued: QueueInputOutcome;
+      try {
+        queued = await deps.coordinator.queueInput(intent.text);
+      } catch {
+        draft = text;
+        commandNotice = "Input not queued: storage unavailable";
+        return false;
+      }
+      if (!queued.ok) {
+        draft = text;
+        commandNotice = `Input not queued: ${queued.code}`;
+        return false;
+      }
+      return true;
+    }
+    if (intent.kind === "open_config" || intent.kind === "open_model") {
+      navigation = { kind: "config", page: intent.kind === "open_model" ? "model" : "setup" };
       return;
     }
-    if (intent.kind === "open_config") {
-      // The controller reports the request; the caller owns the browser because it
-      // needs the config store and the vault, which the controller does not have.
-      configRequested = true;
+    if (intent.kind === "open_panel") {
+      localPanel = intent.panel;
       return;
     }
+    if (intent.kind === "switch_session") {
+      checkingSession = true;
+      try {
+        if (intent.sessionId !== null && !(await deps.canResumeSession?.(intent.sessionId))) {
+          commandNotice = "Session unavailable. Enter an existing session ID.";
+          return;
+        }
+        navigation = { kind: "session", sessionId: intent.sessionId };
+      } catch {
+        commandNotice = "Session records could not be checked.";
+      } finally {
+        checkingSession = false;
+      }
+      return;
+    }
+    if (intent.kind === "cancel_run") {
+      localPanel = null;
+      await cancelRun();
+      return;
+    }
+    if (intent.kind === "quit") {
+      navigation = { kind: "quit" };
+      return;
+    }
+    localPanel = null;
     runStatus = "active";
     safeCode = null;
     const run = deps.coordinator.run(intent.text);
@@ -179,7 +239,8 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   }
 
   async function cancelRun(): Promise<void> {
-    if (runStatus !== "active" && runStatus !== "waiting") return;
+    const status = view().runStatus;
+    if (status !== "active" && status !== "waiting") return;
     commandCounter += 1;
     await deps.coordinator.cancelRun(`tui-cancel-${commandCounter}`);
     await settleActiveRun();
@@ -209,10 +270,13 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     cancelRun,
     close,
     lastResult: () => lastResult,
-    /** Consume a pending open-config request, if any. */
-    takeConfigRequest: () => {
-      const requested = configRequested;
-      configRequested = false;
+    closePanel: () => {
+      localPanel = null;
+      commandNotice = null;
+    },
+    takeNavigationRequest: () => {
+      const requested = navigation;
+      navigation = null;
       return requested;
     },
   };

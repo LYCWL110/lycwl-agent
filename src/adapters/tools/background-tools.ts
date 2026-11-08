@@ -32,6 +32,7 @@ export type BackgroundToolDependencies = Readonly<{
     environment: Readonly<Record<string, string>>,
     label: string,
     toolCallId?: string,
+    signal?: AbortSignal,
   ) => Promise<BackgroundStartOutcome>;
   /** Read the current supervised state of a task. */
   getTask: (taskId: string) => Promise<BackgroundTask | null>;
@@ -114,7 +115,7 @@ export function createBackgroundTools(dependencies: BackgroundToolDependencies):
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
       switch (request.toolName) {
         case BACKGROUND_START_DEFINITION.name:
-          return executeStart(dependencies, request.arguments, request.toolCallId);
+          return executeStart(dependencies, request.arguments, request.toolCallId, request.signal);
         case BACKGROUND_STATUS_DEFINITION.name:
           return executeStatus(dependencies, request.arguments);
         case BACKGROUND_OUTPUT_DEFINITION.name:
@@ -196,6 +197,7 @@ async function executeStart(
   dependencies: BackgroundToolDependencies,
   args: unknown,
   toolCallId: string,
+  signal?: AbortSignal,
 ): Promise<ToolExecutionResult> {
   if (dependencies.sessionMode === "read_only") {
     return { status: "failed", safeCode: "read_only_session", text: null };
@@ -219,6 +221,7 @@ async function executeStart(
 
   let outcome: BackgroundStartOutcome;
   try {
+    if (signal?.aborted) return { status: "failed", safeCode: "tool_cancelled", text: null };
     outcome = await dependencies.startProcess(
       {
         command: parsed.value.command,
@@ -229,6 +232,7 @@ async function executeStart(
       filter.environment,
       parsed.value.label ?? "",
       toolCallId,
+      signal,
     );
   } catch {
     return { status: "outcome_unknown", safeCode: "background_start_unknown" };
@@ -256,6 +260,8 @@ async function executeStatus(
   if (!taskId.ok) return { status: "failed", safeCode: taskId.code, text: null };
   const task = await dependencies.getTask(taskId.value);
   if (task === null) return { status: "failed", safeCode: "unknown_task", text: null };
+  if (task.deliveryBlocked !== undefined)
+    return { status: "succeeded", text: null, deliveryBlocked: task.deliveryBlocked };
   return { status: "succeeded", text: describeTask(task) };
 }
 
@@ -272,6 +278,8 @@ async function executeOutput(
 
   const task = await dependencies.getTask(taskId.value);
   if (task === null) return { status: "failed", safeCode: "unknown_task", text: null };
+  if (task.deliveryBlocked !== undefined)
+    return { status: "succeeded", text: null, deliveryBlocked: task.deliveryBlocked };
 
   const cursor = readCursor(record["cursor"], task);
   if (!cursor.ok) return { status: "failed", safeCode: cursor.code, text: null };

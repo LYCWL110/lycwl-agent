@@ -110,7 +110,19 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
         Buffer.from(utf16le).swap16().toString("latin1"),
         `Bearer ${key.value}`,
       ]);
-      for (const value of representations) byValue.set(value, { ...key, value });
+      for (const value of representations) {
+        const byteEncoding = byValue.get(value)?.byteEncoding;
+        byValue.set(value, {
+          ...key,
+          value,
+          ...(byteEncoding === undefined ? {} : { byteEncoding }),
+        });
+      }
+      for (const value of [
+        utf16le.toString("latin1"),
+        Buffer.from(utf16le).swap16().toString("latin1"),
+      ])
+        byValue.set(value, { ...key, value, byteEncoding: "latin1" });
     }
     protectedKeys = [...byValue.values()];
   };
@@ -199,6 +211,9 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
             model: config.model,
             endpoint: protocolEndpoint(config.baseUrl, config.protocol),
             maxTokens: config.maxOutputTokens,
+            ...(config.reasoningEffort === undefined
+              ? {}
+              : { reasoningEffort: config.reasoningEffort }),
             tools: options.toolDefinitions,
             post,
             ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),

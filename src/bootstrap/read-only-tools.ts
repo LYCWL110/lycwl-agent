@@ -14,12 +14,7 @@ import { createBackgroundRegistry } from "../adapters/windows/background-registr
 import { resolveWebFetchHost } from "../adapters/windows/dns-resolver.ts";
 import { createLspRegistry } from "../adapters/windows/lsp-registry.ts";
 import { pinnedFetch } from "../adapters/windows/pinned-https-client.ts";
-import {
-  createPowerShellCapturePaths,
-  type PowerShellCapturePaths,
-  powershellCommand,
-  powershellExecutable,
-} from "../adapters/windows/powershell-command.ts";
+import { powershellCommand, powershellExecutable } from "../adapters/windows/powershell-command.ts";
 import { createProcessSupervisor } from "../adapters/windows/process-supervisor.ts";
 import { createSearchLedger, makeReservationId } from "../adapters/windows/search-ledger.ts";
 import { createSearchScope } from "../adapters/windows/search-scope.ts";
@@ -28,6 +23,7 @@ import { createWindowsFsAdapter } from "../adapters/windows/windows-fs-adapter.t
 import { createWindowsMutationAdapter } from "../adapters/windows/windows-mutation-adapter.ts";
 import { createWindowsWriteAdapter } from "../adapters/windows/windows-write-adapter.ts";
 import { emptyTodoList } from "../domain/planning/todo.ts";
+import type { OwnedKeyRegistry } from "../domain/security/owned-key-guard.ts";
 import type { ApprovalGate } from "../ports/approval-gate.ts";
 import type { IdentifierFactory } from "../ports/identity.ts";
 import type {
@@ -83,6 +79,8 @@ export type WorkspaceToolsOptions = Readonly<{
    * secrets live in Credential Manager behind a purpose-bound reference.
    */
   resolveSearchApiKey?: () => Promise<string | null>;
+  ownedKeys?: OwnedKeyRegistry;
+  refreshOwnedKeys?: () => Promise<void>;
 }>;
 
 export function createReadOnlyWorkspaceTools(options: WorkspaceToolsOptions): ToolExecutor {
@@ -108,7 +106,6 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
   const reader = createWindowsFileReader({ workspaceRoot });
   const writer = createWindowsWriteAdapter({ workspaceRoot });
   const mutator = createWindowsMutationAdapter({ workspaceRoot });
-  const processCaptures = new Map<string, PowerShellCapturePaths>();
 
   const readFile = createReadFileTool({
     workspaceRoot,
@@ -181,17 +178,17 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     ? createShellTool({
         sessionMode: enableWrites ? "workspace_write" : "read_only",
         inheritedEnvironment: { ...process.env } as Record<string, string>,
-        runShell: async (request, environment, signal, toolCallId) => {
-          const supervisor = createProcessSupervisor();
-          const capturePaths =
-            toolCallId === undefined ? undefined : processCaptures.get(toolCallId);
+        runShell: async (request, environment, signal) => {
+          await options.refreshOwnedKeys?.();
+          const supervisor = createProcessSupervisor(
+            options.ownedKeys === undefined ? {} : { ownedKeys: options.ownedKeys },
+          );
           const outcome = await supervisor.runToCompletion({
             command: request.command,
             cwd: request.cwd,
             timeoutMs: request.timeoutMs,
             environment,
             ...(signal === undefined ? {} : { signal }),
-            ...(capturePaths === undefined ? {} : { capturePaths }),
           });
           if (outcome.kind === "failed") {
             return { kind: "unknown", safeCode: outcome.code };
@@ -205,6 +202,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
                 stderr: outcome.stderr,
                 rawBytes: outcome.rawBytes,
                 captureComplete: outcome.captureComplete,
+                deliveryBlocked: outcome.deliveryBlocked,
               }
             : {
                 kind: "completed",
@@ -213,6 +211,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
                 stderr: outcome.stderr,
                 rawBytes: outcome.rawBytes,
                 captureComplete: outcome.captureComplete,
+                deliveryBlocked: outcome.deliveryBlocked,
               };
         },
       })
@@ -222,7 +221,10 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     ? createBackgroundRegistry({
         sessionMode: enableWrites ? "workspace_write" : "read_only",
         inheritedEnvironment: { ...process.env } as Record<string, string>,
-        captureFor: (id) => (id === undefined ? undefined : processCaptures.get(id)),
+        ...(options.ownedKeys === undefined ? {} : { ownedKeys: options.ownedKeys }),
+        ...(options.refreshOwnedKeys === undefined
+          ? {}
+          : { refreshOwnedKeys: options.refreshOwnedKeys }),
       })
     : null;
   const background =
@@ -392,14 +394,12 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
       const normalized = await normalize(request);
       if (isStart(request)) {
         processSnapshots.set(request.toolCallId, await processIdentity(request));
-        processCaptures.set(request.toolCallId, createPowerShellCapturePaths());
       }
       const delegate = resolveDelegate(request.toolName);
       const preview = delegate?.preview === undefined ? null : await delegate.preview(normalized);
-      const capture = processCaptures.get(request.toolCallId);
       const command = (normalized.arguments as { command?: unknown } | null)?.command;
-      return isStart(request) && capture !== undefined && typeof command === "string"
-        ? `${preview}\nexecutable=${powershellExecutable()}\ncommandLine=${powershellCommand(command, capture.stdoutPath, capture.stderrPath)}`
+      return isStart(request) && typeof command === "string"
+        ? `${preview}\nexecutable=${powershellExecutable()}\ncommandLine=${powershellCommand(command)}\noutputEncoding=utf-8\ncapture=guarded memory pipes; stdout+stderr limit=8388608 bytes`
         : preview;
     },
     async requiresApproval(request) {
@@ -412,7 +412,6 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     },
     discardApproval(id) {
       processSnapshots.delete(id);
-      processCaptures.delete(id);
       for (const delegate of delegates) delegate.discardApproval?.(id);
     },
     async cancelAll() {
@@ -442,7 +441,6 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
           return { status: "failed", safeCode: "process_precondition_changed", text: null };
         const result = await delegate.execute(normalized);
         processSnapshots.delete(request.toolCallId);
-        processCaptures.delete(request.toolCallId);
         return result;
       } catch (error) {
         const safeCode = error instanceof Error ? error.message : "read_failed";

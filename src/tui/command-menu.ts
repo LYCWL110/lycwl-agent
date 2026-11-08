@@ -4,14 +4,17 @@ import { cellWidth, clipText, colorProps } from "./chrome.ts";
 import { type Capabilities, colorFor } from "./palette.ts";
 
 export function CommandMenu(props: {
-  commands: readonly Readonly<{ name: string; description: string }>[];
+  commands: readonly Readonly<{ name: string; description: string; idleOnly: boolean }>[];
   selected: number;
   enabled: boolean;
   width: number;
   capabilities: Capabilities;
+  rows: number;
 }): ReactElement | null {
   if (props.commands.length === 0) return null;
   const { capabilities, width } = props;
+  const count = Math.min(props.rows, props.commands.length);
+  const offset = Math.max(0, Math.min(props.selected - count + 1, props.commands.length - count));
   const innerWidth = Math.max(1, width - 2);
   const nameWidth = Math.min(
     Math.max(...props.commands.map((command) => cellWidth(command.name))) + 2,
@@ -24,16 +27,18 @@ export function CommandMenu(props: {
       bottom: 2,
       left: 0,
       width,
-      height: props.commands.length,
+      height: count,
       flexDirection: "column",
       backgroundColor: capabilities.depth === "mono" ? undefined : "#202020",
     },
-    ...props.commands.map((command, index) => {
-      const selected = index === props.selected;
+    ...props.commands.slice(offset, offset + count).map((command, index) => {
+      const selected = offset + index === props.selected;
       const highlight = selected && capabilities.depth !== "mono";
       const foreground = highlight ? "black" : colorFor("dim", capabilities);
       const description = clipText(
-        props.enabled ? command.description : `${command.description} (idle only)`,
+        props.enabled || !command.idleOnly
+          ? command.description
+          : `${command.description} (idle only)`,
         Math.max(1, innerWidth - nameWidth),
       );
       return h(

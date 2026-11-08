@@ -3,7 +3,7 @@ import { createElement, type ReactElement, useState } from "react";
 
 import {
   maskSecret,
-  REASONING_EFFORTS,
+  protocolReasoningEfforts,
   type ReasoningEffort,
   SUPPORTED_PROTOCOLS,
   type SupportedProtocol,
@@ -56,7 +56,7 @@ export type SetupProps = Readonly<{
   busy?: boolean;
   saveError?: string | null;
   animated?: boolean;
-  onBrowse?: (draft: SetupDraft) => void;
+  onBrowse?: (draft: SetupDraft, column?: "model" | "reasoning") => void;
   onSave: (draft: SetupDraft) => void;
   onDiscard: () => void;
 }>;
@@ -124,21 +124,21 @@ export function SetupScreen(props: SetupProps): ReactElement {
       return {
         ...current,
         protocol,
-        ...(protocol === "anthropic_messages" ? { reasoningEffort: "default" } : {}),
       };
     });
   }
 
   function cycleReasoning(delta: number): void {
-    if (draft.protocol === "anthropic_messages") return;
+    if (props.onBrowse !== undefined) {
+      props.onBrowse(draft, "reasoning");
+      return;
+    }
     setDraft((current) => {
-      const index = REASONING_EFFORTS.indexOf(current.reasoningEffort ?? "default");
+      const efforts = protocolReasoningEfforts(current.protocol);
+      const index = efforts.indexOf(current.reasoningEffort ?? "default");
       return {
         ...current,
-        reasoningEffort:
-          REASONING_EFFORTS[
-            (index + delta + REASONING_EFFORTS.length) % REASONING_EFFORTS.length
-          ] ?? "default",
+        reasoningEffort: efforts[(index + delta + efforts.length) % efforts.length] ?? "default",
       };
     });
   }
@@ -215,9 +215,7 @@ export function SetupScreen(props: SetupProps): ReactElement {
           field,
           value:
             field === "reasoningEffort"
-              ? draft.protocol === "anthropic_messages"
-                ? "unavailable"
-                : (draft.reasoningEffort ?? "default")
+              ? `${draft.reasoningEffort ?? "default"}${props.onBrowse ? "" : " (manual)"}`
               : draft[field],
           focused: focus === field,
           editing: editing && focus === field,

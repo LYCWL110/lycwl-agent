@@ -3,11 +3,12 @@ import { createElement, type ReactElement, useState } from "react";
 import { ActivityIndicator } from "./activity-indicator.ts";
 import { Brand, clipText, colorProps, useViewport, type Viewport, wrapText } from "./chrome.ts";
 import { CommandMenu } from "./command-menu.ts";
+import { LocalPanel } from "./local-panel.ts";
 import { type Capabilities, colorFor, detectCapabilities } from "./palette.ts";
 import { useTerminalWheel } from "./terminal-wheel.ts";
-import { editText, type TextEdit } from "./text-edit.ts";
+import { characters, editText, type TextEdit } from "./text-edit.ts";
 import { TextInput } from "./text-input.ts";
-import { COMPOSER_COMMANDS, type TuiViewState } from "./view-model.ts";
+import { COMPOSER_COMMANDS, commandEnabled, type TuiViewState } from "./view-model.ts";
 
 /**
  * Main TUI layout, following the Miyu reference's structure.
@@ -27,13 +28,16 @@ const h = createElement;
 
 export type AppProps = Readonly<{
   view: TuiViewState;
-  onSubmit: (text: string) => void;
+  // biome-ignore lint/suspicious/noConfusingVoidType: Existing submit callbacks may acknowledge without a return value.
+  onSubmit: (text: string) => void | boolean | Promise<undefined | boolean>;
   onApprove: () => void;
   onDeny: () => void;
   onAnswer: (text: string) => void;
   onDeclineQuestion: () => void;
   onCancelRun: () => void;
   onQuit: () => void;
+  onClosePanel?: () => void;
+  sessionId?: string;
   /** Injected so a test can exercise every colour depth. */
   capabilities?: Capabilities;
   /** Model name for the footer; absent hides that segment. */
@@ -50,6 +54,8 @@ export function App(props: AppProps): ReactElement {
   const [scroll, setScroll] = useState<number | null>(null);
   const [commandIndex, setCommandIndex] = useState(0);
   const [dismissedCommands, setDismissedCommands] = useState(false);
+  const [expandedTools, setExpandedTools] = useState<ReadonlySet<string>>(new Set());
+  const [selectedTool, setSelectedTool] = useState<string | null>(null);
   const viewport = useViewport(props.viewport);
   const width = Math.max(1, viewport.columns - 4);
   const lobby = view.runStatus === "idle" && view.transcript.length === 0 && view.todo === null;
@@ -63,7 +69,7 @@ export function App(props: AppProps): ReactElement {
       : [];
   const selectedCommand = Math.min(commandIndex, Math.max(0, commands.length - 1));
   const bodyRows = Math.max(1, viewport.rows - 9);
-  const lines = documentLines(view, width);
+  const lines = documentLines(view, width, expandedTools, selectedTool);
   const maxStart = Math.max(0, lines.length - bodyRows);
   const start = scroll === null ? maxStart : Math.min(scroll, maxStart);
   const capabilities =
@@ -84,9 +90,44 @@ export function App(props: AppProps): ReactElement {
     });
   }
 
+  function toggleTool(id: string): void {
+    setSelectedTool(id);
+    setScroll(start);
+    setExpandedTools((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function submit(text: string): void {
+    setEditor({ value: "", cursor: 0 });
+    setScroll(null);
+    void Promise.resolve(props.onSubmit(text)).then((accepted) => {
+      if (accepted === false)
+        setEditor((current) =>
+          current.value === "" ? { value: text, cursor: characters(text).length } : current,
+        );
+    });
+  }
+
   useInput((input, key) => {
+    if (view.localPanel != null) return;
     if (key.ctrl && input === "c") {
       props.onCancelRun();
+      return;
+    }
+    if (key.ctrl && input === "t") {
+      const visibleTools = lines
+        .slice(start, start + bodyRows)
+        .filter((line) => line.toolId !== undefined);
+      const id =
+        selectedTool !== null &&
+        view.transcript.some((entry) => entry.id === selectedTool && entry.tool !== undefined)
+          ? selectedTool
+          : visibleTools.at(-1)?.toolId;
+      if (id !== undefined && id !== null) toggleTool(id);
       return;
     }
     if (key.escape) {
@@ -125,11 +166,9 @@ export function App(props: AppProps): ReactElement {
         setEditor({ value: command.name, cursor: command.name.length });
         return;
       }
-      if (key.return && !view.canSubmit) return;
+      if (key.return && command !== undefined && !commandEnabled(view, command)) return;
       if (key.return && command !== undefined) {
-        setEditor({ value: "", cursor: 0 });
-        setScroll(null);
-        props.onSubmit(command.name);
+        submit(command.name);
         return;
       }
     }
@@ -142,7 +181,7 @@ export function App(props: AppProps): ReactElement {
       else if (view.pendingApproval !== null) {
         if (text === "a" && view.pendingApprovalPreview !== null) props.onApprove();
         else if (text === "d") props.onDeny();
-      } else props.onSubmit(text);
+      } else submit(text);
       return;
     }
     setCommandIndex(0);
@@ -151,16 +190,44 @@ export function App(props: AppProps): ReactElement {
   });
 
   usePaste((text) => {
+    if (view.localPanel != null) return;
     setCommandIndex(0);
     setDismissedCommands(false);
     setEditor((current) => editText(current, text, {}));
   });
 
-  useTerminalWheel((event) => {
-    if (!lobby && event.row >= 3 && event.row < 3 + bodyRows && event.column <= viewport.columns) {
-      scrollBy(event.direction === "up" ? -3 : 3);
-    }
-  });
+  useTerminalWheel(
+    (event) => {
+      if (view.localPanel != null) return;
+      if (
+        !lobby &&
+        event.row >= 3 &&
+        event.row < 3 + bodyRows &&
+        event.column <= viewport.columns
+      ) {
+        scrollBy(event.direction === "up" ? -3 : 3);
+      }
+    },
+    (event) => {
+      if (view.localPanel != null || lobby || event.column < 3 || event.column > width + 2) return;
+      const offset = event.row - 3;
+      if (offset < 0 || offset >= bodyRows) return;
+      const id = lines[start + offset]?.toolId;
+      if (id !== undefined) toggleTool(id);
+    },
+  );
+
+  if (view.localPanel != null)
+    return h(LocalPanel, {
+      key: view.localPanel,
+      kind: view.localPanel,
+      sessionId: props.sessionId,
+      notice: view.commandNotice,
+      viewport,
+      capabilities,
+      onSubmit: props.onSubmit,
+      onClose: () => props.onClosePanel?.(),
+    });
 
   if (lobby) {
     return h(
@@ -189,6 +256,7 @@ export function App(props: AppProps): ReactElement {
           width: lobbyWidth,
           commands,
           selectedCommand,
+          commandRows: Math.max(1, Math.min(6, Math.floor((viewport.rows - 5) / 2))),
           animated: props.animated,
         }),
         h(Footer, {
@@ -251,6 +319,7 @@ export function App(props: AppProps): ReactElement {
       width,
       commands,
       selectedCommand,
+      commandRows: Math.max(1, Math.min(6, viewport.rows - 6)),
       animated: props.animated,
     }),
     h(Footer, {
@@ -267,15 +336,46 @@ type DocumentLine = Readonly<{
   text: string;
   role: "primary" | "secondary" | "tertiary" | "success" | "dim" | "faint";
   bold?: boolean;
+  toolId?: string;
 }>;
 
 /** Wrap rather than truncate: approval commands and diffs remain available by paging. */
-function documentLines(view: TuiViewState, width: number): DocumentLine[] {
+function documentLines(
+  view: TuiViewState,
+  width: number,
+  expanded: ReadonlySet<string>,
+  selected: string | null,
+): DocumentLine[] {
   const lines: DocumentLine[] = [];
   function append(text: string, role: DocumentLine["role"], bold = false): void {
-    lines.push(...wrapText(text, width).map((line) => ({ text: line, role, bold })));
+    lines.push(...wrapText(displayText(text), width).map((line) => ({ text: line, role, bold })));
   }
   for (const entry of view.transcript) {
+    if (entry.kind === "tool" && entry.tool !== undefined) {
+      const isExpanded = expanded.has(entry.id);
+      const role =
+        entry.status === "failed" || entry.status === "denied" || entry.status === "outcome_unknown"
+          ? "tertiary"
+          : entry.status === "succeeded"
+            ? "success"
+            : "secondary";
+      const prefix = `${selected === entry.id ? "▸" : " "} ${isExpanded ? "▾" : "▸"} `;
+      const suffix = ` · ${entry.status ?? "requested"}`;
+      lines.push({
+        text: clipText(
+          `${prefix}${clipText(displayText(entry.tool.summary), Math.max(1, width - prefix.length - suffix.length))}${suffix}`,
+          width,
+        ),
+        role,
+        bold: true,
+        toolId: entry.id,
+      });
+      if (isExpanded) {
+        append(entry.tool.details || "(no recorded details)", "dim");
+      }
+      append("", "faint");
+      continue;
+    }
     const role =
       entry.kind === "user"
         ? "primary"
@@ -286,7 +386,7 @@ function documentLines(view: TuiViewState, width: number): DocumentLine[] {
             : "dim";
     const label =
       entry.kind === "user"
-        ? "you"
+        ? `you${entry.status === null ? "" : ` · ${entry.status}`}`
         : entry.kind === "assistant"
           ? "agent"
           : entry.kind === "tool"
@@ -335,6 +435,16 @@ function documentLines(view: TuiViewState, width: number): DocumentLine[] {
   return lines;
 }
 
+function displayText(text: string): string {
+  return text.replace(/[\p{Control}\p{Bidi_Control}]/gu, (character) =>
+    character === "\n" || character === "\r"
+      ? character
+      : character === "\t"
+        ? "    "
+        : `\\u${(character.codePointAt(0) ?? 0).toString(16).padStart(4, "0")}`,
+  );
+}
+
 /** One-line title with the run state on the right, as the reference does. */
 function TitleBar(props: { view: TuiViewState; capabilities: Capabilities }): ReactElement {
   const { view, capabilities } = props;
@@ -375,6 +485,7 @@ function Composer(props: {
   width: number;
   commands: (typeof COMPOSER_COMMANDS)[number][];
   selectedCommand: number;
+  commandRows: number;
   animated?: boolean | undefined;
 }): ReactElement {
   const { view, editor, capabilities } = props;
@@ -389,7 +500,7 @@ function Composer(props: {
         : view.queueingInput
           ? "queued as supplementary input for the running run"
           : view.canSubmit
-            ? "Enter submits · /config settings · Ctrl+C cancels"
+            ? "Enter submits · / commands · Ctrl+C cancels"
             : "run is busy";
   return h(
     Box,
@@ -414,7 +525,7 @@ function Composer(props: {
         ? h(
             Text,
             colorProps(colorFor("faint", capabilities)),
-            clipText(hint, Math.max(1, props.width - 2)),
+            clipText(view.commandNotice ?? hint, Math.max(1, props.width - 2)),
           )
         : h(ActivityIndicator, {
             activity: view.activity,
@@ -429,6 +540,7 @@ function Composer(props: {
       enabled: view.canSubmit,
       width: props.width,
       capabilities,
+      rows: props.commandRows,
     }),
   );
 }

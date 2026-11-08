@@ -278,6 +278,7 @@ type MutableRunContext = {
   pendingResume: Promise<CoordinatorResult> | null;
   checkpointFailure: string | null;
   deliveryBlocked: boolean;
+  deliveryBlockReason: "owned_key_detected" | "guard_failure" | null;
   todoList: TodoList;
   /** Fixed model route for this Run (C03); null when none was configured. */
   runBinding: RunModelBinding | null;
@@ -595,6 +596,7 @@ export class RuntimeCoordinator {
       pendingResume: null,
       checkpointFailure: null,
       deliveryBlocked: false,
+      deliveryBlockReason: null,
       todoList: emptyTodoList(),
       runBinding: this.#deps.runBinding ?? null,
       callHistory: [],
@@ -687,7 +689,8 @@ export class RuntimeCoordinator {
     try {
       while (context.run.state === "active") {
         if (context.cancelRequested) return this.#cancel(context);
-        if (context.deliveryBlocked) return this.#blockDelivery(context, "owned_key_detected");
+        if (context.deliveryBlocked)
+          return this.#blockDelivery(context, context.deliveryBlockReason ?? "owned_key_detected");
 
         const round = addModelRound(context.budget);
         if (!round.ok) return this.#fail(context, round.code);
@@ -791,7 +794,11 @@ export class RuntimeCoordinator {
         for (const [index, call] of completion.toolCalls.entries()) {
           const callResult = await this.#executeCall(context, call);
           if (callResult.kind === "stop") return callResult.result;
-          if (context.deliveryBlocked) return this.#blockDelivery(context, "owned_key_detected");
+          if (context.deliveryBlocked)
+            return this.#blockDelivery(
+              context,
+              context.deliveryBlockReason ?? "owned_key_detected",
+            );
           if (context.stopSiblings) {
             context.stopSiblings = false;
             for (const remaining of completion.toolCalls.slice(index + 1)) {
@@ -915,6 +922,13 @@ export class RuntimeCoordinator {
             kind: "model_request_started",
             modelRequestId: requestId,
             attemptNo,
+            ...(overrideConversation === undefined
+              ? {
+                  includedInputIds: context.events.flatMap(({ payload }) =>
+                    payload.kind === "run_input_batch_consumed" ? payload.inputIds : [],
+                  ),
+                }
+              : {}),
             ...(credentialRevision === null ? {} : { credentialRevision }),
           });
           return { ok: true as const };
@@ -1285,7 +1299,10 @@ export class RuntimeCoordinator {
       call,
     );
     context.cancelledDuring = null;
-    if ("deliveryBlocked" in outcome && outcome.deliveryBlocked) context.deliveryBlocked = true;
+    if ("deliveryBlocked" in outcome && outcome.deliveryBlocked) {
+      context.deliveryBlocked = true;
+      context.deliveryBlockReason = outcome.deliveryBlockReason ?? "owned_key_detected";
+    }
 
     if (outcome.kind === "unknown")
       this.#appendToolResult(context, call, "outcome_unknown", outcome.safeCode);
@@ -1416,7 +1433,10 @@ export class RuntimeCoordinator {
         decision,
       },
     );
-    if ("deliveryBlocked" in outcome && outcome.deliveryBlocked) context.deliveryBlocked = true;
+    if ("deliveryBlocked" in outcome && outcome.deliveryBlocked) {
+      context.deliveryBlocked = true;
+      context.deliveryBlockReason = outcome.deliveryBlockReason ?? "owned_key_detected";
+    }
 
     if (outcome.kind === "unknown")
       this.#appendToolResult(context, pending.call, "outcome_unknown", outcome.safeCode);
@@ -1578,6 +1598,7 @@ export class RuntimeCoordinator {
         : guardToolResultText(registry, status, text);
     if (delivery.deliveryBlocked) {
       context.deliveryBlocked = true;
+      context.deliveryBlockReason = delivery.reason;
     }
     context.conversation.push({
       kind: "tool_result",

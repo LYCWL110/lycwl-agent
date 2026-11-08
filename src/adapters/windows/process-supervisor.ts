@@ -1,19 +1,14 @@
-import {
-  closeSync,
-  existsSync,
-  fstatSync,
-  openSync,
-  readSync,
-  statSync,
-  unlinkSync,
-} from "node:fs";
-import { unlink } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
+import type { OwnedKeyRegistry } from "../../domain/security/owned-key-guard.ts";
+import {
+  type CaptureOutput,
+  createBoundedProcessOutput,
+  type ProcessStream,
+} from "./bounded-process-output.ts";
 import {
   AssignProcessToJobObject,
   buildEnvironmentBlock,
   buildKillOnCloseLimits,
-  buildStartupInfo,
   CloseHandle,
   CREATE_NO_WINDOW,
   CREATE_SUSPENDED,
@@ -21,6 +16,7 @@ import {
   CreateJobObjectW,
   CreateProcessW,
   commandLineBuffer,
+  EXTENDED_STARTUPINFO_PRESENT,
   GetExitCodeProcess,
   GetLastError,
   JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -28,409 +24,249 @@ import {
   readHandle,
   readPid,
   SetInformationJobObject,
-  STILL_ACTIVE,
   TerminateJobObject,
   TerminateProcess,
   WAIT_OBJECT_0,
   WAIT_TIMEOUT,
   WaitForSingleObject,
 } from "./koffi-bindings.ts";
-import {
-  createPowerShellCapturePaths,
-  type PowerShellCapturePaths,
-  powershellCommand,
-  powershellExecutable,
-} from "./powershell-command.ts";
+import { powershellCommand, powershellExecutable } from "./powershell-command.ts";
+import { createProcessPipes, readAvailablePipe } from "./process-pipes.ts";
 
-/**
- * Windows process supervisor (G02).
- *
- * Lifecycle: create the Job object with kill-on-close, create the process
- * suspended, assign it to the Job, then resume. If assignment fails the suspended
- * process is terminated and closed without ever running.
- *
- * Output is captured through temporary files rather than pipes: this keeps the
- * implementation free of inherited-handle bookkeeping. Polling observes the
- * combined byte limit and terminates excess producers; retained reads share one
- * cap. Disk writes can overshoot between observations.
- *
- * Supervision failure is fatal for the affected operation: the caller disables
- * the tool rather than downgrading to an unsupervised spawn.
- */
+export { type CaptureOutput, MAX_CAPTURE_BYTES } from "./bounded-process-output.ts";
 
 export type SupervisorFailure =
   | "job_create_failed"
   | "job_configure_failed"
+  | "pipe_setup_failed"
   | "process_create_failed"
   | "job_assign_failed"
   | "resume_failed"
   | "process_cancelled"
   | "wait_failed";
 
-export type SpawnRequest = Readonly<{
+type ProcessRequest = Readonly<{
   command: string;
   cwd: string;
-  timeoutMs: number;
-  /**
-   * The already-filtered environment. This becomes the child's entire
-   * environment, so a filtered credential cannot be inherited back in from the
-   * parent. Required: there is no inherit-everything default.
-   */
+  /** The complete, already-filtered environment; never implicitly inherited. */
   environment: Readonly<Record<string, string>>;
-  signal?: AbortSignal;
-  capturePaths?: PowerShellCapturePaths;
 }>;
-
+export type SpawnRequest = ProcessRequest & Readonly<{ timeoutMs: number; signal?: AbortSignal }>;
 export type SpawnOutcome =
-  | Readonly<{
-      kind: "completed";
-      exitCode: number;
-      stdout: string;
-      stderr: string;
-      timedOut: boolean;
-      cancelled: boolean;
-      processId: number;
-      rawBytes: number;
-      captureComplete: boolean;
-      outputLimitExceeded: boolean;
-    }>
+  | (CaptureOutput &
+      Readonly<{
+        kind: "completed";
+        exitCode: number;
+        timedOut: boolean;
+        cancelled: boolean;
+        processId: number;
+      }>)
   | Readonly<{ kind: "failed"; code: SupervisorFailure }>;
-
-export type RunningTask = Readonly<{
-  taskId: string;
-  processId: number;
-  command: string;
-  cwd: string;
-  startedAtMs: number;
-}>;
-
-export type RunningHandle = Readonly<{
-  processId: number;
-  stdoutPath: string;
-  stderrPath: string;
-}>;
-
+export type RunningHandle = Readonly<{ processId: number }>;
 export type StartHandle =
   | Readonly<{ ok: true; handle: RunningHandle }>
   | Readonly<{ ok: false; code: SupervisorFailure }>;
 
-export type SupervisedProcess = Readonly<{
-  processId: number;
-  stdoutPath: string;
-  stderrPath: string;
-}>;
+type Entry = {
+  job: unknown;
+  process: bigint;
+  pipes: ReturnType<typeof createProcessPipes>;
+  output: ReturnType<typeof createBoundedProcessOutput>;
+  eof: Record<ProcessStream, boolean>;
+};
 
-export function createProcessSupervisor() {
-  const running = new Map<
-    number,
-    { job: unknown; process: unknown; stdoutPath: string; stderrPath: string }
-  >();
+/**
+ * Suspended creation -> Job assignment -> resume. Anonymous pipes provide
+ * backpressure, an explicit handle whitelist, and zero raw capture-file writes.
+ * Peek/read work per observation is bounded so a producer cannot monopolize TUI.
+ */
+export function createProcessSupervisor(options: Readonly<{ ownedKeys?: OwnedKeyRegistry }> = {}) {
+  const running = new Map<number, Entry>();
+  const buffer = Buffer.alloc(64 * 1024);
 
-  /**
-   * Create the job, start the process suspended, assign it, resume it, and hand
-   * back the live handles without waiting. The caller polls `isAlive`, reads the
-   * capture files and eventually calls `stop`.
-   */
-  function start(
-    request: Readonly<{
-      command: string;
-      cwd: string;
-      executionId: string;
-      environment: Readonly<Record<string, string>>;
-      capturePaths?: PowerShellCapturePaths;
-    }>,
-  ): StartHandle {
+  function start(request: ProcessRequest & Readonly<{ executionId: string }>): StartHandle {
+    const output = createBoundedProcessOutput(options.ownedKeys);
+    if (output.snapshot().deliveryBlocked !== null) return { ok: false, code: "pipe_setup_failed" };
     const job = CreateJobObjectW(null, null);
     if (job === null) return { ok: false, code: "job_create_failed" };
-
-    const limits = buildKillOnCloseLimits();
-    if (
-      !SetInformationJobObject(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, limits, limits.length)
-    ) {
-      CloseHandle(job);
-      return { ok: false, code: "job_configure_failed" };
+    let pipes: ReturnType<typeof createProcessPipes> | undefined;
+    let processHandle: bigint | undefined;
+    let thread: bigint | undefined;
+    let retained = false;
+    let stage: SupervisorFailure = "job_configure_failed";
+    try {
+      const limits = buildKillOnCloseLimits();
+      if (
+        !SetInformationJobObject(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, limits, limits.length)
+      )
+        return { ok: false, code: stage };
+      stage = "pipe_setup_failed";
+      pipes = createProcessPipes();
+      stage = "process_create_failed";
+      const processInfo = Buffer.alloc(24);
+      if (
+        !CreateProcessW(
+          powershellExecutable(),
+          commandLineBuffer(powershellCommand(request.command)),
+          null,
+          null,
+          true,
+          CREATE_SUSPENDED |
+            CREATE_NO_WINDOW |
+            CREATE_UNICODE_ENVIRONMENT |
+            EXTENDED_STARTUPINFO_PRESENT,
+          buildEnvironmentBlock(request.environment),
+          request.cwd,
+          pipes.startupInfo,
+          processInfo,
+        )
+      )
+        return { ok: false, code: stage };
+      processHandle = readHandle(processInfo, 0);
+      thread = readHandle(processInfo, 8);
+      pipes.created();
+      stage = "job_assign_failed";
+      if (!AssignProcessToJobObject(job, processHandle)) return { ok: false, code: stage };
+      stage = "resume_failed";
+      if (ResumeThread(thread) === 0xffff_ffff) return { ok: false, code: stage };
+      const processId = readPid(processInfo);
+      running.set(processId, {
+        job,
+        process: processHandle,
+        pipes,
+        output,
+        eof: { stdout: false, stderr: false },
+      });
+      retained = true;
+      return { ok: true, handle: { processId } };
+    } catch {
+      return { ok: false, code: stage };
+    } finally {
+      if (thread !== undefined) CloseHandle(thread);
+      if (!retained) {
+        if (processHandle !== undefined) {
+          TerminateProcess(processHandle, 1);
+          WaitForSingleObject(processHandle, 5000);
+          CloseHandle(processHandle);
+        }
+        CloseHandle(job);
+        pipes?.dispose();
+      }
     }
-
-    const { stdoutPath, stderrPath } = request.capturePaths ?? createPowerShellCapturePaths();
-    const fullCommand = powershellCommand(request.command, stdoutPath, stderrPath);
-
-    const startupInfo = buildStartupInfo(false);
-    const processInfo = Buffer.alloc(24);
-    const commandLine = commandLineBuffer(fullCommand);
-    const environmentBlock = buildEnvironmentBlock(request.environment);
-
-    const created = CreateProcessW(
-      powershellExecutable(),
-      commandLine,
-      null,
-      null,
-      false,
-      CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-      environmentBlock,
-      request.cwd,
-      startupInfo,
-      processInfo,
-    );
-    if (!created) {
-      CloseHandle(job);
-      return { ok: false, code: "process_create_failed" };
-    }
-
-    const hProcess = readHandle(processInfo, 0);
-    const hThread = readHandle(processInfo, 8);
-    const processId = readPid(processInfo);
-
-    if (!AssignProcessToJobObject(job, hProcess)) {
-      TerminateProcess(hProcess, 1);
-      CloseHandle(hThread);
-      CloseHandle(hProcess);
-      CloseHandle(job);
-      return { ok: false, code: "job_assign_failed" };
-    }
-    if (ResumeThread(hThread) === 0xffff_ffff) {
-      TerminateJobObject(job, 1);
-      CloseHandle(hThread);
-      CloseHandle(hProcess);
-      CloseHandle(job);
-      return { ok: false, code: "resume_failed" };
-    }
-    CloseHandle(hThread);
-
-    running.set(processId, { job, process: hProcess, stdoutPath, stderrPath });
-    return { ok: true, handle: { processId, stdoutPath, stderrPath } };
   }
 
-  /** True while the supervised process has not exited. */
+  function drain(entry: Entry, final: boolean): void {
+    // One extra byte detects excess without retaining/writing past the cap.
+    const readsPerStream = final ? 130 : 8;
+    for (const stream of ["stdout", "stderr"] as const) {
+      for (let i = 0; i < readsPerStream && !entry.eof[stream]; i++) {
+        if (entry.output.stopped()) return;
+        const read = readAvailablePipe(entry.pipes[stream], buffer, entry.output.remaining() + 1);
+        if (read.kind === "idle") break;
+        if (read.kind === "failed") {
+          entry.output.fail();
+          return;
+        }
+        if (read.kind === "eof") {
+          entry.eof[stream] = true;
+          break;
+        }
+        if (read.kind === "data") entry.output.push(stream, read.bytes);
+      }
+    }
+  }
+
   function isAlive(processId: number): boolean {
     const entry = running.get(processId);
-    if (entry === undefined) return false;
-    return WaitForSingleObject(entry.process, 0) === WAIT_TIMEOUT;
+    return entry !== undefined && WaitForSingleObject(entry.process, 0) === WAIT_TIMEOUT;
   }
-
-  /** Exit code once the process has exited, or null while it still runs. */
   function exitCodeOf(processId: number): number | null {
     const entry = running.get(processId);
-    if (entry === undefined) return null;
-    if (WaitForSingleObject(entry.process, 0) === WAIT_TIMEOUT) return null;
+    if (entry === undefined || WaitForSingleObject(entry.process, 0) !== WAIT_OBJECT_0) return null;
     const code = [0];
     return GetExitCodeProcess(entry.process, code) ? (code[0] ?? null) : null;
   }
-
-  /**
-   * Terminate the whole job tree and release handles. Applied twice it is a
-   * no-op, so a completion notification and a user stop cannot conflict.
-   */
-  function stop(processId: number): CaptureOutput {
-    const entry = running.get(processId);
-    if (entry === undefined) return emptyOutput();
-    TerminateJobObject(entry.job, 1);
-    CloseHandle(entry.job);
-    const stopped = WaitForSingleObject(entry.process, 5000) === WAIT_OBJECT_0;
-    CloseHandle(entry.process);
-    running.delete(processId);
-    if (!stopped) throw new Error("process_termination_unconfirmed");
-    const output = readCaptureOutput(entry.stdoutPath, entry.stderrPath);
-    removeCapture(entry.stdoutPath);
-    removeCapture(entry.stderrPath);
-    return output;
-  }
-
-  /** Read the current capture files without removing them. */
   function readOutput(processId: number): CaptureOutput {
     const entry = running.get(processId);
     if (entry === undefined) return emptyOutput();
-    return readCaptureOutput(entry.stdoutPath, entry.stderrPath);
+    drain(entry, false);
+    const output = entry.output.snapshot();
+    if (entry.output.stopped()) TerminateJobObject(entry.job, 1);
+    return output;
   }
-  return { runToCompletion, start, isAlive, exitCodeOf, stop, readOutput };
-  /**
-   * Run a command to completion under a Job object, terminating the whole tree on
-   * timeout. Capture files are removed afterwards.
-   */
+  function stop(processId: number): CaptureOutput {
+    const entry = running.get(processId);
+    if (entry === undefined) return emptyOutput();
+    try {
+      TerminateJobObject(entry.job, 1);
+      CloseHandle(entry.job);
+      entry.job = null;
+      if (WaitForSingleObject(entry.process, 5000) !== WAIT_OBJECT_0)
+        throw new Error("process_termination_unconfirmed");
+      drain(entry, true);
+      entry.output.finish(entry.eof.stdout && entry.eof.stderr);
+      return entry.output.snapshot();
+    } finally {
+      if (entry.job !== null) CloseHandle(entry.job);
+      CloseHandle(entry.process);
+      entry.pipes.dispose();
+      running.delete(processId);
+    }
+  }
   async function runToCompletion(request: SpawnRequest): Promise<SpawnOutcome> {
     if (request.signal?.aborted) return { kind: "failed", code: "process_cancelled" };
-    const job = CreateJobObjectW(null, null);
-    if (job === null) return { kind: "failed", code: "job_create_failed" };
-
-    const limits = buildKillOnCloseLimits();
-    if (
-      !SetInformationJobObject(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, limits, limits.length)
-    ) {
-      CloseHandle(job);
-      return { kind: "failed", code: "job_configure_failed" };
-    }
-
-    const { stdoutPath, stderrPath } = request.capturePaths ?? createPowerShellCapturePaths();
-
-    // Redirect the complete script block so each PowerShell pipeline is captured.
-    const fullCommand = powershellCommand(request.command, stdoutPath, stderrPath);
-    const startupInfo = buildStartupInfo(false);
-    const processInfo = Buffer.alloc(24);
-    const commandLine = commandLineBuffer(fullCommand);
-    const environmentBlock = buildEnvironmentBlock(request.environment);
-
-    const created = CreateProcessW(
-      powershellExecutable(),
-      commandLine,
-      null,
-      null,
-      false,
-      CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-      environmentBlock,
-      request.cwd,
-      startupInfo,
-      processInfo,
-    );
-    if (!created) {
-      CloseHandle(job);
-      return { kind: "failed", code: "process_create_failed" };
-    }
-
-    const hProcess = readHandle(processInfo, 0);
-    const hThread = readHandle(processInfo, 8);
-    const processId = readPid(processInfo);
-
-    if (!AssignProcessToJobObject(job, hProcess)) {
-      // The process is still suspended, so terminating it runs nothing.
-      TerminateProcess(hProcess, 1);
-      CloseHandle(hThread);
-      CloseHandle(hProcess);
-      CloseHandle(job);
-      return { kind: "failed", code: "job_assign_failed" };
-    }
-
-    if (ResumeThread(hThread) === 0xffff_ffff) {
-      TerminateJobObject(job, 1);
-      CloseHandle(hThread);
-      CloseHandle(hProcess);
-      CloseHandle(job);
-      return { kind: "failed", code: "resume_failed" };
-    }
-    CloseHandle(hThread);
-
+    const started = start({ ...request, executionId: "foreground" });
+    if (!started.ok) return { kind: "failed", code: started.code };
+    const processId = started.handle.processId;
     const deadline = Date.now() + request.timeoutMs;
-    let wait = WaitForSingleObject(hProcess, 0);
-    let outputLimitExceeded = captureSize(stdoutPath, stderrPath) > MAX_CAPTURE_BYTES;
-    while (
-      wait === WAIT_TIMEOUT &&
-      Date.now() < deadline &&
-      !request.signal?.aborted &&
-      !outputLimitExceeded
-    ) {
-      await delay(25);
-      wait = WaitForSingleObject(hProcess, 0);
-      outputLimitExceeded = captureSize(stdoutPath, stderrPath) > MAX_CAPTURE_BYTES;
-    }
-    let timedOut = false;
-    const cancelled = request.signal?.aborted === true;
-    let terminationConfirmed = true;
-    if (wait === WAIT_TIMEOUT) {
-      timedOut = !cancelled && !outputLimitExceeded;
-      TerminateJobObject(job, 1);
-      terminationConfirmed = WaitForSingleObject(hProcess, 5000) === WAIT_OBJECT_0;
-    } else if (wait !== WAIT_OBJECT_0) {
-      TerminateJobObject(job, 1);
-      CloseHandle(hProcess);
-      CloseHandle(job);
+    let released = false;
+    try {
+      let output = readOutput(processId);
+      while (
+        isAlive(processId) &&
+        Date.now() < deadline &&
+        !request.signal?.aborted &&
+        output.captureComplete
+      ) {
+        await delay(25);
+        output = readOutput(processId);
+      }
+      const cancelled = request.signal?.aborted === true;
+      const timedOut = isAlive(processId) && !cancelled && output.captureComplete;
+      const exitCode = exitCodeOf(processId);
+      const final = stop(processId);
+      released = true;
+      // Termination due to cancellation/limits is an execution fact, not rollback.
+      if (exitCode === null && !timedOut && !cancelled && final.captureComplete)
+        return { kind: "failed", code: "wait_failed" };
+      return {
+        kind: "completed",
+        ...final,
+        exitCode: exitCode ?? 1,
+        timedOut,
+        cancelled,
+        processId,
+      };
+    } catch {
       return { kind: "failed", code: "wait_failed" };
+    } finally {
+      if (!released) stop(processId);
     }
-
-    const exitCodeBuffer = [0];
-    const gotExit = GetExitCodeProcess(hProcess, exitCodeBuffer);
-    const exitCode = gotExit ? (exitCodeBuffer[0] ?? STILL_ACTIVE) : STILL_ACTIVE;
-
-    CloseHandle(hProcess);
-    CloseHandle(job);
-
-    const output = readCaptureOutput(stdoutPath, stderrPath);
-    await unlink(stdoutPath).catch(() => undefined);
-    await unlink(stderrPath).catch(() => undefined);
-    if (!terminationConfirmed || exitCode === STILL_ACTIVE)
-      return { kind: "failed", code: "wait_failed" };
-
-    return {
-      kind: "completed",
-      exitCode: timedOut ? 1 : exitCode,
-      ...output,
-      outputLimitExceeded: outputLimitExceeded || output.outputLimitExceeded,
-      captureComplete: !outputLimitExceeded && output.captureComplete,
-      timedOut,
-      cancelled,
-      processId,
-    };
   }
+  return { runToCompletion, start, isAlive, exitCodeOf, stop, readOutput };
 }
 
 export type ProcessSupervisor = ReturnType<typeof createProcessSupervisor>;
 
-/** Read a capture file with a hard bound so a huge producer cannot exhaust memory. */
-export const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
-
-export type CaptureOutput = Readonly<{
-  stdout: string;
-  stderr: string;
-  rawBytes: number;
-  captureComplete: boolean;
-  outputLimitExceeded: boolean;
-}>;
-
 function emptyOutput(): CaptureOutput {
-  return { stdout: "", stderr: "", rawBytes: 0, captureComplete: true, outputLimitExceeded: false };
-}
-
-function removeCapture(filePath: string): void {
-  try {
-    unlinkSync(filePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-}
-
-function captureSize(stdoutPath: string, stderrPath: string): number {
-  try {
-    return (
-      (existsSync(stdoutPath) ? statSync(stdoutPath).size : 0) +
-      (existsSync(stderrPath) ? statSync(stderrPath).size : 0)
-    );
-  } catch {
-    return Number.POSITIVE_INFINITY;
-  }
-}
-
-/** Disk may overshoot between polls; retained data always shares one byte cap. */
-function readCaptureOutput(stdoutPath: string, stderrPath: string): CaptureOutput {
-  try {
-    const stdout = readCaptureFile(stdoutPath, MAX_CAPTURE_BYTES);
-    const stderr = readCaptureFile(stderrPath, MAX_CAPTURE_BYTES - stdout.bytes.length);
-    const rawBytes = stdout.size + stderr.size;
-    return {
-      stdout: decodeCapture(stdout.bytes),
-      stderr: decodeCapture(stderr.bytes),
-      rawBytes,
-      captureComplete: rawBytes === stdout.bytes.length + stderr.bytes.length,
-      outputLimitExceeded: rawBytes > MAX_CAPTURE_BYTES,
-    };
-  } catch {
-    return { ...emptyOutput(), captureComplete: false };
-  }
-}
-
-function decodeCapture(bytes: Buffer): string {
-  const utf16 = bytes[0] === 0xff && bytes[1] === 0xfe;
-  const decoder = new TextDecoder(utf16 ? "utf-16le" : "utf-8", { fatal: true });
-  return decoder.decode(utf16 ? bytes.subarray(2) : bytes, { stream: true });
-}
-
-function readCaptureFile(filePath: string, budget: number): { bytes: Buffer; size: number } {
-  if (!existsSync(filePath)) return { bytes: Buffer.alloc(0), size: 0 };
-  const fd = openSync(filePath, "r");
-  try {
-    const size = fstatSync(fd).size;
-    const buffer = Buffer.alloc(Math.min(size, budget));
-    const read = readSync(fd, buffer, 0, buffer.length, 0);
-    return { bytes: buffer.subarray(0, read), size };
-  } finally {
-    closeSync(fd);
-  }
+  return {
+    stdout: "",
+    stderr: "",
+    rawBytes: 0,
+    captureComplete: true,
+    outputLimitExceeded: false,
+    deliveryBlocked: null,
+  };
 }
 
 export { GetLastError };

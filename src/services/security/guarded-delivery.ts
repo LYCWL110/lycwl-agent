@@ -1,4 +1,8 @@
-import { createStreamGuard, type OwnedKeyRegistry } from "../../domain/security/owned-key-guard.ts";
+import {
+  createStreamGuard,
+  type GuardBlockReason,
+  type OwnedKeyRegistry,
+} from "../../domain/security/owned-key-guard.ts";
 
 export class ProtectedDeliveryError extends Error {
   readonly reason: "owned_key_detected" | "guard_failure";
@@ -79,7 +83,7 @@ function splitIntoChunks(text: string): readonly string[] {
  */
 export type ToolResultDelivery =
   | Readonly<{ status: string; text: string | null; deliveryBlocked: false }>
-  | Readonly<{ status: string; text: null; deliveryBlocked: true; reason: string }>;
+  | Readonly<{ status: string; text: null; deliveryBlocked: true; reason: GuardBlockReason }>;
 
 export function guardToolResultText(
   registry: OwnedKeyRegistry,
