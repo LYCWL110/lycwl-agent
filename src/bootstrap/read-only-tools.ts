@@ -7,6 +7,7 @@ import { createApplyPatchTool } from "../adapters/tools/patch-tool.ts";
 import { createReadFileTool } from "../adapters/tools/read-file-tool.ts";
 import { createSearchTools } from "../adapters/tools/search-tools.ts";
 import { createShellTool } from "../adapters/tools/shell-tool.ts";
+import { createSkillTool } from "../adapters/tools/skill-tool.ts";
 import { createTodoTool } from "../adapters/tools/todo-tool.ts";
 import { createWebTools } from "../adapters/tools/web-tools.ts";
 import { createWriteTools } from "../adapters/tools/write-tools.ts";
@@ -18,6 +19,7 @@ import { powershellCommand, powershellExecutable } from "../adapters/windows/pow
 import { createProcessSupervisor } from "../adapters/windows/process-supervisor.ts";
 import { createSearchLedger, makeReservationId } from "../adapters/windows/search-ledger.ts";
 import { createSearchScope } from "../adapters/windows/search-scope.ts";
+import { createSkillLoader } from "../adapters/windows/skill-loader.ts";
 import { createWindowsFileReader } from "../adapters/windows/windows-directory-reader.ts";
 import { createWindowsFsAdapter } from "../adapters/windows/windows-fs-adapter.ts";
 import { createWindowsMutationAdapter } from "../adapters/windows/windows-mutation-adapter.ts";
@@ -71,6 +73,11 @@ export type WorkspaceToolsOptions = Readonly<{
    * snapshot or paid account is configured, and the baseline forbids guessing.
    */
   enableWeb?: boolean;
+  /**
+   * Register the `skill` tool. It loads a workspace Skill body into context as
+   * untrusted project material; it grants no approval or permission.
+   */
+  enableSkills?: boolean;
   /** Search ledger directory; defaults to the confirmed LOCALAPPDATA path. */
   searchLedgerDirectory?: string;
   /** Identity used for quota accounting; defaults to this process. */
@@ -288,6 +295,23 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     setList: () => undefined,
   });
   delegates.push(todoTool);
+  if (options.enableSkills === true) {
+    const loader = createSkillLoader({ workspaceRoot });
+    delegates.push(
+      createSkillTool({
+        load: async ({ skillId }) => {
+          const loaded = await loader.load({ skillId });
+          return loaded.ok
+            ? { ok: true as const, block: loaded.block, skillId: loaded.skillId }
+            : {
+                ok: false as const,
+                code: loaded.code,
+                ...(loaded.detail === undefined ? {} : { detail: loaded.detail }),
+              };
+        },
+      }),
+    );
+  }
   if (writes !== null) delegates.push(writes);
   if (patch !== null) delegates.push(patch);
   if (mutations !== null) delegates.push(mutations);

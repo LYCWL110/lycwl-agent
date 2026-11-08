@@ -108,6 +108,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     ids: { create: () => "probe" },
     enableWrites,
     enableProcesses,
+    enableSkills: options.enableSkills === true,
   });
 
   // Advertise only tools this composition actually exposes under the current
@@ -353,6 +354,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
           ids,
           enableWrites,
           enableProcesses,
+          enableSkills: options.enableSkills === true,
           ownedKeys: assembly.ownedKeys,
           refreshOwnedKeys: assembly.refreshOwnedKeys,
           evidenceStore,
