@@ -15,6 +15,8 @@ export type StartTuiOptions = Readonly<{
   /** Called when the composer asked to open configuration. */
   onConfigRequest?: (page: "setup" | "model") => void;
   onSessionRequest?: (sessionId: string | null) => void;
+  /** Called when the composer asked to draft an AGENTS.md. */
+  onInitRequest?: () => void;
   sessionId?: string;
   onCleanupError?: (code: string) => void;
   /** Injected terminal streams/mount for lifecycle verification. */
@@ -47,6 +49,7 @@ export function startTui(
       unmount();
       if (request.kind === "config") onConfigRequest?.(request.page);
       if (request.kind === "session") options.onSessionRequest?.(request.sessionId);
+      if (request.kind === "init") options.onInitRequest?.();
     } catch {
       unmount();
       (options.onCleanupError ?? ((code) => process.stderr.write(`${code}\n`)))(

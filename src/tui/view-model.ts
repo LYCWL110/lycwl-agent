@@ -410,6 +410,8 @@ export type ComposerIntent =
   | Readonly<{ kind: "withdraw"; inputId: string }>
   /** Open the provider browser. Only available when no Run is in flight. */
   | Readonly<{ kind: "open_config" }>
+  /** Generate an AGENTS.md draft for the workspace. */
+  | Readonly<{ kind: "project_init" }>
   | Readonly<{ kind: "open_model" }>
   | Readonly<{ kind: "open_panel"; panel: "help" | "session" }>
   | Readonly<{ kind: "switch_session"; sessionId: string | null }>
@@ -427,6 +429,7 @@ export const COMPOSER_COMMANDS = [
   { name: "/model", description: "Select model and reasoning", idleOnly: true },
   { name: "/session", description: "Current, new or resume session", idleOnly: true },
   { name: "/new", description: "Start a fresh session", idleOnly: true },
+  { name: "/init", description: "Draft an AGENTS.md for this project", idleOnly: true },
   { name: "/help", description: "Show commands", idleOnly: false },
   { name: "/cancel", description: "Cancel the current run", idleOnly: false },
   { name: "/key", description: "Correct the waiting connection key", idleOnly: false },
@@ -477,6 +480,8 @@ export function interpretComposer(
         return { kind: "switch_session", sessionId: args[0] ?? null };
       case "/new":
         return { kind: "switch_session", sessionId: null };
+      case "/init":
+        return { kind: "project_init" };
       case "/help":
         return { kind: "open_panel", panel: "help" };
       case "/cancel":

@@ -24,6 +24,7 @@ export type TuiSessionDeps = Readonly<{
 export type TuiNavigationRequest =
   | Readonly<{ kind: "config"; page: "setup" | "model" }>
   | Readonly<{ kind: "session"; sessionId: string | null }>
+  | Readonly<{ kind: "init" }>
   | Readonly<{ kind: "quit" }>;
 
 export type TuiController = Readonly<{
@@ -191,6 +192,12 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     }
     if (intent.kind === "quit") {
       navigation = { kind: "quit" };
+      return;
+    }
+    if (intent.kind === "project_init") {
+      // The caller owns the scan and the write, because both need the workspace
+      // adapter and the approval path.
+      navigation = { kind: "init" };
       return;
     }
     localPanel = null;

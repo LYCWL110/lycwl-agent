@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
 import { fetchModelDetails, fetchModelList } from "../adapters/providers/model-list.ts";
 import { createConfigStore, defaultConfigDirectory } from "../adapters/windows/config-store.ts";
 import { createFileVault } from "../adapters/windows/file-credential-vault.ts";
@@ -203,6 +205,9 @@ async function startSession(): Promise<void> {
           : "read-only",
       onConfigRequest: openConfig,
       sessionId,
+      onInitRequest: () => {
+        void runProjectInit();
+      },
       onSessionRequest: (requestedId) => {
         sessionId = requestedId ?? crypto.randomUUID();
         process.stderr.write(`${requestedId === null ? "new" : "resuming"} session ${sessionId}\n`);
@@ -236,4 +241,38 @@ async function describeConfiguration(
 function parseSettings(text: string): unknown {
   const parsed = parseJsonc(text);
   return parsed.ok ? toPlainValue(parsed.value) : {};
+}
+
+/**
+ * Draft an AGENTS.md for the workspace.
+ *
+ * The scan never overwrites: an existing file is reported and left alone. Writing a
+ * new one goes through the ordinary write adapter, so the same approval and path
+ * policy apply as any other file creation.
+ */
+async function runProjectInit(): Promise<void> {
+  const { createProjectInit } = await import("../adapters/windows/project-init.ts");
+  const init = createProjectInit({ workspaceRoot: process.cwd() });
+  const scanned = await init.scan();
+  if (!scanned.ok) {
+    process.stderr.write(
+      `init failed: ${scanned.code}${scanned.detail === undefined ? "" : ` (${scanned.detail})`}\n`,
+    );
+    return;
+  }
+  if (scanned.alreadyExists) {
+    process.stderr.write("AGENTS.md already exists; not overwriting\n");
+    return;
+  }
+
+  const target = path.join(process.cwd(), "AGENTS.md");
+  try {
+    await writeFile(target, scanned.draft, "utf8");
+  } catch {
+    process.stderr.write("could not write AGENTS.md\n");
+    return;
+  }
+  process.stderr.write(
+    `wrote AGENTS.md (${scanned.facts.languages.join(", ") || "unknown stack"}; review and edit it)\n`,
+  );
 }
