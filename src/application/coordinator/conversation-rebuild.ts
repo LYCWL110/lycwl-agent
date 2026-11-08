@@ -137,8 +137,12 @@ export function rebuildConversation(events: readonly InternalEvent[]): RebuildRe
           working.map((item, index) => ({ ...item, sourceId: `replay-${index}` })),
         );
         if (!valid.ok) invalid = valid.detail;
-        const recent = retainRecentGroups(working, payload.recentSuffixGroupIds.length);
-        working = [{ kind: "user", text: payload.summaryText }, ...recent];
+        working = compactConversation(
+          working,
+          payload.recentSuffixGroupIds.length,
+          payload.summaryText,
+          payload.pinnedUserInputs ?? [],
+        );
         turn = null;
         break;
       }
@@ -166,6 +170,22 @@ export function rebuildConversation(events: readonly InternalEvent[]): RebuildRe
     }
   }
   return { ok: true, conversation, runs };
+}
+
+export function compactConversation(
+  conversation: readonly ProviderConversationItem[],
+  recentGroups: number,
+  summaryText: string,
+  pinnedUserInputs: readonly string[],
+): ProviderConversationItem[] {
+  const pinned = new Set(pinnedUserInputs);
+  return [
+    { kind: "user", text: summaryText },
+    ...pinnedUserInputs.map((text) => ({ kind: "user" as const, text })),
+    ...retainRecentGroups(conversation, recentGroups).filter(
+      (item) => item.kind !== "user" || !pinned.has(item.text),
+    ),
+  ];
 }
 
 /** Retain whole assistant/call/result groups, rather than slicing by item count. */

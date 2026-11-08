@@ -51,6 +51,9 @@ export const GetExitCodeProcess = kernel32.func(
   "bool __stdcall GetExitCodeProcess(void* hProcess, _Out_ uint32_t* lpExitCode)",
 );
 export const CloseHandle = kernel32.func("bool __stdcall CloseHandle(void* hObject)");
+export const CreateFileW = kernel32.func(
+  "void* __stdcall CreateFileW(const char16_t* lpFileName, uint32_t dwDesiredAccess, uint32_t dwShareMode, void* lpSecurityAttributes, uint32_t dwCreationDisposition, uint32_t dwFlagsAndAttributes, void* hTemplateFile)",
+);
 export const GetLastError = kernel32.func("uint32_t __stdcall GetLastError()");
 export const CreatePipe = kernel32.func(
   "bool __stdcall CreatePipe(void* hReadPipe, void* hWritePipe, void* lpPipeAttributes, uint32_t nSize)",
@@ -142,6 +145,6 @@ export function buildEnvironmentBlock(environment: Readonly<Record<string, strin
   }
   // An empty environment still needs the terminating NUL, otherwise
   // CreateProcessW would read past the buffer.
-  block += "\0";
+  block += names.length === 0 ? "\0\0" : "\0";
   return Buffer.from(block, "utf16le");
 }

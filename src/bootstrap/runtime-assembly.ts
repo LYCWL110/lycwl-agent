@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   AnthropicProvider,
   type AnthropicToolDefinition,
@@ -11,6 +12,7 @@ import {
   protocolEndpoint,
   readProviderConfig,
 } from "../domain/config/provider-config.ts";
+import type { RunModelBinding } from "../domain/model-request/run-binding.ts";
 import type { OwnedKeyRegistry } from "../domain/security/owned-key-guard.ts";
 import type { ModelProvider } from "../ports/model-provider.ts";
 import {
@@ -36,6 +38,7 @@ export type RuntimeAssemblyFailure =
   | "config_invalid"
   | "config_unsupported_version"
   | "provider_missing"
+  | "session_busy"
   | "credential_missing";
 
 export type RuntimeAssembly =
@@ -45,6 +48,9 @@ export type RuntimeAssembly =
       config: ProviderConfig;
       ownedKeys: OwnedKeyRegistry;
       refreshOwnedKeys: () => Promise<void>;
+      runBinding: RunModelBinding;
+      resolveCredentialRevision: () => Promise<number | null>;
+      requestFingerprint: (value: unknown) => Promise<string>;
       /** Non-fatal notes worth showing, e.g. plaintext credential storage. */
       warnings: readonly string[];
     }>
@@ -81,6 +87,10 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
     return { ok: false, code: "config_invalid", detail: `${parsed.code}:${parsed.field ?? ""}` };
   }
   const config = parsed.value;
+  const outputTokens =
+    config.contextWindow === null
+      ? config.maxOutputTokens
+      : Math.min(config.maxOutputTokens, Math.max(1024, Math.floor(0.2 * config.contextWindow)));
 
   const vault = createFileVault({ directory: options.dataDirectory });
   let protectedKeys: OwnedKeyRegistry["keys"] = [];
@@ -140,7 +150,7 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
     purpose: "provider_api_key" as const,
     revision: 1,
   };
-  const probe = await vault.read(reference);
+  const probe = await vault.readCurrent(reference.reference, reference.purpose);
   if (!probe.ok) {
     return {
       ok: false,
@@ -154,18 +164,68 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
     warnings.push("credential file permissions could not be restricted on this platform");
   }
   warnings.push("credentials are stored unencrypted (ADR-0038)");
+  const hash = (value: unknown) =>
+    createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+  const endpoint = new URL(protocolEndpoint(config.baseUrl, config.protocol));
+  const descriptor = {
+    scheme: "https" as const,
+    host: endpoint.hostname,
+    port: endpoint.port === "" ? null : Number(endpoint.port),
+    path: endpoint.pathname,
+  };
+  const unknownSnapshot = {
+    snapshotId: "user-configured-unverified",
+    sha256: hash([config, options.toolDefinitions]),
+  };
+  const runBinding: RunModelBinding = {
+    providerId: "user-configured",
+    modelId: config.model,
+    protocolId: config.protocol,
+    adapterVersion: "internal-1",
+    endpoint: descriptor,
+    endpointFingerprint: hash(descriptor),
+    catalog: unknownSnapshot,
+    capabilities: unknownSnapshot,
+    credential: { credentialRef: config.credentialRef, revision: probe.value.credential.revision },
+  };
+  let prepared: typeof probe.value | null = null;
+  const resolveCredentialRevision = async () => {
+    const current = await vault.readCurrent(reference.reference, reference.purpose);
+    if (!current.ok) {
+      prepared = null;
+      throw new Error("credential_binding_failed");
+    }
+    prepared = current.value;
+    return current.value.credential.revision;
+  };
 
   // Resolve per call so a rotation applies without rebuilding the Run. A failure
   // becomes "not configured", never an empty secret.
   const resolveApiKey = async () => {
     await refreshOwnedKeys();
-    const read = await vault.read(reference);
-    if (read.ok && !ownedKeys.keys.some((key) => key.value === read.value))
+    const read = await vault.readCurrent(reference.reference, reference.purpose);
+    if (read.ok && !ownedKeys.keys.some((key) => key.value === read.value.secret))
       throw new ProtectedDeliveryError("guard_failure");
-    return read.ok ? read.value : null;
+    if (!read.ok) return null;
+    if (
+      prepared !== null &&
+      (prepared.credential.revision !== read.value.credential.revision ||
+        prepared.secret !== read.value.secret)
+    )
+      return null;
+    return read.value.secret;
   };
   const post: NonNullable<AssembleOptions["post"]> = async (request) => {
     await refreshOwnedKeys();
+    if (prepared !== null) {
+      const current = await vault.readCurrent(reference.reference, reference.purpose);
+      if (
+        !current.ok ||
+        current.value.credential.revision !== prepared.credential.revision ||
+        current.value.secret !== prepared.secret
+      )
+        throw new ProtectedDeliveryError("guard_failure");
+    }
     // Authentication headers belong to the trusted adapter. Message/tool/schema
     // bodies do not, including escaped JSON strings and restored history.
     try {
@@ -185,7 +245,7 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
           resolveApiKey,
           model: config.model,
           baseUrl: config.baseUrl,
-          maxOutputTokens: config.maxOutputTokens,
+          maxOutputTokens: outputTokens,
           ...(config.reasoningEffort === undefined
             ? {}
             : { reasoningEffort: config.reasoningEffort }),
@@ -198,7 +258,7 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
             resolveApiKey,
             model: config.model,
             baseUrl: config.baseUrl,
-            maxTokens: config.maxOutputTokens,
+            maxTokens: outputTokens,
             ...(config.reasoningEffort === undefined
               ? {}
               : { reasoningEffort: config.reasoningEffort }),
@@ -210,7 +270,7 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
             resolveApiKey,
             model: config.model,
             endpoint: protocolEndpoint(config.baseUrl, config.protocol),
-            maxTokens: config.maxOutputTokens,
+            maxTokens: outputTokens,
             ...(config.reasoningEffort === undefined
               ? {}
               : { reasoningEffort: config.reasoningEffort }),
@@ -219,5 +279,15 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
             ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
           });
 
-  return { ok: true, provider, config, warnings, ownedKeys, refreshOwnedKeys };
+  return {
+    ok: true,
+    provider,
+    config,
+    warnings,
+    ownedKeys,
+    refreshOwnedKeys,
+    runBinding,
+    resolveCredentialRevision,
+    requestFingerprint: async (value) => hash([config, options.toolDefinitions, value]),
+  };
 }

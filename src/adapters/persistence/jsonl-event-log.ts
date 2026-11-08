@@ -1,5 +1,7 @@
 import { mkdir, open, readFile } from "node:fs/promises";
 import path from "node:path";
+import { parseJsonc } from "../../domain/config/jsonc.ts";
+import { isSessionId } from "../../domain/identity/session-id.ts";
 
 import type {
   EventInput,
@@ -8,10 +10,16 @@ import type {
   InternalEventBody,
 } from "../../ports/event-log.ts";
 import type { DigestService, IdentifierFactory } from "../../ports/identity.ts";
+import {
+  acquireExclusiveFileLease,
+  type ExclusiveFileLease,
+} from "../windows/exclusive-file-lease.ts";
+import { hasValidInternalEventRelations } from "./internal-event-relations.ts";
+import { isInternalEvent } from "./internal-event-validation.ts";
 
 export type JsonlReadResult =
   | Readonly<{ ok: true; events: readonly InternalEvent[] }>
-  | Readonly<{ ok: false; code: "middle_corruption" | "invalid_event" }>;
+  | Readonly<{ ok: false; code: "middle_corruption" | "invalid_event" | "integrity_failure" }>;
 
 export class JsonlEventLog implements EventLog {
   readonly #root: string;
@@ -57,25 +65,69 @@ export class JsonlEventLog implements EventLog {
     if (bytes.length === 0) return { ok: true, events: [] };
 
     const endsWithNewline = bytes.at(-1) === 0x0a;
-    const lines = bytes.toString("utf8").split("\n");
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      return { ok: false, code: "invalid_event" };
+    }
+    const lines = text.split("\n");
     if (endsWithNewline) lines.pop();
     const events: InternalEvent[] = [];
+    const eventIds = new Set<string>();
 
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index] ?? "";
       try {
         const value: unknown = JSON.parse(line);
+        // JSON.parse alone silently accepts duplicate keys.
+        if (!parseJsonc(line).ok) return { ok: false, code: "invalid_event" };
         if (!isInternalEvent(value)) return { ok: false, code: "invalid_event" };
+        const previous = events.at(-1);
+        if (
+          value.sessionId !== sessionId ||
+          value.seq !== (previous?.seq ?? 0) + 1 ||
+          value.previousEventId !== (previous?.eventId ?? null) ||
+          value.previousHash !== (previous?.hash ?? null) ||
+          eventIds.has(value.eventId)
+        )
+          return { ok: false, code: "integrity_failure" };
+        const { hash, ...body } = value;
+        if ((await this.#digests.sha256Canonical(body)) !== hash)
+          return { ok: false, code: "integrity_failure" };
         events.push(value);
+        eventIds.add(value.eventId);
       } catch {
         const isTail = index === lines.length - 1 && !endsWithNewline;
         return { ok: false, code: isTail ? "invalid_event" : "middle_corruption" };
       }
     }
+    if (!endsWithNewline) return { ok: false, code: "invalid_event" };
+    if (!hasValidInternalEventRelations(events)) return { ok: false, code: "invalid_event" };
     return { ok: true, events };
   }
 
+  async acquireSessionOwnership(sessionId: string): Promise<ExclusiveFileLease> {
+    return acquireExclusiveFileLease(
+      path.join(path.dirname(this.#eventPath(sessionId)), "session.lock"),
+      {
+        timeoutMs: 0,
+      },
+    );
+  }
+
   async #appendNow(input: EventInput): Promise<InternalEvent> {
+    const lock = await acquireExclusiveFileLease(
+      path.join(path.dirname(this.#eventPath(input.sessionId)), "writer.lock"),
+    );
+    try {
+      return await this.#appendLocked(input);
+    } finally {
+      lock.release();
+    }
+  }
+
+  async #appendLocked(input: EventInput): Promise<InternalEvent> {
     const existing = await this.readWithRecovery(input.sessionId);
     if (!existing.ok) {
       throw new Error(existing.code);
@@ -99,6 +151,9 @@ export class JsonlEventLog implements EventLog {
       ...body,
       hash: await this.#digests.sha256Canonical(body),
     };
+    if (!isInternalEvent(event)) throw new Error("invalid_event");
+    if (!hasValidInternalEventRelations([...existing.events, event]))
+      throw new Error("invalid_event");
     const filePath = this.#eventPath(input.sessionId);
     await mkdir(path.dirname(filePath), { recursive: true });
     const handle = await open(filePath, "a");
@@ -112,48 +167,11 @@ export class JsonlEventLog implements EventLog {
   }
 
   #eventPath(sessionId: string): string {
+    if (!isSessionId(sessionId)) throw new Error("invalid_session_id");
     return path.join(this.#root, "sessions", sessionId, "events.jsonl");
   }
 }
 
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-
-type UnknownEventShape = Readonly<{
-  schemaVersion: unknown;
-  eventId: unknown;
-  sessionId: unknown;
-  runId: unknown;
-  seq: unknown;
-  timestampUtc: unknown;
-  type: unknown;
-  correlationId: unknown;
-  causationId: unknown;
-  previousEventId: unknown;
-  previousHash: unknown;
-  payload: unknown;
-  hash: unknown;
-}>;
-
-function isInternalEvent(value: unknown): value is InternalEvent {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = value as UnknownEventShape;
-  return (
-    candidate.schemaVersion === 1 &&
-    typeof candidate.eventId === "string" &&
-    typeof candidate.sessionId === "string" &&
-    typeof candidate.runId === "string" &&
-    typeof candidate.seq === "number" &&
-    Number.isSafeInteger(candidate.seq) &&
-    typeof candidate.timestampUtc === "string" &&
-    typeof candidate.type === "string" &&
-    typeof candidate.correlationId === "string" &&
-    (typeof candidate.causationId === "string" || candidate.causationId === null) &&
-    (typeof candidate.previousEventId === "string" || candidate.previousEventId === null) &&
-    (typeof candidate.previousHash === "string" || candidate.previousHash === null) &&
-    typeof candidate.payload === "object" &&
-    candidate.payload !== null &&
-    typeof candidate.hash === "string"
-  );
 }

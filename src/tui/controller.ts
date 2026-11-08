@@ -17,6 +17,8 @@ export type TuiSessionDeps = Readonly<{
   coordinator: RuntimeCoordinator;
   initialEvents?: readonly InternalEvent[];
   canResumeSession?: (sessionId: string) => Promise<boolean>;
+  /** Trusted composition corrects only the current fixed-route key reference. */
+  correctCredential?: (secret: string) => Promise<boolean>;
 }>;
 
 export type TuiNavigationRequest =
@@ -36,6 +38,7 @@ export type TuiController = Readonly<{
   lastResult: () => CoordinatorResult | null;
   takeNavigationRequest: () => TuiNavigationRequest | null;
   closePanel: () => void;
+  correctCredential?: (secret: string) => Promise<boolean>;
 }>;
 
 export function createTuiController(deps: TuiSessionDeps): TuiController {
@@ -55,7 +58,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   /** Why the last answer was rejected, shown in the question panel. */
   let answerError: string | null = null;
   let navigation: TuiNavigationRequest | null = null;
-  let localPanel: "help" | "session" | null = null;
+  let localPanel: "help" | "session" | "credential" | null = null;
   let commandNotice: string | null = null;
   let checkingSession = false;
   let closing: Promise<void> | null = null;
@@ -96,6 +99,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
         events: live === null ? events : rememberEvents(live.events),
         todo: todo.items.length === 0 ? null : todo,
         pendingApproval: deps.coordinator.pendingApprovalView(),
+        pendingDisclosure: deps.coordinator.pendingDisclosureView(),
         pendingQuestion: deps.coordinator.pendingQuestionView(),
         answerError,
         draft,
@@ -120,6 +124,27 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       return;
     }
     if (intent.kind === "withdraw") return;
+    if (intent.kind === "correct_credential") {
+      if (deps.correctCredential === undefined)
+        commandNotice = "Credential correction unavailable in this build.";
+      else localPanel = "credential";
+      return;
+    }
+    if (intent.kind === "resume_run") {
+      const waiting = deps.coordinator.configurationWaitView();
+      if (waiting === null) return;
+      const resumed = await deps.coordinator.resumeRun({
+        ...waiting,
+        commandId: `tui-resume-${++commandCounter}`,
+      });
+      if (!resumed.ok) {
+        commandNotice = `Run not resumed: ${resumed.code}`;
+        return;
+      }
+      const continuation = await deps.coordinator.settle();
+      if (continuation !== null) applyResult(continuation);
+      return;
+    }
     if (intent.kind === "queue_input") {
       let queued: QueueInputOutcome;
       try {
@@ -180,6 +205,17 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   }
 
   async function reply(decision: "approved" | "denied"): Promise<void> {
+    const disclosure = deps.coordinator.pendingDisclosureView();
+    if (disclosure !== null) {
+      commandCounter++;
+      await deps.coordinator.replySensitiveDisclosure({
+        ...disclosure,
+        commandId: `tui-disclosure-${commandCounter}`,
+        decision,
+      });
+      await settleActiveRun();
+      return;
+    }
     const pending = deps.coordinator.pendingApprovalView();
     if (pending === null) return;
     commandCounter += 1;
@@ -244,6 +280,11 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     commandCounter += 1;
     await deps.coordinator.cancelRun(`tui-cancel-${commandCounter}`);
     await settleActiveRun();
+    const live = deps.coordinator.currentRunProjection();
+    if (live === null && activeRun === null) {
+      const finished = deps.coordinator.lastRunResult();
+      if (finished !== null) applyResult(finished);
+    }
   }
 
   function close(): Promise<void> {
@@ -270,6 +311,15 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     cancelRun,
     close,
     lastResult: () => lastResult,
+    correctCredential: async (secret) => {
+      if (deps.coordinator.configurationWaitView() === null || closing !== null) return false;
+      const saved = (await deps.correctCredential?.(secret)) ?? false;
+      if (saved) {
+        localPanel = null;
+        commandNotice = "Key saved. Run remains waiting; use /resume.";
+      }
+      return saved;
+    },
     closePanel: () => {
       localPanel = null;
       commandNotice = null;

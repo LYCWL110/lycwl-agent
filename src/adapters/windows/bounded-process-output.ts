@@ -16,6 +16,8 @@ export type CaptureOutput = Readonly<{
   captureComplete: boolean;
   outputLimitExceeded: boolean;
   deliveryBlocked: GuardBlockReason | null;
+  /** Available only after complete, guarded decoding and EOF finalization. */
+  rawOutput?: Readonly<{ stdout: Uint8Array; stderr: Uint8Array }>;
 }>;
 
 type Channel = {
@@ -193,6 +195,14 @@ export function createBoundedProcessOutput(registry: OwnedKeyRegistry = { keys: 
         captureComplete: !incomplete && !exceeded && blocked === null,
         outputLimitExceeded: exceeded,
         deliveryBlocked: blocked,
+        ...(ended && !incomplete && blocked === null
+          ? {
+              rawOutput: {
+                stdout: Buffer.concat(streams.stdout.raw),
+                stderr: Buffer.concat(streams.stderr.raw),
+              },
+            }
+          : {}),
       };
     },
   };

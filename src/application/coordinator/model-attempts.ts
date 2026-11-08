@@ -21,6 +21,10 @@ export type ModelAttemptDependencies = Readonly<{
   provider: ModelProvider;
   sleep: (delayMs: number, signal?: AbortSignal) => Promise<void>;
   signal?: AbortSignal;
+  /** Auxiliary regeneration and retries share one bounded attempt sequence. */
+  attemptStart?: number;
+  attemptLimit?: number;
+  compaction?: Readonly<{ maxOutputTokens: number }>;
   onRequestStarted: (
     modelRequestId: string,
     attemptNo: number,
@@ -51,7 +55,8 @@ export async function completeWithBoundedRetries(
   modelRequestId: string,
   conversation: readonly ProviderConversationItem[],
 ): Promise<ModelAttemptOutcome> {
-  for (let attemptNo = 1; attemptNo <= MAX_TRANSIENT_RETRIES + 1; attemptNo += 1) {
+  const limit = dependencies.attemptLimit ?? MAX_TRANSIENT_RETRIES + 1;
+  for (let attemptNo = dependencies.attemptStart ?? 1; attemptNo <= limit; attemptNo += 1) {
     if (dependencies.signal?.aborted) return cancelled();
     const request = beginModelRequest(modelRequestId, attemptNo);
     if (!request.ok) {
@@ -87,6 +92,7 @@ export async function completeWithBoundedRetries(
         // provider that held the live reference would observe later turns inside a
         // request it already sent. A retry must also see exactly what was sent.
         conversation: [...conversation],
+        ...(dependencies.compaction === undefined ? {} : { compaction: dependencies.compaction }),
         ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
       }),
       dependencies.signal,
@@ -109,7 +115,7 @@ export async function completeWithBoundedRetries(
       return { kind: "invalid_response", safeCode: completion.safeCode };
     }
 
-    if (attemptNo > MAX_TRANSIENT_RETRIES) {
+    if (attemptNo >= limit) {
       return { kind: "transient_retries_exhausted", safeCode: completion.safeCode };
     }
 

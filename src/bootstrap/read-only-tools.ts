@@ -22,9 +22,12 @@ import { createWindowsFileReader } from "../adapters/windows/windows-directory-r
 import { createWindowsFsAdapter } from "../adapters/windows/windows-fs-adapter.ts";
 import { createWindowsMutationAdapter } from "../adapters/windows/windows-mutation-adapter.ts";
 import { createWindowsWriteAdapter } from "../adapters/windows/windows-write-adapter.ts";
+import type { ToolEvidence } from "../domain/evidence/tool-evidence.ts";
 import { emptyTodoList } from "../domain/planning/todo.ts";
 import type { OwnedKeyRegistry } from "../domain/security/owned-key-guard.ts";
 import type { ApprovalGate } from "../ports/approval-gate.ts";
+import type { BackgroundObserver } from "../ports/background-task.ts";
+import type { EvidenceStore } from "../ports/evidence-store.ts";
 import type { IdentifierFactory } from "../ports/identity.ts";
 import type {
   ToolDefinition,
@@ -81,6 +84,7 @@ export type WorkspaceToolsOptions = Readonly<{
   resolveSearchApiKey?: () => Promise<string | null>;
   ownedKeys?: OwnedKeyRegistry;
   refreshOwnedKeys?: () => Promise<void>;
+  evidenceStore?: EvidenceStore;
 }>;
 
 export function createReadOnlyWorkspaceTools(options: WorkspaceToolsOptions): ToolExecutor {
@@ -178,7 +182,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     ? createShellTool({
         sessionMode: enableWrites ? "workspace_write" : "read_only",
         inheritedEnvironment: { ...process.env } as Record<string, string>,
-        runShell: async (request, environment, signal) => {
+        runShell: async (request, environment, signal, toolCallId) => {
           await options.refreshOwnedKeys?.();
           const supervisor = createProcessSupervisor(
             options.ownedKeys === undefined ? {} : { ownedKeys: options.ownedKeys },
@@ -193,8 +197,46 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
           if (outcome.kind === "failed") {
             return { kind: "unknown", safeCode: outcome.code };
           }
+          let evidence: ToolEvidence | undefined;
+          let deliveryBlocked = outcome.deliveryBlocked;
+          if (options.evidenceStore !== undefined) {
+            evidence = {
+              captureId: null,
+              manifestSha256: null,
+              capturedBytes: 0,
+              rawComplete: false,
+              rawTruncationReason:
+                deliveryBlocked !== null
+                  ? "blocked"
+                  : outcome.outputLimitExceeded
+                    ? "raw_limit"
+                    : "capture_interrupted",
+              attachments: [],
+            };
+            if (
+              deliveryBlocked === null &&
+              outcome.rawOutput !== undefined &&
+              toolCallId !== undefined
+            ) {
+              const stored = await options.evidenceStore.publishProcessOutput({
+                toolCallId,
+                ...outcome.rawOutput,
+              });
+              if (stored.ok) evidence = stored.evidence;
+              else if (stored.code === "protected_delivery_blocked") {
+                deliveryBlocked = stored.reason;
+                evidence = { ...evidence, rawTruncationReason: "blocked" };
+              } else evidence = { ...evidence, rawTruncationReason: "storage_failed" };
+            }
+          }
+          const captured = evidence === undefined ? {} : { evidence };
           if (outcome.cancelled)
-            return { kind: "unknown", safeCode: "shell_cancelled_outcome_unknown" };
+            return {
+              kind: "unknown",
+              safeCode: "shell_cancelled_outcome_unknown",
+              deliveryBlocked,
+              ...captured,
+            };
           return outcome.timedOut
             ? {
                 kind: "timed_out",
@@ -202,7 +244,8 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
                 stderr: outcome.stderr,
                 rawBytes: outcome.rawBytes,
                 captureComplete: outcome.captureComplete,
-                deliveryBlocked: outcome.deliveryBlocked,
+                deliveryBlocked,
+                ...captured,
               }
             : {
                 kind: "completed",
@@ -211,16 +254,23 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
                 stderr: outcome.stderr,
                 rawBytes: outcome.rawBytes,
                 captureComplete: outcome.captureComplete,
-                deliveryBlocked: outcome.deliveryBlocked,
+                deliveryBlocked,
+                ...captured,
               };
         },
       })
     : null;
 
+  const backgroundObservers = new Set<BackgroundObserver>();
   const backgroundRegistry = enableProcesses
     ? createBackgroundRegistry({
         sessionMode: enableWrites ? "workspace_write" : "read_only",
         inheritedEnvironment: { ...process.env } as Record<string, string>,
+        ...(options.evidenceStore === undefined ? {} : { createId: () => ids.create() }),
+        observe: async (fact) => {
+          for (const observer of backgroundObservers) await observer(fact);
+        },
+        ...(options.evidenceStore === undefined ? {} : { evidenceStore: options.evidenceStore }),
         ...(options.ownedKeys === undefined ? {} : { ownedKeys: options.ownedKeys }),
         ...(options.refreshOwnedKeys === undefined
           ? {}
@@ -414,9 +464,21 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
       processSnapshots.delete(id);
       for (const delegate of delegates) delegate.discardApproval?.(id);
     },
+    observeBackground(observer) {
+      backgroundObservers.add(observer);
+      return () => {
+        backgroundObservers.delete(observer);
+      };
+    },
+    async flushBackground() {
+      await backgroundRegistry?.flush();
+    },
     async cancelAll() {
       const results = await Promise.allSettled([
-        Promise.resolve().then(() => backgroundRegistry?.disposeAll()),
+        Promise.resolve().then(async () => {
+          backgroundRegistry?.disposeAll();
+          await backgroundRegistry?.flush();
+        }),
         lspRegistry.close(),
       ]);
       if (results.some((result) => result.status === "rejected")) {

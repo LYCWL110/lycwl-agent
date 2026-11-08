@@ -12,6 +12,35 @@ export class ProtectedDeliveryError extends Error {
   }
 }
 
+/** Lossless byte checks include reviewed UTF-16 representations, not UTF-8 alone. */
+export function assertProtectedBytes(registry: OwnedKeyRegistry, bytes: Uint8Array): void {
+  try {
+    const keys = registry.keys.flatMap((key) => {
+      if (
+        typeof key.value !== "string" ||
+        key.value.length === 0 ||
+        (key.byteEncoding === "latin1" && [...key.value].some((char) => char.charCodeAt(0) > 0xff))
+      )
+        throw new ProtectedDeliveryError("guard_failure");
+      return [
+        { ...key, value: Buffer.from(key.value, "utf8").toString("latin1") },
+        ...(key.byteEncoding === "latin1" ? [key] : []),
+      ];
+    });
+    const guard = createStreamGuard({ keys });
+    for (let offset = 0; offset < bytes.length; offset += 64 * 1024) {
+      const chunk = Buffer.from(bytes.subarray(offset, offset + 64 * 1024)).toString("latin1");
+      const result = guard.push(chunk);
+      if (result.blocked) throw new ProtectedDeliveryError(result.reason ?? "guard_failure");
+    }
+    const result = guard.flush();
+    if (result.blocked) throw new ProtectedDeliveryError(result.reason ?? "guard_failure");
+  } catch (error) {
+    if (error instanceof ProtectedDeliveryError) throw error;
+    throw new ProtectedDeliveryError("guard_failure");
+  }
+}
+
 /** Check decoded string fields as well as their serialized representation. */
 export function assertProtectedValue(registry: OwnedKeyRegistry, value: unknown): void {
   try {

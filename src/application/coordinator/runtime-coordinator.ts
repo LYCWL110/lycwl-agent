@@ -1,6 +1,7 @@
 import type { CompactionArtifact } from "../../domain/context/compaction.ts";
 import {
   type ContextBudget,
+  computeContextBudget,
   conservativeEstimate,
   decideRequestFit,
 } from "../../domain/context/context-budget.ts";
@@ -31,7 +32,12 @@ import {
   checkIdenticalCall,
   type ProgressDecision,
 } from "../../domain/run/no-progress.ts";
-import { addCompaction, addModelRound, createRunBudget } from "../../domain/run/run-budget.ts";
+import {
+  addCompaction,
+  addModelRound,
+  createRunBudget,
+  RUN_BUDGET_LIMITS,
+} from "../../domain/run/run-budget.ts";
 import { finishRun, type Run, resumeRun, startRun, waitRun } from "../../domain/run/run-state.ts";
 import type { OwnedKeyRegistry } from "../../domain/security/owned-key-guard.ts";
 import type { ApprovalGate } from "../../ports/approval-gate.ts";
@@ -41,19 +47,21 @@ import type {
   ProviderConversationItem,
   ProviderToolCall,
 } from "../../ports/model-provider.ts";
+import type { SensitiveSource } from "../../ports/sensitive-context.ts";
 import type { ToolExecutionRequest, ToolExecutor } from "../../ports/tool-executor.ts";
 import {
   assertProtectedValue,
   guardToolResultText,
   ProtectedDeliveryError,
 } from "../../services/security/guarded-delivery.ts";
+import { deriveTaskReport } from "../task-report/derive-task-report.ts";
 import {
   estimateArtifactTokens,
   parseCompactionArtifact,
   prepareCompaction,
   validateArtifact,
 } from "./compaction-service.ts";
-import { retainRecentGroups } from "./conversation-rebuild.ts";
+import { compactConversation } from "./conversation-rebuild.ts";
 import type { EventInput, EventLog } from "./event-log.ts";
 import type { InternalEvent } from "./internal-events.ts";
 import { completeWithBoundedRetries } from "./model-attempts.ts";
@@ -140,7 +148,10 @@ export type CoordinatorDependencies = Readonly<{
    */
   contextBudget?: ContextBudget;
   /** A known history/capacity failure must stop before contacting the Provider. */
-  preflightFailure?: "protocol_history_incompatible" | "context_capacity_insufficient";
+  preflightFailure?:
+    | "protocol_history_incompatible"
+    | "context_capacity_insufficient"
+    | "model_context_unknown";
   /**
    * Fixed Session identity. When present, every Run this coordinator starts
    * appends to the same Session event log, so a restart can replay the history.
@@ -159,6 +170,14 @@ export type CoordinatorDependencies = Readonly<{
    * `bindAttempt` before any send.
    */
   resolveCredentialRevision?: () => Promise<number | null>;
+  /** Release durable Session ownership only after all local execution settles. */
+  releaseSession?: () => void | Promise<void>;
+  sensitiveSources?: readonly SensitiveSource[];
+  requestFingerprint?: (value: unknown) => Promise<string>;
+  /** Monotonic application clock; wall-clock timestamps remain separate. */
+  nowMs?: () => number;
+  /** Production persists derived reports; synthetic fixtures may opt in. */
+  persistReports?: boolean;
 }>;
 
 export type QueueInputOutcome =
@@ -232,6 +251,20 @@ export type PendingApprovalView = Readonly<{
   requestVersion: number;
 }>;
 
+export type PendingDisclosureView = Readonly<{
+  disclosureId: string;
+  requestVersion: number;
+  requestFingerprint: string;
+  safePreview: string;
+}>;
+
+type PendingDisclosure = PendingDisclosureView & {
+  modelRequestId: string;
+  decision: "approved" | "denied" | null;
+  commandId: string | null;
+  resolve: () => void;
+};
+
 type PendingApproval = {
   toolCallId: string;
   approvalId: string;
@@ -262,11 +295,22 @@ type MutableRunContext = {
   readonly correlationId: string;
   readonly events: InternalEvent[];
   budget: ReturnType<typeof createRunBudget>;
+  lastBudgetTick: number;
+  accountingActive: boolean;
+  costUnknown: boolean;
+  budgetTimer: ReturnType<typeof setTimeout> | null;
+  elapsedExceeded: boolean;
   lastEventId: string | null;
   conversation: ProviderConversationItem[];
   inputQueue: RunInputQueue;
   nextAcceptedSeq: number;
   taskRevision: number;
+  taskInputs: string[];
+  pendingModel: {
+    modelRequestId: string;
+    attemptsUsed: number;
+    auxiliary: boolean;
+  } | null;
   cancelRequested: boolean;
   abortController: AbortController;
   stopSiblings: boolean;
@@ -274,6 +318,8 @@ type MutableRunContext = {
   cancelledDuring: "model_request" | "tool_execution" | null;
   pendingApproval: PendingApproval | null;
   pendingQuestion: PendingQuestion | null;
+  pendingDisclosure: PendingDisclosure | null;
+  approvalCredentialRevisions: Map<string, number | null>;
   resumeCommandIds: Set<string>;
   pendingResume: Promise<CoordinatorResult> | null;
   checkpointFailure: string | null;
@@ -292,6 +338,8 @@ type MutableRunContext = {
   guidanceSources: Set<string>;
   /** Guidance text currently injected, replaced rather than duplicated. */
   guidanceText: string | null;
+  eventTail: Promise<void>;
+  replanRequested: boolean;
 };
 
 export class RuntimeCoordinator {
@@ -299,11 +347,50 @@ export class RuntimeCoordinator {
   readonly #sessionId: string;
   #conversation: readonly ProviderConversationItem[];
   #activeContext: MutableRunContext | null = null;
+  #pendingRun: Promise<CoordinatorResult> | null = null;
+  #closing: Promise<void> | null = null;
+  #sensitiveSources: SensitiveSource[];
+  #lastResult: CoordinatorResult | null = null;
+  #backgroundContexts = new Map<string, MutableRunContext>();
+  #backgroundTerminal = new Set<string>();
+  #stopBackgroundObservation: (() => void) | undefined;
+  #persistenceFailed = false;
 
   constructor(dependencies: CoordinatorDependencies) {
     this.#deps = dependencies;
     this.#sessionId = dependencies.sessionId ?? dependencies.ids.create();
     this.#conversation = [...(dependencies.priorConversation ?? [])];
+    this.#sensitiveSources = [...(dependencies.sensitiveSources ?? [])];
+    this.#stopBackgroundObservation = dependencies.tools.observeBackground?.(async (task) => {
+      const context = this.#backgroundContexts.get(task.launchingToolCallId);
+      if (
+        context === undefined ||
+        context.sessionId !== task.sessionId ||
+        context.runId !== task.ownerRunId ||
+        !context.events.some(
+          ({ payload }) =>
+            payload.kind === "tool_dispatch_committed" &&
+            payload.toolCallId === task.launchingToolCallId,
+        )
+      )
+        throw new Error("background_owner_invalid");
+      const identity = `${task.taskId}:${task.processExecutionId}`;
+      if (this.#backgroundTerminal.has(identity)) return;
+      await this.#record(context, "background_task_observed", {
+        kind: "background_task_observed",
+        task,
+      });
+      if ("deliveryBlocked" in task && task.deliveryBlocked !== undefined) {
+        context.deliveryBlocked = true;
+        context.deliveryBlockReason = task.deliveryBlocked;
+        if (this.#activeContext !== null) {
+          this.#activeContext.deliveryBlocked = true;
+          this.#activeContext.deliveryBlockReason = task.deliveryBlocked;
+          this.#activeContext.abortController.abort();
+        }
+      }
+      if (!["registered", "running"].includes(task.state)) this.#backgroundTerminal.add(identity);
+    });
   }
 
   /**
@@ -313,27 +400,29 @@ export class RuntimeCoordinator {
   async queueInput(text: string): Promise<QueueInputOutcome> {
     const context = this.#activeContext;
     if (context === null) return { ok: false, code: "run_terminal" };
-    const acceptedSeq = context.nextAcceptedSeq;
-    const queued = queueRunInput(context.inputQueue, {
-      commandId: this.#deps.ids.create(),
-      inputId: this.#deps.ids.create(),
-      text,
-      acceptedSeq,
-      runState: context.run.state,
+    return this.#serialize(context, async () => {
+      const acceptedSeq = context.nextAcceptedSeq;
+      const queued = queueRunInput(context.inputQueue, {
+        commandId: this.#deps.ids.create(),
+        inputId: this.#deps.ids.create(),
+        text,
+        acceptedSeq,
+        runState: context.run.state,
+      });
+      if (!queued.ok) return { ok: false, code: queued.code };
+      if (queued.duplicate) return { ok: true, inputId: null };
+      const item = queued.queue.items.at(-1);
+      if (item === undefined) return { ok: true, inputId: null };
+      await this.#recordNow(context, "run_input_queued", {
+        kind: "run_input_queued",
+        inputId: item.inputId,
+        text: item.text,
+        acceptedSeq: item.acceptedSeq,
+      });
+      context.inputQueue = queued.queue;
+      context.nextAcceptedSeq = acceptedSeq + 1;
+      return { ok: true, inputId: item.inputId };
     });
-    if (!queued.ok) return { ok: false, code: queued.code };
-    context.inputQueue = queued.queue;
-    if (queued.duplicate) return { ok: true, inputId: null };
-    context.nextAcceptedSeq = acceptedSeq + 1;
-    const item = queued.queue.items.at(-1);
-    if (item === undefined) return { ok: true, inputId: null };
-    await this.#record(context, "run_input_queued", {
-      kind: "run_input_queued",
-      inputId: item.inputId,
-      text: item.text,
-      acceptedSeq: item.acceptedSeq,
-    });
-    return { ok: true, inputId: item.inputId };
   }
 
   /**
@@ -356,30 +445,73 @@ export class RuntimeCoordinator {
       return { ok: false, code: "run_terminal" };
     }
     context.cancelCommandIds.add(commandId);
-    await this.#record(context, "run_cancel_requested", {
-      kind: "run_cancel_requested",
-      commandId,
-    });
-    context.cancelRequested = true;
-    context.abortController.abort();
-    context.pendingApproval?.resolve();
-    context.pendingQuestion?.resolve();
-    await this.#deps.tools.cancelAll?.();
-    return { ok: true, duplicate: false };
-  }
-
-  /** Session resources outlive completed Runs, but never a closed Session. */
-  async closeSession(commandId: string): Promise<void> {
-    const context = this.#activeContext;
-    const cancelled = await this.cancelRun(commandId);
-    if (!cancelled.ok) await this.#deps.tools.cancelAll?.();
-    else if (
-      context?.run.state === "waiting" &&
+    try {
+      await this.#record(context, "run_cancel_requested", {
+        kind: "run_cancel_requested",
+        commandId,
+      });
+    } finally {
+      // Persistence/guard failure must not leave an already-running process
+      // alive or allow another dispatch. Durable recovery remains uncertain.
+      context.cancelRequested = true;
+      context.abortController.abort();
+      context.pendingApproval?.resolve();
+      context.pendingQuestion?.resolve();
+      context.pendingDisclosure?.resolve();
+      await this.#deps.tools.cancelAll?.();
+    }
+    if (
+      this.#pendingRun === null &&
+      context.pendingResume === null &&
+      context.run.state === "waiting" &&
       (context.run.reason === "configuration" || context.run.reason === "recovery_review")
     ) {
       await this.#cancel(context);
       this.#activeContext = null;
     }
+    return { ok: true, duplicate: false };
+  }
+
+  /** Session resources outlive completed Runs, but never a closed Session. */
+  closeSession(commandId: string): Promise<void> {
+    if (this.#closing === null) this.#closing = this.#closeSession(commandId);
+    return this.#closing;
+  }
+
+  async #closeSession(commandId: string): Promise<void> {
+    const context = this.#activeContext;
+    let failure: unknown;
+    try {
+      const cancelled = await this.cancelRun(commandId);
+      if (!cancelled.ok) await this.#deps.tools.cancelAll?.();
+    } catch (error) {
+      failure = error;
+    }
+    try {
+      await this.#pendingRun;
+      await context?.pendingResume;
+    } catch (error) {
+      failure ??= error;
+    }
+    try {
+      // The loop can enter a configuration/recovery wait while close awaits it.
+      // Settle that final state before releasing Session ownership.
+      if (
+        context?.run.state === "waiting" &&
+        (context.run.reason === "configuration" || context.run.reason === "recovery_review")
+      ) {
+        await this.#cancel(context);
+        this.#activeContext = null;
+      }
+    } catch (error) {
+      failure ??= error;
+    }
+    // A failed process cleanup retains ownership. A failed fact write does not
+    // prevent closing resources after all execution has actually stopped.
+    if (failure !== undefined) await this.#deps.tools.cancelAll?.();
+    await this.#deps.releaseSession?.();
+    this.#stopBackgroundObservation?.();
+    if (failure !== undefined) throw failure;
   }
 
   /**
@@ -393,6 +525,17 @@ export class RuntimeCoordinator {
     return context === null ? null : { status: context.run.state, events: context.events.slice() };
   }
 
+  configurationWaitView(): Readonly<{ waitToken: string; requestVersion: number }> | null {
+    const run = this.#activeContext?.run;
+    return run?.state === "waiting" && run.reason === "configuration"
+      ? { waitToken: run.waitToken, requestVersion: run.requestVersion }
+      : null;
+  }
+
+  lastRunResult(): CoordinatorResult | null {
+    return this.#lastResult;
+  }
+
   /** Reading a pending approval grants no authority. */
   pendingApprovalView(): PendingApprovalView | null {
     const pending = this.#activeContext?.pendingApproval;
@@ -403,6 +546,44 @@ export class RuntimeCoordinator {
       toolName: pending.call.toolName,
       requestVersion: pending.requestVersion,
     };
+  }
+
+  pendingDisclosureView(): PendingDisclosureView | null {
+    const pending = this.#activeContext?.pendingDisclosure;
+    if (pending == null) return null;
+    return {
+      disclosureId: pending.disclosureId,
+      requestVersion: pending.requestVersion,
+      requestFingerprint: pending.requestFingerprint,
+      safePreview: pending.safePreview,
+    };
+  }
+
+  async replySensitiveDisclosure(
+    input: Readonly<{
+      commandId: string;
+      disclosureId: string;
+      requestVersion: number;
+      requestFingerprint: string;
+      decision: "approved" | "denied";
+    }>,
+  ): Promise<Readonly<{ ok: boolean }>> {
+    const pending = this.#activeContext?.pendingDisclosure;
+    if (
+      pending == null ||
+      input.commandId.length === 0 ||
+      pending.disclosureId !== input.disclosureId ||
+      pending.requestVersion !== input.requestVersion ||
+      pending.requestFingerprint !== input.requestFingerprint
+    )
+      return { ok: false };
+    if (pending.decision !== null)
+      return { ok: pending.commandId === input.commandId && pending.decision === input.decision };
+    // Only the coordinator continuation persists and acts on this command.
+    pending.decision = input.decision;
+    pending.commandId = input.commandId;
+    pending.resolve();
+    return { ok: true };
   }
 
   /**
@@ -567,7 +748,21 @@ export class RuntimeCoordinator {
     return { ok: true, duplicate: false };
   }
 
-  async run(input: string): Promise<CoordinatorResult> {
+  run(input: string): Promise<CoordinatorResult> {
+    if (this.#closing !== null) return Promise.reject(new Error("session_closed"));
+    if (this.#persistenceFailed) return Promise.reject(new Error("session_persistence_failed"));
+    if (this.#pendingRun !== null || this.#activeContext !== null)
+      return Promise.reject(new Error("session_busy"));
+    const pending = this.#startRun(input);
+    this.#pendingRun = pending;
+    const clear = () => {
+      if (this.#pendingRun === pending) this.#pendingRun = null;
+    };
+    pending.then(clear, clear);
+    return pending;
+  }
+
+  async #startRun(input: string): Promise<CoordinatorResult> {
     const projectContext = this.#deps.projectContext;
     const context: MutableRunContext = {
       run: startRun(),
@@ -576,6 +771,11 @@ export class RuntimeCoordinator {
       correlationId: this.#deps.ids.create(),
       events: [],
       budget: createRunBudget(),
+      lastBudgetTick: this.#nowMs(),
+      accountingActive: true,
+      costUnknown: false,
+      budgetTimer: null,
+      elapsedExceeded: false,
       lastEventId: null,
       conversation: [
         ...(projectContext === undefined ? [] : [{ kind: "user" as const, text: projectContext }]),
@@ -585,6 +785,8 @@ export class RuntimeCoordinator {
       inputQueue: emptyRunInputQueue(),
       nextAcceptedSeq: 1,
       taskRevision: 1,
+      taskInputs: [input],
+      pendingModel: null,
       cancelRequested: false,
       abortController: new AbortController(),
       stopSiblings: false,
@@ -592,6 +794,8 @@ export class RuntimeCoordinator {
       cancelledDuring: null,
       pendingApproval: null,
       pendingQuestion: null,
+      pendingDisclosure: null,
+      approvalCredentialRevisions: new Map(),
       resumeCommandIds: new Set<string>(),
       pendingResume: null,
       checkpointFailure: null,
@@ -604,6 +808,8 @@ export class RuntimeCoordinator {
       touchedPaths: [],
       guidanceSources: new Set<string>(),
       guidanceText: projectContext ?? null,
+      eventTail: Promise.resolve(),
+      replanRequested: false,
     };
     this.#activeContext = context;
     try {
@@ -649,6 +855,7 @@ export class RuntimeCoordinator {
     waitToken: string;
     requestVersion: number;
   }): Promise<ResumeRunOutcome> {
+    if (this.#closing !== null) return { ok: false, code: "run_terminal" };
     if (input.commandId.length === 0 || input.waitToken.length === 0) {
       return { ok: false, code: "invalid_identity" };
     }
@@ -672,9 +879,16 @@ export class RuntimeCoordinator {
     context.run = resumed.value;
     await this.#record(context, "run_resumed", { kind: "run_resumed" });
     context.pendingResume = this.#loop(context);
-    context.pendingResume.then(() => {
-      if (context.run.state !== "waiting") this.#activeContext = null;
-    });
+    const pending = context.pendingResume;
+    pending.then(
+      () => {
+        if (context.run.state !== "waiting") this.#activeContext = null;
+        if (context.pendingResume === pending) context.pendingResume = null;
+      },
+      () => {
+        if (context.pendingResume === pending) context.pendingResume = null;
+      },
+    );
     return { ok: true, duplicate: false };
   }
 
@@ -688,13 +902,19 @@ export class RuntimeCoordinator {
   async #loop(context: MutableRunContext): Promise<CoordinatorResult> {
     try {
       while (context.run.state === "active") {
+        if (this.#persistenceFailed) throw new Error("session_persistence_failed");
         if (context.cancelRequested) return this.#cancel(context);
+        if (this.#accountTime(context)) return this.#fail(context, "elapsed_limit");
         if (context.deliveryBlocked)
           return this.#blockDelivery(context, context.deliveryBlockReason ?? "owned_key_detected");
+        await this.#consumeQueuedInput(context);
+        context.replanRequested = false;
 
-        const round = addModelRound(context.budget);
-        if (!round.ok) return this.#fail(context, round.code);
-        context.budget = round.value;
+        if (context.pendingModel === null) {
+          const round = addModelRound(context.budget);
+          if (!round.ok) return this.#fail(context, round.code);
+          context.budget = round.value;
+        }
 
         // Refresh scoped guidance at the request boundary, before any send. A file
         // touched since the last round may bring a directory's AGENTS.md into scope.
@@ -703,10 +923,12 @@ export class RuntimeCoordinator {
 
         // Budget and compaction happen at the same boundary: both must precede the
         // request, and a compaction that fails must leave the old context usable.
-        const compaction = await this.#maybeCompact(context);
-        if (compaction.kind === "stop") return compaction.result;
+        if (context.pendingModel?.auxiliary !== false) {
+          const compaction = await this.#maybeCompact(context);
+          if (compaction.kind === "stop") return compaction.result;
+        }
 
-        const modelRequestId = this.#deps.ids.create();
+        const modelRequestId = context.pendingModel?.modelRequestId ?? this.#deps.ids.create();
         context.cancelledDuring = "model_request";
         const completion = await this.#completeWithRetries(context, modelRequestId);
         context.cancelledDuring = null;
@@ -752,48 +974,38 @@ export class RuntimeCoordinator {
         // response. The cancelled results must close the tool-call pairs *before*
         // the new user message is appended, otherwise the history would answer a
         // call after a new turn and become an illegal protocol sequence.
-        const hasPendingInput = context.inputQueue.items.length > 0;
-        if (hasPendingInput && completion.toolCalls.length > 0) {
-          for (const call of completion.toolCalls) {
-            context.conversation.push({
-              kind: "tool_result",
-              providerToolCallId: call.providerToolCallId,
-              toolName: call.toolName,
-              status: "cancelled",
-              text: null,
-            });
-          }
-        }
-
         const superseded = await this.#consumeQueuedInput(context);
         if (context.cancelRequested) return this.#cancel(context);
-        if (superseded) {
-          for (const call of completion.toolCalls) {
-            await this.#record(context, "tool_call_cancelled", {
-              kind: "tool_call_cancelled",
-              toolCallId: this.#deps.ids.create(),
-              providerToolCallId: call.providerToolCallId,
-              toolName: call.toolName,
-              reason: "user_input_superseded",
-            });
-          }
-          continue;
-        }
+        if (superseded) continue;
 
         if (completion.toolCalls.length === 0) {
-          const finished = finishRun(context.run, "completed");
-          if (!finished.ok) return this.#fail(context, finished.code);
-          await this.#record(context, "run_completed", {
-            kind: "run_completed",
-            text: guardedCompletionText,
+          await this.#deps.tools.flushBackground?.();
+          if (context.deliveryBlocked)
+            return this.#blockDelivery(
+              context,
+              context.deliveryBlockReason ?? "owned_key_detected",
+            );
+          const completed = await this.#serialize(context, async () => {
+            if (context.inputQueue.items.length > 0) return false;
+            const finished = finishRun(context.run, "completed");
+            if (!finished.ok) throw new Error(finished.code);
+            context.run = finished.value;
+            await this.#recordNow(context, "run_completed", {
+              kind: "run_completed",
+              text: guardedCompletionText,
+            });
+            return true;
           });
-          context.run = finished.value;
+          if (!completed) continue;
           return this.#result(context, "completed", guardedCompletionText, null);
         }
 
         for (const [index, call] of completion.toolCalls.entries()) {
+          if (await this.#consumeQueuedInput(context)) break;
           const callResult = await this.#executeCall(context, call);
           if (callResult.kind === "stop") return callResult.result;
+          if (context.replanRequested) break;
+          if (await this.#consumeQueuedInput(context)) break;
           if (context.deliveryBlocked)
             return this.#blockDelivery(
               context,
@@ -821,8 +1033,14 @@ export class RuntimeCoordinator {
         }
       }
     } catch (error) {
+      if (this.#persistenceFailed) {
+        this.#clearBudgetTimer(context);
+        await this.#deps.tools.cancelAll?.();
+        throw new Error("session_persistence_failed");
+      }
       if (error instanceof ProtectedDeliveryError)
         return this.#blockDelivery(context, error.reason);
+      if (context.elapsedExceeded) return this.#fail(context, "elapsed_limit");
       return this.#fail(context, "unexpected_internal_error");
     }
 
@@ -845,26 +1063,70 @@ export class RuntimeCoordinator {
    * when new input superseded the current response's undispatched calls.
    */
   async #consumeQueuedInput(context: MutableRunContext): Promise<boolean> {
-    const pending = context.inputQueue.items;
-    if (pending.length === 0) return false;
-    const throughSeq = pending.at(-1)?.acceptedSeq ?? 0;
-    const consumed = consumeRunInput(context.inputQueue, throughSeq, context.taskRevision);
-    if (!consumed.ok) return false;
-    context.inputQueue = consumed.queue;
-    context.taskRevision = consumed.batch.taskRevision + 1;
-    await this.#record(context, "run_input_batch_consumed", {
-      kind: "run_input_batch_consumed",
-      inputIds: consumed.batch.inputIds,
-      throughSeq: consumed.batch.throughSeq,
-      taskRevision: consumed.batch.taskRevision,
+    return this.#serialize(context, async () => {
+      const pending = context.inputQueue.items;
+      if (pending.length === 0) return false;
+      const throughSeq = pending.at(-1)?.acceptedSeq ?? 0;
+      const consumed = consumeRunInput(context.inputQueue, throughSeq, context.taskRevision);
+      if (!consumed.ok) return false;
+      await this.#recordNow(context, "run_input_batch_consumed", {
+        kind: "run_input_batch_consumed",
+        inputIds: consumed.batch.inputIds,
+        throughSeq: consumed.batch.throughSeq,
+        taskRevision: consumed.batch.taskRevision,
+      });
+      context.inputQueue = consumed.queue;
+      context.taskRevision = consumed.batch.taskRevision + 1;
+      const outstanding = new Map<string, ProviderToolCall>();
+      for (const item of context.conversation) {
+        if (item.kind === "assistant")
+          for (const call of item.toolCalls) outstanding.set(call.providerToolCallId, call);
+        else if (item.kind === "tool_result") outstanding.delete(item.providerToolCallId);
+      }
+      const currentResponse = context.events.findLastIndex(
+        ({ payload }) => payload.kind === "model_response_validated",
+      );
+      for (const call of outstanding.values()) {
+        const received = context.events
+          .slice(currentResponse)
+          .findLast(
+            ({ payload }) =>
+              payload.kind === "tool_call_received" &&
+              payload.providerToolCallId === call.providerToolCallId,
+          )?.payload;
+        const toolCallId =
+          received?.kind === "tool_call_received" ? received.toolCallId : this.#deps.ids.create();
+        this.#deps.tools.discardApproval?.(toolCallId);
+        const decision = context.events.findLast(
+          ({ payload }) => payload.kind === "approval_decided" && payload.toolCallId === toolCallId,
+        )?.payload;
+        if (decision?.kind === "approval_decided" && decision.decision === "approved") {
+          await this.#recordNow(context, "approval_grant_revoked", {
+            kind: "approval_grant_revoked",
+            approvalId: decision.approvalId,
+            toolCallId,
+            reason: "superseded_input",
+          });
+        }
+        await this.#recordNow(context, "tool_call_cancelled", {
+          kind: "tool_call_cancelled",
+          toolCallId,
+          providerToolCallId: call.providerToolCallId,
+          toolName: call.toolName,
+          reason: "user_input_superseded",
+        });
+        this.#appendToolResult(context, call, "cancelled", null);
+      }
+      for (const item of pending) {
+        context.conversation.push({ kind: "user", text: item.text });
+        context.taskInputs.push(item.text);
+      }
+      // New user input is progress: it resets the identical-call counter for the
+      // next call without touching accumulated failure history.
+      context.newInputSinceLastCall = true;
+      context.replanRequested = true;
+      return true;
     });
-    for (const item of pending) {
-      context.conversation.push({ kind: "user", text: item.text });
-    }
-    // New user input is progress: it resets the identical-call counter for the
-    // next call without touching accumulated failure history.
-    context.newInputSinceLastCall = true;
-    return true;
   }
 
   async #completeWithRetries(
@@ -872,6 +1134,7 @@ export class RuntimeCoordinator {
     modelRequestId: string,
     /** Overrides the conversation; used by the auxiliary compaction request. */
     overrideConversation?: readonly ProviderConversationItem[],
+    auxiliaryAttempts?: { used: number; maxOutputTokens: number },
   ): Promise<
     | Readonly<{
         kind: "completed";
@@ -883,15 +1146,35 @@ export class RuntimeCoordinator {
     | Readonly<{ kind: "waiting"; result: CoordinatorResult }>
     | Readonly<{ kind: "failed"; result: CoordinatorResult }>
   > {
+    const consented = new Set<string>();
+    const previous =
+      context.pendingModel?.modelRequestId === modelRequestId ? context.pendingModel : null;
+    let attemptsUsed = previous?.attemptsUsed ?? 0;
     const outcome = await completeWithBoundedRetries(
       {
         provider: this.#deps.provider,
         sleep: this.#deps.sleep ?? sleep,
         signal: context.abortController.signal,
+        attemptStart: attemptsUsed + 1,
+        ...(auxiliaryAttempts === undefined
+          ? {}
+          : {
+              attemptStart: auxiliaryAttempts.used + 1,
+              attemptLimit: 2,
+              compaction: {
+                maxOutputTokens: auxiliaryAttempts.maxOutputTokens,
+              },
+            }),
         ...(this.#deps.resolveCredentialRevision === undefined
           ? {}
           : { resolveCredentialRevision: this.#deps.resolveCredentialRevision }),
         onRequestStarted: async (requestId, attemptNo, credentialRevision) => {
+          if (this.#persistenceFailed) throw new Error("session_persistence_failed");
+          if (context.deliveryBlocked)
+            throw new ProtectedDeliveryError(context.deliveryBlockReason ?? "owned_key_detected");
+          if (this.#accountTime(context)) return { ok: false, safeCode: "elapsed_limit" };
+          this.#clearBudgetTimer(context);
+          if (auxiliaryAttempts !== undefined) auxiliaryAttempts.used = attemptNo;
           await this.#deps.refreshOwnedKeys?.();
           if (this.#deps.ownedKeys !== undefined) {
             assertProtectedValue(
@@ -903,6 +1186,17 @@ export class RuntimeCoordinator {
           // reference. A resolver that reports a different reference would mean a
           // silent identity change inside a Run, which must not be sent.
           const binding = context.runBinding;
+          const disclosed = await this.#checkDisclosure(
+            context,
+            requestId,
+            credentialRevision,
+            overrideConversation ?? context.conversation,
+            overrideConversation !== undefined,
+            consented,
+          );
+          if (!disclosed.ok) return disclosed;
+          credentialRevision = disclosed.credentialRevision;
+          if (this.#accountTime(context)) return { ok: false, safeCode: "elapsed_limit" };
           if (binding !== null && credentialRevision !== null) {
             const bound = bindAttempt(binding, {
               modelRequestId: requestId,
@@ -918,6 +1212,7 @@ export class RuntimeCoordinator {
               return { ok: false as const, safeCode: bound.code };
             }
           }
+          context.costUnknown = true;
           await this.#record(context, "model_request_started", {
             kind: "model_request_started",
             modelRequestId: requestId,
@@ -931,6 +1226,8 @@ export class RuntimeCoordinator {
               : {}),
             ...(credentialRevision === null ? {} : { credentialRevision }),
           });
+          attemptsUsed = attemptNo;
+          this.#armBudgetTimer(context);
           return { ok: true as const };
         },
         onRetryScheduled: async (input) => {
@@ -944,11 +1241,33 @@ export class RuntimeCoordinator {
       overrideConversation ?? context.conversation,
     );
 
+    this.#clearBudgetTimer(context);
+    if (context.deliveryBlocked)
+      return {
+        kind: "terminal",
+        result: await this.#blockDelivery(
+          context,
+          context.deliveryBlockReason ?? "owned_key_detected",
+        ),
+      };
+    if (this.#accountTime(context))
+      return {
+        kind: "failed",
+        result: await this.#fail(context, "elapsed_limit"),
+      };
     if (outcome.kind === "cancelled" || context.cancelRequested) {
       return { kind: "terminal", result: await this.#cancel(context) };
     }
-    if (outcome.kind === "completed") return outcome;
+    if (outcome.kind === "completed") {
+      if (context.pendingModel?.modelRequestId === modelRequestId) context.pendingModel = null;
+      return outcome;
+    }
     if (outcome.kind === "authentication_failure") {
+      context.pendingModel = {
+        modelRequestId,
+        attemptsUsed,
+        auxiliary: auxiliaryAttempts !== undefined,
+      };
       const waitToken = this.#deps.ids.create();
       const waiting = waitRun(context.run, "configuration", waitToken, 1);
       if (!waiting.ok) {
@@ -992,17 +1311,68 @@ export class RuntimeCoordinator {
   #sessionTools(context: MutableRunContext): ToolExecutor {
     const base = this.#deps.tools;
     const preview = base.preview;
+    const previewRevisions = context.approvalCredentialRevisions;
     return {
       getDefinition: (toolName) => base.getDefinition(toolName),
       requiresApproval: async (request) => (await base.requiresApproval?.(request)) ?? false,
-      revalidateApproval: async (request) => (await base.revalidateApproval?.(request)) ?? true,
+      revalidateApproval: async (request) => {
+        if (context.runBinding !== null) {
+          const current = (await this.#deps.resolveCredentialRevision?.()) ?? null;
+          if (previewRevisions.get(request.toolCallId) !== current) return false;
+        }
+        return (await base.revalidateApproval?.(request)) ?? true;
+      },
       discardApproval: (id) => base.discardApproval?.(id),
       ...(preview === undefined
         ? {}
-        : { preview: (request: ToolExecutionRequest) => preview.call(base, request) }),
+        : {
+            preview: async (request: ToolExecutionRequest) => {
+              const body = await preview.call(base, request);
+              const binding = context.runBinding;
+              if (binding === null || body === null) return body;
+              const revision = (await this.#deps.resolveCredentialRevision?.()) ?? null;
+              previewRevisions.set(request.toolCallId, revision);
+              return [
+                body,
+                `disclosure destination=${binding.endpoint.host}${binding.endpoint.path}`,
+                `model=${binding.modelId}; protocol=${binding.protocolId}`,
+                `credentialRef=${binding.credential.credentialRef}; revision=${revision ?? "unknown"}`,
+              ].join("\n");
+            },
+          }),
       execute: async (request) => {
-        if (request.toolName !== "todo") return base.execute(request);
-        const result = await base.execute(request);
+        if (request.toolName === "background_start")
+          this.#backgroundContexts.set(request.toolCallId, context);
+        const result = await base.execute({
+          ...request,
+          owner: { sessionId: context.sessionId, runId: context.runId },
+        });
+        if (result.sensitiveSources !== undefined && result.status === "succeeded") {
+          const binding = context.runBinding;
+          const revision = previewRevisions.get(request.toolCallId) ?? binding?.credential.revision;
+          for (const source of result.sensitiveSources) {
+            const provenance: SensitiveSource = {
+              ...source,
+              origin:
+                binding == null || revision === undefined
+                  ? null
+                  : {
+                      providerId: binding.providerId,
+                      modelId: binding.modelId,
+                      protocolId: binding.protocolId,
+                      endpointFingerprint: binding.endpointFingerprint,
+                      credentialRef: binding.credential.credentialRef,
+                      credentialRevision: revision,
+                    },
+            };
+            await this.#record(context, "sensitive_source_recorded", {
+              kind: "sensitive_source_recorded",
+              source: provenance,
+            });
+            this.#sensitiveSources.push(provenance);
+          }
+        }
+        if (request.toolName !== "todo") return result;
         if (result.status !== "succeeded") return result;
         const items = (request.arguments as { items?: unknown } | null)?.items;
         const replaced = replaceTodoList(context.todoList, items);
@@ -1018,6 +1388,125 @@ export class RuntimeCoordinator {
         return result;
       },
     };
+  }
+
+  async #checkDisclosure(
+    context: MutableRunContext,
+    modelRequestId: string,
+    credentialRevision: number | null,
+    conversation: readonly ProviderConversationItem[],
+    auxiliary: boolean,
+    consented: Set<string>,
+  ): Promise<
+    | Readonly<{ ok: true; credentialRevision: number | null }>
+    | Readonly<{ ok: false; safeCode: string }>
+  > {
+    const binding = context.runBinding;
+    const sources = this.#sensitiveSources;
+    if (sources.length === 0) return { ok: true, credentialRevision };
+    // Missing legacy identity is unknown, never evidence for the new destination.
+    if (
+      binding === null ||
+      credentialRevision === null ||
+      this.#deps.requestFingerprint === undefined
+    )
+      return { ok: false, safeCode: "sensitive_disclosure_identity_unknown" };
+    for (let version = 1; ; version++) {
+      if (context.cancelRequested) return { ok: false, safeCode: "run_cancelled" };
+      const affected = sources.filter(
+        ({ origin }) =>
+          origin === null ||
+          origin.providerId !== binding.providerId ||
+          origin.modelId !== binding.modelId ||
+          origin.protocolId !== binding.protocolId ||
+          origin.endpointFingerprint !== binding.endpointFingerprint ||
+          origin.credentialRef !== binding.credential.credentialRef ||
+          origin.credentialRevision !== credentialRevision,
+      );
+      if (affected.length === 0) return { ok: true, credentialRevision };
+      const fingerprint = await this.#deps.requestFingerprint({
+        modelRequestId,
+        purpose: auxiliary ? "compaction" : "main",
+        binding,
+        credentialRevision,
+        conversation,
+        coverage: sources,
+      });
+      if (consented.has(fingerprint)) return { ok: true, credentialRevision };
+      const disclosureId = this.#deps.ids.create();
+      const safePreview = [
+        "Sensitive context redisclosure",
+        `provider=${binding.providerId}`,
+        `model=${binding.modelId}; protocol=${binding.protocolId}`,
+        `endpoint=${binding.endpoint.host}${binding.endpoint.port === null ? "" : `:${binding.endpoint.port}`}${binding.endpoint.path}`,
+        `credentialRef=${binding.credential.credentialRef}; revision=${credentialRevision}`,
+        `purpose=${auxiliary ? "compaction" : "main request"}`,
+        `request=${modelRequestId}; fingerprint=${fingerprint}`,
+        ...affected.map(
+          (source) =>
+            `source=${source.sourceId}; path=${source.label}; sha256=${source.contentDigest}`,
+        ),
+      ].join("\n");
+      const wait = waitRun(context.run, "approval", disclosureId, version);
+      if (!wait.ok) return { ok: false, safeCode: wait.code };
+      context.run = wait.value;
+      await this.#record(context, "sensitive_disclosure_requested", {
+        kind: "sensitive_disclosure_requested",
+        disclosureId,
+        modelRequestId,
+        requestVersion: version,
+        requestFingerprint: fingerprint,
+        safePreview,
+        sourceIds: affected.map((source) => source.sourceId),
+      });
+      await this.#record(context, "run_waiting", {
+        kind: "run_waiting",
+        reason: "approval",
+        safeCode: "sensitive_disclosure_required",
+        waitToken: disclosureId,
+        requestVersion: version,
+      });
+      await new Promise<void>((resolve) => {
+        context.pendingDisclosure = {
+          disclosureId,
+          modelRequestId,
+          requestVersion: version,
+          requestFingerprint: fingerprint,
+          safePreview,
+          decision: null,
+          commandId: null,
+          resolve,
+        };
+        if (context.cancelRequested) resolve();
+      });
+      const pending = context.pendingDisclosure;
+      context.pendingDisclosure = null;
+      if (pending === null) return { ok: false, safeCode: "sensitive_disclosure_lost" };
+      await this.#record(context, "sensitive_disclosure_decided", {
+        kind: "sensitive_disclosure_decided",
+        disclosureId,
+        modelRequestId,
+        requestVersion: version,
+        requestFingerprint: fingerprint,
+        decision: context.cancelRequested ? "cancelled" : (pending.decision ?? "cancelled"),
+        commandId: pending.commandId,
+      });
+      if (context.cancelRequested) return { ok: false, safeCode: "run_cancelled" };
+      const resumed = resumeRun(context.run);
+      if (!resumed.ok) return { ok: false, safeCode: resumed.code };
+      context.run = resumed.value;
+      if (pending.decision !== "approved")
+        return { ok: false, safeCode: "sensitive_disclosure_denied" };
+      // Supplementary input changes the task and therefore invalidates this
+      // exact request rather than treating the new message as consent.
+      if (context.inputQueue.items.length > 0)
+        return { ok: false, safeCode: "sensitive_disclosure_context_changed" };
+      consented.add(fingerprint);
+      const currentRevision = await this.#deps.resolveCredentialRevision?.();
+      if (currentRevision == null) return { ok: false, safeCode: "credential_binding_failed" };
+      credentialRevision = currentRevision;
+      // Rebuild the fingerprint and preview if identity changed while waiting.
+    }
   }
 
   /**
@@ -1091,17 +1580,32 @@ export class RuntimeCoordinator {
    * - above the trigger but within P, an irreducible context is still sent;
    * - above P, nothing is sent;
    * - at most one regeneration per compaction, then fail;
-   * - a failed compaction keeps the old context and does not fail the Run by itself.
+   * - invalid artifacts retain history; exhausting regeneration fails the Run.
    */
   async #maybeCompact(
     context: MutableRunContext,
   ): Promise<
     Readonly<{ kind: "continue" }> | Readonly<{ kind: "stop"; result: CoordinatorResult }>
   > {
-    const budget = this.#deps.contextBudget;
-    if (budget === undefined) return { kind: "continue" };
+    const configured = this.#deps.contextBudget;
+    if (configured === undefined) return { kind: "continue" };
+    const computed = computeContextBudget({
+      window: configured.window,
+      modelMaxOutput: configured.output,
+      userMaxOutput: configured.output,
+      fixed:
+        configured.fixed +
+        conservativeEstimate(
+          estimateConversationTokens(context.taskInputs.map((text) => ({ kind: "user", text }))),
+        ),
+    });
+    if (!computed.ok)
+      return { kind: "stop", result: await this.#fail(context, "context_capacity_insufficient") };
+    const budget = computed.value;
 
-    const estimate = conservativeEstimate(estimateConversationTokens(context.conversation));
+    const estimate = conservativeEstimate(
+      budget.fixed + estimateConversationTokens(context.conversation),
+    );
     const fit = decideRequestFit({
       budget,
       promptSize: estimate,
@@ -1114,14 +1618,28 @@ export class RuntimeCoordinator {
       return { kind: "stop", result: await this.#fail(context, "context_capacity_insufficient") };
     }
 
-    // compact_first: at most two auxiliary attempts, matching C05.
+    const resumed = context.pendingModel?.auxiliary === true ? context.pendingModel : null;
+    const compactionsBefore = context.budget.compactions - (resumed === null ? 0 : 1);
+    const auxiliaryAttempts = {
+      used: resumed?.attemptsUsed ?? 0,
+      maxOutputTokens: Math.min(budget.output, budget.summaryBudget),
+    };
+    const auxiliaryRequestId = resumed?.modelRequestId ?? this.#deps.ids.create();
+    // Regeneration and transient retries share the same two actual sends.
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       const prepared = prepareCompaction({
         conversation: context.conversation,
         fixedTokens: budget.fixed,
-        auxiliaryBudgetTokens: budget.promptBudget - budget.output,
+        auxiliaryBudgetTokens: budget.window - auxiliaryAttempts.maxOutputTokens - budget.gap,
         recentBudget: budget.recentBudget,
-        compactionsUsed: context.budget.compactions,
+        compactionsUsed: compactionsBefore,
+        fixedContext: [
+          ...(context.guidanceText === null
+            ? []
+            : ["[project-material; untrusted]", context.guidanceText]),
+          "[current-user-inputs; retain verbatim]",
+          ...context.taskInputs.map((text) => JSON.stringify(text)),
+        ].join("\n"),
       });
       if (!prepared.ok) {
         await this.#record(context, "context_compaction_rejected", {
@@ -1144,17 +1662,26 @@ export class RuntimeCoordinator {
       }
 
       const planned = prepared.value.plan;
-      const auxiliary = await this.#completeWithRetries(context, this.#deps.ids.create(), [
-        { kind: "user", text: prepared.value.prompt },
-      ]);
+      if (planned.summarizedGroupIds.length === 0) return { kind: "continue" };
+      if (attempt === 1 && resumed === null) {
+        const counted = addCompaction(context.budget);
+        if (!counted.ok) return { kind: "stop", result: await this.#fail(context, counted.code) };
+        context.budget = counted.value;
+      }
+      const auxiliary = await this.#completeWithRetries(
+        context,
+        auxiliaryRequestId,
+        [{ kind: "user", text: prepared.value.prompt }],
+        auxiliaryAttempts,
+      );
       if (auxiliary.kind !== "completed") {
-        if (context.cancelRequested || auxiliary.kind === "terminal") {
-          return { kind: "stop", result: auxiliary.result };
-        }
+        return { kind: "stop", result: auxiliary.result };
+      }
+      if (auxiliary.toolCalls.length > 0) {
         await this.#record(context, "context_compaction_rejected", {
           kind: "context_compaction_rejected",
           reason: "invalid_artifact",
-          detail: "auxiliary request failed",
+          detail: "auxiliary response proposed tools",
         });
         continue;
       }
@@ -1168,21 +1695,11 @@ export class RuntimeCoordinator {
         });
         continue;
       }
-      // The artifact must declare the groups it covered, or a caller cannot tell
-      // what it replaced.
-      const withSources: typeof parsed.artifact = {
-        ...parsed.artifact,
-        sourceMessageIds:
-          parsed.artifact.sourceMessageIds.length === 0
-            ? planned.summarizedGroupIds
-            : parsed.artifact.sourceMessageIds,
-      };
-
       const validated = validateArtifact({
-        artifact: withSources,
+        artifact: parsed.artifact,
         plan: planned,
         outputBudgetTokens: budget.summaryBudget,
-        estimatedOutputTokens: estimateArtifactTokens(withSources),
+        estimatedOutputTokens: estimateArtifactTokens(parsed.artifact),
         requiredSourceIds: planned.summarizedGroupIds,
         requiredConstraintIds: [],
       });
@@ -1196,15 +1713,31 @@ export class RuntimeCoordinator {
       }
 
       // Publish: replace the summarised prefix with the artifact as a sourced turn.
-      const recent = retainRecentGroups(context.conversation, planned.recentSuffixGroupIds.length);
       const artifactText = renderArtifact(validated.artifact);
-      context.conversation = [
-        { kind: "user", text: artifactText },
-        ...(recent.length === 0 ? [] : recent),
+      const candidate = [
+        ...(context.guidanceText === null
+          ? []
+          : [
+              {
+                kind: "user" as const,
+                text: context.guidanceText,
+              },
+            ]),
+        ...compactConversation(
+          context.conversation.filter(
+            (item, index) =>
+              index !== 0 || item.kind !== "user" || item.text !== context.guidanceText,
+          ),
+          planned.recentSuffixGroupIds.length,
+          artifactText,
+          context.taskInputs,
+        ),
       ];
-      const round = addCompaction(context.budget);
-      if (round.ok) context.budget = round.value;
-
+      if (
+        conservativeEstimate(budget.fixed + estimateConversationTokens(candidate)) >
+        budget.promptBudget
+      )
+        return { kind: "stop", result: await this.#fail(context, "context_capacity_insufficient") };
       await this.#record(context, "context_compacted", {
         kind: "context_compacted",
         artifactSha256: hashText(JSON.stringify(validated.artifact)),
@@ -1214,7 +1747,9 @@ export class RuntimeCoordinator {
         estimatedAuxiliaryTokens: planned.estimatedAuxiliaryTokens,
         artifactVersion: validated.artifact.schemaVersion,
         summaryText: artifactText,
+        pinnedUserInputs: [...context.taskInputs],
       });
+      context.conversation = candidate;
       return { kind: "continue" };
     }
 
@@ -1223,9 +1758,7 @@ export class RuntimeCoordinator {
       reason: "attempts_exhausted",
       detail: "two auxiliary attempts failed validation",
     });
-    // Old context is retained; the request is attempted as-is so the Run is not
-    // failed solely because summarisation did not work.
-    return { kind: "continue" };
+    return { kind: "stop", result: await this.#fail(context, "context_compaction_invalid") };
   }
 
   async #executeCall(
@@ -1408,6 +1941,7 @@ export class RuntimeCoordinator {
       toolCallId: pending.toolCallId,
       decision,
     });
+    if (await this.#consumeQueuedInput(context)) return { kind: "continue" };
 
     const outcome = await executeToolCall(
       {
@@ -1609,12 +2143,60 @@ export class RuntimeCoordinator {
     });
   }
 
-  async #record(
+  #record(
+    context: MutableRunContext,
+    type: InternalEvent["type"],
+    payload: InternalEvent["payload"],
+  ): Promise<void> {
+    return this.#serialize(context, () => this.#recordNow(context, type, payload));
+  }
+
+  #serialize<T>(context: MutableRunContext, action: () => Promise<T>): Promise<T> {
+    const operation = context.eventTail.then(() => {
+      if (this.#persistenceFailed) throw new Error("session_persistence_failed");
+      return action();
+    });
+    context.eventTail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  async #appendEvent(context: MutableRunContext, input: EventInput): Promise<InternalEvent> {
+    if (this.#persistenceFailed) throw new Error("session_persistence_failed");
+    try {
+      return await this.#deps.eventLog.append(input);
+    } catch {
+      // An append error may mean a partial durable write. Never resume writing or
+      // dispatching from a projection whose relation to disk is now uncertain.
+      this.#persistenceFailed = true;
+      for (const affected of new Set([context, this.#activeContext])) {
+        if (affected === null) continue;
+        affected.abortController.abort();
+        affected.pendingApproval?.resolve();
+        affected.pendingQuestion?.resolve();
+        affected.pendingDisclosure?.resolve();
+      }
+      throw new Error("session_persistence_failed");
+    }
+  }
+
+  async #recordNow(
     context: MutableRunContext,
     type: InternalEvent["type"],
     payload: InternalEvent["payload"],
   ): Promise<void> {
     await this.#deps.refreshOwnedKeys?.();
+    this.#accountTime(context);
+    if (type === "tool_dispatch_committed" && context.elapsedExceeded)
+      throw new Error("elapsed_limit");
+    if (
+      type === "tool_dispatch_committed" &&
+      (context.cancelRequested ||
+        context.events.some(({ payload: fact }) => fact.kind === "run_cancel_requested"))
+    )
+      throw new Error("tool_cancelled");
     const input: EventInput = {
       sessionId: context.sessionId,
       runId: context.runId,
@@ -1625,10 +2207,94 @@ export class RuntimeCoordinator {
       payload,
     };
     if (this.#deps.ownedKeys !== undefined) assertProtectedValue(this.#deps.ownedKeys, input);
-    const event = await this.#deps.eventLog.append(input);
+    const budgetFact: EventInput = {
+      ...input,
+      type: "run_budget_updated",
+      payload: {
+        kind: "run_budget_updated",
+        budget: context.budget,
+        costUnknown: context.costUnknown,
+      },
+    };
+    if (this.#deps.ownedKeys !== undefined) assertProtectedValue(this.#deps.ownedKeys, budgetFact);
+    const budgetEvent = await this.#appendEvent(context, budgetFact);
+    context.events.push(budgetEvent);
+    context.lastEventId = budgetEvent.eventId;
+    await this.#maybeCheckpoint(context, budgetEvent);
+    const event = await this.#appendEvent(context, { ...input, causationId: budgetEvent.eventId });
     context.events.push(event);
     context.lastEventId = event.eventId;
     await this.#maybeCheckpoint(context, event);
+    if (
+      this.#deps.persistReports === true &&
+      context.events.some(({ payload }) => payload.kind === "run_started") &&
+      [
+        "run_completed",
+        "run_failed",
+        "run_cancelled",
+        "run_waiting",
+        "background_task_observed",
+        "tool_execution_finished",
+      ].includes(type)
+    ) {
+      const derived = deriveTaskReport(context.events, context.sessionId, context.runId);
+      if (!derived.ok) throw new Error("task_report_invalid");
+      const reportInput: EventInput = {
+        ...input,
+        type: "task_report_snapshot",
+        causationId: event.eventId,
+        payload: {
+          kind: "task_report_snapshot",
+          protocolRunState: context.run.state,
+          report: derived.value,
+        },
+      };
+      if (this.#deps.ownedKeys !== undefined)
+        assertProtectedValue(this.#deps.ownedKeys, reportInput);
+      const reportEvent = await this.#appendEvent(context, reportInput);
+      context.events.push(reportEvent);
+      context.lastEventId = reportEvent.eventId;
+      await this.#maybeCheckpoint(context, reportEvent);
+    }
+  }
+
+  #nowMs(): number {
+    const value = this.#deps.nowMs?.() ?? Date.parse(this.#deps.nowUtc());
+    if (!Number.isFinite(value)) throw new Error("clock_unavailable");
+    return Math.floor(value);
+  }
+
+  #accountTime(context: MutableRunContext): boolean {
+    const now = this.#nowMs();
+    const delta = Math.max(0, now - context.lastBudgetTick);
+    if (context.accountingActive)
+      context.budget = {
+        ...context.budget,
+        elapsedActiveMs: context.budget.elapsedActiveMs + delta,
+      };
+    context.lastBudgetTick = now;
+    context.accountingActive = context.run.state === "active";
+    if (context.budget.elapsedActiveMs >= RUN_BUDGET_LIMITS.elapsedActiveMs)
+      context.elapsedExceeded = true;
+    return context.elapsedExceeded;
+  }
+
+  #clearBudgetTimer(context: MutableRunContext): void {
+    if (context.budgetTimer !== null) clearTimeout(context.budgetTimer);
+    context.budgetTimer = null;
+  }
+
+  #armBudgetTimer(context: MutableRunContext): void {
+    this.#clearBudgetTimer(context);
+    const remaining = RUN_BUDGET_LIMITS.elapsedActiveMs - context.budget.elapsedActiveMs;
+    context.budgetTimer = setTimeout(
+      () => {
+        context.elapsedExceeded = true;
+        context.abortController.abort();
+      },
+      Math.max(0, remaining),
+    );
+    context.budgetTimer.unref();
   }
 
   /**
@@ -1762,6 +2428,7 @@ export class RuntimeCoordinator {
     text: string | null,
     safeCode: string | null,
   ): CoordinatorResult {
+    this.#clearBudgetTimer(context);
     if (status !== "waiting") {
       // Carry the actual conversation, including tool pairs and compaction.
       // Current project guidance is injected afresh at the next Run boundary.
@@ -1773,13 +2440,15 @@ export class RuntimeCoordinator {
           ? rest
           : [...context.conversation];
     }
-    return {
+    const result = {
       status,
       run: context.run,
       events: [...context.events],
       text,
       safeCode,
     } as CoordinatorResult;
+    this.#lastResult = result;
+    return result;
   }
 }
 
@@ -1848,8 +2517,7 @@ function renderArtifact(artifact: CompactionArtifact): string {
     `goal=${artifact.goal}`,
   ];
   for (const claim of artifact.completedClaims) {
-    const verified = claim.evidenceRefs.length > 0 ? "verified" : "unverified";
-    lines.push(`- claim(${verified}): ${claim.text}`);
+    lines.push(`- claim(unverified): ${claim.text}`);
   }
   for (const reason of artifact.blockedReasons) lines.push(`- blocked: ${reason}`);
   for (const action of artifact.nextActions) lines.push(`- next: ${action}`);

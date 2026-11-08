@@ -1,3 +1,6 @@
+import type { ToolEvidence } from "../domain/evidence/tool-evidence.ts";
+import type { BackgroundObserver } from "./background-task.ts";
+
 export type ToolSideEffectClass =
   | "read_only"
   | "filesystem_mutation"
@@ -19,11 +22,20 @@ export type ToolExecutionRequest = Readonly<{
   signal?: AbortSignal;
   /** Set only by the coordinator after consuming this invocation's approval. */
   approvalGranted?: boolean;
+  /** Coordinator-owned scope; never accepted from tool arguments. */
+  owner?: Readonly<{ sessionId: string; runId: string }>;
 }>;
 
 export type ToolExecutionResult = Readonly<{
+  evidence?: ToolEvidence;
   /** Early capture protection; preserves execution status and withholds payload. */
   deliveryBlocked?: "owned_key_detected" | "guard_failure";
+  /** Trusted adapter provenance, not model-supplied sensitivity labels. */
+  sensitiveSources?: readonly Readonly<{
+    sourceId: string;
+    label: string;
+    contentDigest: string;
+  }>[];
 }> &
   (
     | Readonly<{ status: "succeeded"; text: string | null }>
@@ -52,5 +64,7 @@ export interface ToolExecutor {
   revalidateApproval?(request: ToolExecutionRequest): Promise<boolean>;
   discardApproval?(toolCallId: string): void;
   cancelAll?(): Promise<void>;
+  observeBackground?(observer: BackgroundObserver): () => void;
+  flushBackground?(): Promise<void>;
   execute(request: ToolExecutionRequest): Promise<ToolExecutionResult>;
 }

@@ -11,6 +11,7 @@
  * conversation it is given.
  */
 
+import { parseJsonc } from "../../domain/config/jsonc.ts";
 import {
   type CompactionArtifact,
   type CompactionPlan,
@@ -148,6 +149,7 @@ export function prepareCompaction(input: {
   auxiliaryBudgetTokens: number;
   recentBudget: number;
   compactionsUsed: number;
+  fixedContext?: string;
 }): CompactionPreparation {
   const groups = buildGroups(input.conversation);
   const plan = planCompaction({
@@ -171,48 +173,85 @@ export function prepareCompaction(input: {
   const summarized = plan.value.summarizedGroupIds;
   const included = groups.filter((group) => summarized.includes(group.groupId));
 
-  const parts: string[] = [
-    "Summarise the earlier part of this session into a compact artifact.",
-    "Reply with JSON only. Do not call any tool.",
-    "",
-    renderSkeletonBlock(plan.value.skeletons),
-    "",
-  ];
+  const render = (current: CompactionPlan): string => {
+    const parts: string[] = [
+      "Summarise the earlier part of this session into a compact artifact.",
+      "Reply with JSON only. Do not call any tool.",
+      "",
+      input.fixedContext ?? "",
+      renderSkeletonBlock(current.skeletons),
+      "",
+    ];
 
-  for (const group of included) {
-    const representation = plan.value.skeletons.find((s) => s.groupId === group.groupId);
-    if (representation === undefined) continue;
-    // Only groups the plan allowed to be filled carry body text. A
-    // `reference_only` group contributes its identity through the skeleton and
-    // nothing else, so the model cannot claim to have read it.
-    if (representation.representation === "reference_only") continue;
-    parts.push(`--- ${group.groupId} (seq ${group.seq}) ---`);
-    parts.push(renderGroupBodies(input.conversation, group, representation.representation));
-    parts.push("");
+    for (const group of included) {
+      const representation = current.skeletons.find((s) => s.groupId === group.groupId);
+      if (representation === undefined) continue;
+      // Only groups the plan allowed to be filled carry body text. A
+      // `reference_only` group contributes its identity through the skeleton and
+      // nothing else, so the model cannot claim to have read it.
+      if (representation.representation === "reference_only") continue;
+      parts.push(`--- ${group.groupId} (seq ${group.seq}) ---`);
+      parts.push(renderGroupBodies(input.conversation, group, representation.representation));
+      parts.push("");
+    }
+
+    parts.push(
+      "Required JSON shape:",
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          sourceMessageIds: plan.value.summarizedGroupIds,
+          coverage: { fromSeq: 1, toSeq: plan.value.sourceHighWaterSeq },
+          goal: "string",
+          pinnedConstraintIds: [],
+          confirmedDecisionIds: [],
+          completedClaims: [{ text: "string", evidenceRefs: [] }],
+          activeTaskId: null,
+          blockedReasons: [],
+          nextActions: [],
+          fileReferences: [],
+          proposedToolCalls: 0,
+        },
+        null,
+        2,
+      ),
+    );
+
+    return parts.join("\n");
+  };
+  let current = plan.value;
+  let prompt = render(current);
+  let estimatedAuxiliaryTokens = conservativeEstimate(input.fixedTokens + estimateTokens(prompt));
+  while (estimatedAuxiliaryTokens > input.auxiliaryBudgetTokens) {
+    // Preserve every skeleton and shed oldest body text first. Real rendering
+    // overhead can exceed the planning estimate, especially with long IDs.
+    const oldest = current.skeletons.find((entry) => entry.representation !== "reference_only");
+    if (oldest === undefined) break;
+    current = {
+      ...current,
+      skeletons: current.skeletons.map((entry) =>
+        entry === oldest
+          ? {
+              ...entry,
+              representation: entry.representation === "full" ? "excerpt" : "reference_only",
+            }
+          : entry,
+      ),
+    };
+    prompt = render(current);
+    estimatedAuxiliaryTokens = conservativeEstimate(input.fixedTokens + estimateTokens(prompt));
   }
-
-  parts.push(
-    "Required JSON shape:",
-    JSON.stringify(
-      {
-        schemaVersion: 1,
-        coverage: { fromSeq: 1, toSeq: plan.value.sourceHighWaterSeq },
-        goal: "string",
-        pinnedConstraintIds: [],
-        confirmedDecisionIds: [],
-        completedClaims: [{ text: "string", evidenceRefs: [] }],
-        activeTaskId: null,
-        blockedReasons: [],
-        nextActions: [],
-        fileReferences: [],
-        proposedToolCalls: 0,
-      },
-      null,
-      2,
-    ),
-  );
-
-  return { ok: true, value: { prompt: parts.join("\n"), plan: plan.value } };
+  if (estimatedAuxiliaryTokens > input.auxiliaryBudgetTokens) {
+    return {
+      ok: false,
+      reason: "capacity_insufficient",
+      detail: `rendered auxiliary prompt=${estimatedAuxiliaryTokens} > budget=${input.auxiliaryBudgetTokens}`,
+    };
+  }
+  return {
+    ok: true,
+    value: { prompt, plan: { ...current, estimatedAuxiliaryTokens } },
+  };
 }
 
 /**
@@ -231,10 +270,13 @@ function renderGroupBodies(
 ): string {
   if (representation === "reference_only") return "";
 
+  const items = conversationGroup(conversation, group.seq);
   const parts: string[] = [];
   for (const member of group.members) {
     if (member.kind === "tool_call") {
-      const call = findCall(conversation, member.id);
+      const call = items
+        .flatMap((item) => (item.kind === "assistant" ? item.toolCalls : []))
+        .find((entry) => entry.providerToolCallId === member.id);
       if (call === undefined) {
         parts.push(`tool_call:${member.id} (arguments unavailable)`);
         continue;
@@ -243,7 +285,9 @@ function renderGroupBodies(
       continue;
     }
     if (member.kind === "tool_result") {
-      const result = findToolResult(conversation, member.id);
+      const result = items.find(
+        (item) => item.kind === "tool_result" && item.providerToolCallId === member.id,
+      );
       const status = member.status ?? "unknown";
       if (result === undefined || result.text === null) {
         parts.push(`tool_result:${member.id} (${status})`);
@@ -252,7 +296,9 @@ function renderGroupBodies(
       parts.push(`tool_result:${member.id} (${status}): ${clip(result.text, representation)}`);
       continue;
     }
-    const message = messageTextFor(conversation, group);
+    const messageItem = items.find((item) => item.kind !== "tool_result");
+    const message =
+      messageItem?.kind === "user" || messageItem?.kind === "assistant" ? messageItem.text : null;
     parts.push(message === null ? `message:${member.id}` : clip(message, representation));
   }
   return parts.join("\n");
@@ -274,87 +320,26 @@ function clip(text: string, representation: "full" | "excerpt" | "reference_only
   return `${text.slice(0, EXCERPT_HEAD)}\n[truncated ${removed} unit(s)]\n${text.slice(-EXCERPT_TAIL)}`;
 }
 
-function findCall(
-  conversation: readonly ProviderConversationItem[],
-  callId: string,
-): Extract<ProviderConversationItem, { kind: "assistant" }>["toolCalls"][number] | undefined {
-  for (const item of conversation) {
-    if (item.kind !== "assistant") continue;
-    const call = item.toolCalls.find((candidate) => candidate.providerToolCallId === callId);
-    if (call !== undefined) return call;
-  }
-  return undefined;
-}
-
-function findToolResult(
-  conversation: readonly ProviderConversationItem[],
-  callId: string,
-): Extract<ProviderConversationItem, { kind: "tool_result" }> | undefined {
-  for (const item of conversation) {
-    if (item.kind === "tool_result" && item.providerToolCallId === callId) return item;
-  }
-  return undefined;
-}
-
-/**
- * Text for the message member of a group.
- *
- * The assistant text is returned for an assistant group; a user group returns the
- * first user text. Groups built from a single message have exactly one candidate,
- * so this does not need to trust the member id.
- */
-/**
- * Text for the message member of a group.
- *
- * Position is taken from the group kind rather than the member id: an assistant
- * group yields assistant text, a user group yields user text. Groups are built in
- * conversation order, so the seq disambiguates repeated turns of the same kind.
- */
-function messageTextFor(
-  conversation: readonly ProviderConversationItem[],
-  group: ContextGroup,
-): string | null {
-  if (group.kind === "user_input") {
-    // Count how many user turns precede this group's seq, so the right one is used
-    // when a Run has several user messages.
-    let remaining = Math.max(1, countKindBefore(conversation, group.seq, "user"));
-    for (const item of conversation) {
-      if (item.kind !== "user") continue;
-      remaining -= 1;
-      if (remaining <= 0) return item.text;
-    }
-    return null;
-  }
-  let remaining = Math.max(1, countKindBefore(conversation, group.seq, "assistant"));
-  for (const item of conversation) {
-    if (item.kind !== "assistant" || item.text === null) continue;
-    remaining -= 1;
-    if (remaining <= 0) return item.text;
-  }
-  return null;
-}
-
-/**
- * How many items of `kind` appear before the group whose seq is `seq`.
- *
- * Seq numbering follows group order, and every group consumes at least one
- * conversation item, so this is a stable positional index.
- */
-function countKindBefore(
+/** Resolve bodies within the same atomic group, including repeated Provider IDs. */
+function conversationGroup(
   conversation: readonly ProviderConversationItem[],
   seq: number,
-  kind: "user" | "assistant",
-): number {
-  let count = 0;
-  let groupIndex = 0;
-  for (const item of conversation) {
-    if (item.kind === kind) count += 1;
-    // Each group starts at a user or assistant item; advance the group counter when
-    // a new group boundary passes.
-    if (item.kind === kind || item.kind === "assistant") groupIndex += 1;
-    if (groupIndex > seq) break;
+): readonly ProviderConversationItem[] {
+  let cursor = 0;
+  for (let groupSeq = 1; cursor < conversation.length; groupSeq++) {
+    const start = cursor;
+    const first = conversation[cursor++];
+    if (first?.kind === "assistant") {
+      const open = new Set(first.toolCalls.map((call) => call.providerToolCallId));
+      while (cursor < conversation.length) {
+        const result = conversation[cursor];
+        if (result?.kind !== "tool_result" || !open.delete(result.providerToolCallId)) break;
+        cursor++;
+      }
+    }
+    if (groupSeq === seq) return conversation.slice(start, cursor);
   }
-  return count;
+  return [];
 }
 export type ArtifactParseResult =
   | Readonly<{ ok: true; artifact: CompactionArtifact }>
@@ -372,15 +357,10 @@ export function parseCompactionArtifact(text: string | null): ArtifactParseResul
     return { ok: false, reason: "invalid_artifact", detail: "empty reply" };
   }
   const trimmed = text.trim();
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) {
-    return { ok: false, reason: "invalid_artifact", detail: "no JSON object" };
-  }
-
   let parsed: unknown;
   try {
-    parsed = JSON.parse(trimmed.slice(start, end + 1));
+    parsed = JSON.parse(trimmed);
+    if (!parseJsonc(trimmed).ok) throw new Error("duplicate keys");
   } catch {
     return { ok: false, reason: "invalid_artifact", detail: "not JSON" };
   }
@@ -388,11 +368,55 @@ export function parseCompactionArtifact(text: string | null): ArtifactParseResul
     return { ok: false, reason: "invalid_artifact", detail: "not an object" };
   }
   const record = parsed as Record<string, unknown>;
+  const fields = [
+    "schemaVersion",
+    "sourceMessageIds",
+    "coverage",
+    "goal",
+    "pinnedConstraintIds",
+    "confirmedDecisionIds",
+    "completedClaims",
+    "activeTaskId",
+    "blockedReasons",
+    "nextActions",
+    "fileReferences",
+    "proposedToolCalls",
+  ];
+  const strings = (value: unknown): value is string[] =>
+    Array.isArray(value) && value.every((entry) => typeof entry === "string");
+  if (
+    Object.keys(record).length !== fields.length ||
+    fields.some((field) => !Object.hasOwn(record, field)) ||
+    Object.keys(record).some((field) => !fields.includes(field)) ||
+    typeof record["goal"] !== "string" ||
+    ![
+      "sourceMessageIds",
+      "pinnedConstraintIds",
+      "confirmedDecisionIds",
+      "blockedReasons",
+      "nextActions",
+      "fileReferences",
+    ].every((field) => strings(record[field])) ||
+    !(record["activeTaskId"] === null || typeof record["activeTaskId"] === "string") ||
+    record["proposedToolCalls"] !== 0 ||
+    !Array.isArray(record["completedClaims"]) ||
+    !record["completedClaims"].every((claim: unknown) => {
+      if (typeof claim !== "object" || claim === null) return false;
+      const entry = claim as Record<string, unknown>;
+      return (
+        Object.keys(entry).length === 2 &&
+        typeof entry["text"] === "string" &&
+        strings(entry["evidenceRefs"])
+      );
+    })
+  )
+    return { ok: false, reason: "invalid_artifact", detail: "invalid fields" };
 
   const coverage = record["coverage"];
   if (
     typeof coverage !== "object" ||
     coverage === null ||
+    Object.keys(coverage).length !== 2 ||
     typeof (coverage as Record<string, unknown>)["fromSeq"] !== "number" ||
     typeof (coverage as Record<string, unknown>)["toSeq"] !== "number"
   ) {

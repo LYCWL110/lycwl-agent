@@ -1,3 +1,4 @@
+import { createRunBudget, type RunBudget } from "../../domain/run/run-budget.ts";
 import type { DigestService } from "../../ports/identity.ts";
 import type { InternalEvent } from "./internal-events.ts";
 
@@ -8,6 +9,8 @@ export type ReplayedRun = Readonly<{
   uncertainDispatches: readonly string[];
   modelAttempts: number;
   safeFailureCode: string | null;
+  budget: RunBudget;
+  costUnknown: boolean;
 }>;
 
 export type ReplayResult =
@@ -23,6 +26,8 @@ export async function replayRun(
   let finalText: string | null = null;
   let modelAttempts = 0;
   let safeFailureCode: string | null = null;
+  let budget = createRunBudget();
+  let costUnknown = false;
   const toolOutcomes: Record<string, string> = {};
   const openDispatches = new Set<string>();
 
@@ -38,6 +43,10 @@ export async function replayRun(
     if ((await digests.sha256Canonical(body)) !== hash) return { ok: false, code: "chain_invalid" };
 
     switch (event.payload.kind) {
+      case "run_budget_updated":
+        budget = event.payload.budget;
+        costUnknown = event.payload.costUnknown;
+        break;
       case "run_started":
         state = "active";
         break;
@@ -98,15 +107,16 @@ export async function replayRun(
     previous = event;
   }
 
-  if (
-    previous?.payload.kind !== "run_completed" &&
-    previous?.payload.kind !== "run_failed" &&
-    previous?.payload.kind !== "run_cancelled" &&
-    previous?.payload.kind !== "run_waiting"
-  ) {
+  const lastLifecycle = events.findLast((event) =>
+    ["run_completed", "run_failed", "run_cancelled", "run_waiting"].includes(event.payload.kind),
+  );
+  const lastExecution = events.findLast(
+    (event) => !["task_report_snapshot", "evidence_unavailable"].includes(event.payload.kind),
+  );
+  if (lastLifecycle === undefined || lastExecution !== lastLifecycle) {
     return { ok: false, code: "replay_invalid" };
   }
-  if (previous.payload.kind === "run_completed" && openDispatches.size > 0) {
+  if (lastLifecycle.payload.kind === "run_completed" && openDispatches.size > 0) {
     return { ok: false, code: "replay_invalid" };
   }
 
@@ -119,6 +129,8 @@ export async function replayRun(
       uncertainDispatches: [...openDispatches],
       modelAttempts,
       safeFailureCode,
+      budget,
+      costUnknown,
     },
   };
 }

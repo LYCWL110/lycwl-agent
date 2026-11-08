@@ -54,8 +54,7 @@ export type ProviderConfig = Readonly<{
   reasoningEffort?: ReasoningEffort;
   /**
    * Verified context window, or null when the user did not supply one. A null
-   * window disables budgeting and compaction rather than substituting a guess:
-   * C04 says an unknown window is model_context_unknown.
+   * window blocks model sends with model_context_unknown rather than guessing.
    */
   contextWindow: number | null;
 }>;
@@ -172,9 +171,7 @@ export function validateProviderConfig(input: {
     return { ok: false, code: "invalid_credential_ref", field: "credentialRef" };
   }
 
-  // A context window is optional. When absent, budgeting and compaction are
-  // skipped entirely: C04 says an unknown window is `model_context_unknown`, and
-  // guessing one would produce a budget the model does not actually have.
+  // Configuration can remain incomplete, but unknown capacity blocks sending.
   const rawWindow = input.contextWindow;
   let contextWindow: number | null = null;
   if (rawWindow !== undefined && rawWindow !== null) {

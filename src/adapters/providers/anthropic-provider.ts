@@ -88,7 +88,19 @@ export class AnthropicProvider implements ModelProvider {
       return { kind: "authentication_failure", safeCode: "anthropic_key_not_configured" };
     }
 
-    const body = buildRequestBody(this.#options, request.conversation);
+    const body = buildRequestBody(
+      request.compaction === undefined
+        ? this.#options
+        : {
+            ...this.#options,
+            tools: [],
+            maxTokens: Math.min(
+              this.#options.maxTokens ?? ANTHROPIC_DEFAULTS.maxTokens,
+              request.compaction.maxOutputTokens,
+            ),
+          },
+      request.conversation,
+    );
 
     if (request.signal?.aborted) return { kind: "cancelled", safeCode: "provider_cancelled" };
     const posted = await this.#post({

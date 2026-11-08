@@ -3,6 +3,7 @@ import { createElement, type ReactElement, useState } from "react";
 import { ActivityIndicator } from "./activity-indicator.ts";
 import { Brand, clipText, colorProps, useViewport, type Viewport, wrapText } from "./chrome.ts";
 import { CommandMenu } from "./command-menu.ts";
+import { CredentialScreen } from "./credential-screen.ts";
 import { LocalPanel } from "./local-panel.ts";
 import { type Capabilities, colorFor, detectCapabilities } from "./palette.ts";
 import { useTerminalWheel } from "./terminal-wheel.ts";
@@ -37,6 +38,7 @@ export type AppProps = Readonly<{
   onCancelRun: () => void;
   onQuit: () => void;
   onClosePanel?: () => void;
+  onCorrectCredential?: (secret: string) => Promise<boolean>;
   sessionId?: string;
   /** Injected so a test can exercise every colour depth. */
   capabilities?: Capabilities;
@@ -63,6 +65,7 @@ export function App(props: AppProps): ReactElement {
   const commands =
     !dismissedCommands &&
     view.pendingApproval === null &&
+    view.pendingDisclosure == null &&
     view.pendingQuestion === null &&
     draft.startsWith("/")
       ? COMPOSER_COMMANDS.filter((command) => command.name.startsWith(draft))
@@ -178,7 +181,10 @@ export function App(props: AppProps): ReactElement {
       setScroll(null);
       if (text.length === 0) return;
       if (view.pendingQuestion !== null) props.onAnswer(text);
-      else if (view.pendingApproval !== null) {
+      else if (view.pendingDisclosure != null) {
+        if (text === "a") props.onApprove();
+        else if (text === "d") props.onDeny();
+      } else if (view.pendingApproval !== null) {
         if (text === "a" && view.pendingApprovalPreview !== null) props.onApprove();
         else if (text === "d") props.onDeny();
       } else submit(text);
@@ -217,6 +223,12 @@ export function App(props: AppProps): ReactElement {
     },
   );
 
+  if (view.localPanel === "credential")
+    return h(CredentialScreen, {
+      width,
+      onSave: props.onCorrectCredential ?? (async () => false),
+      onClose: () => props.onClosePanel?.(),
+    });
   if (view.localPanel != null)
     return h(LocalPanel, {
       key: view.localPanel,
@@ -404,6 +416,11 @@ function documentLines(
         item.state === "completed" ? "success" : "dim",
       );
   }
+  if (view.pendingDisclosure != null) {
+    append("Sensitive context redisclosure", "secondary", true);
+    for (const line of view.pendingDisclosure.safePreview.split("\n")) append(line, "dim");
+    append('type "a" then Enter to consent, "d" to deny', "secondary");
+  }
   if (view.pendingApproval !== null) {
     append(`▌ approval required · ${view.pendingApproval.toolName}`, "secondary", true);
     if (view.pendingApprovalPreview === null)
@@ -491,17 +508,19 @@ function Composer(props: {
   const { view, editor, capabilities } = props;
   const accent = colorFor(view.queueingInput ? "secondary" : "primary", capabilities);
   const hint =
-    view.pendingApproval !== null
-      ? view.pendingApprovalPreview === null
-        ? "d deny · preview unavailable"
-        : "a approve  ·  d deny"
-      : view.pendingQuestion !== null
-        ? "Enter answer"
-        : view.queueingInput
-          ? "queued as supplementary input for the running run"
-          : view.canSubmit
-            ? "Enter submits · / commands · Ctrl+C cancels"
-            : "run is busy";
+    view.pendingDisclosure != null
+      ? "a consent  /  d deny"
+      : view.pendingApproval !== null
+        ? view.pendingApprovalPreview === null
+          ? "d deny · preview unavailable"
+          : "a approve  ·  d deny"
+        : view.pendingQuestion !== null
+          ? "Enter answer"
+          : view.queueingInput
+            ? "queued as supplementary input for the running run"
+            : view.canSubmit
+              ? "Enter submits · / commands · Ctrl+C cancels"
+              : "run is busy";
   return h(
     Box,
     { flexDirection: "column", marginTop: 1, flexShrink: 0 },

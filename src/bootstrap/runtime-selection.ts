@@ -1,16 +1,19 @@
 import path from "node:path";
+import { createFileEvidenceStore } from "../adapters/persistence/file-evidence-store.ts";
 import {
   createGuidanceLoader,
   type GuidanceBlock,
   renderGuidanceBlock,
 } from "../adapters/windows/guidance-loader.ts";
 import type { RuntimeCoordinator } from "../application/coordinator/runtime-coordinator.ts";
+import { deriveTaskReport } from "../application/task-report/derive-task-report.ts";
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.ts";
 import type { OwnedKeyRegistry } from "../domain/security/owned-key-guard.ts";
 import { availableTools, COORDINATOR_TOOL_NAMES } from "../domain/tool-catalog/tool-catalog.ts";
 import type { InternalEvent } from "../ports/event-log.ts";
 import type { ProviderConversationItem } from "../ports/model-provider.ts";
+import type { SensitiveSource } from "../ports/sensitive-context.ts";
 import { assertProtectedValue } from "../services/security/guarded-delivery.ts";
 import { createDemoRuntime } from "./demo-runtime.ts";
 import { createWorkspaceTools } from "./read-only-tools.ts";
@@ -171,94 +174,279 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   const sessionRoot = path.join(options.dataDirectory, "sessions");
   const eventLog = new JsonlEventLog(sessionRoot, ids, digests);
   const checkpoints = new JsonlCheckpointStore(sessionRoot, digests);
+  const sessionId = options.sessionId ?? ids.create();
+  let ownership: Awaited<ReturnType<typeof eventLog.acquireSessionOwnership>>;
+  try {
+    ownership = await eventLog.acquireSessionOwnership(sessionId);
+  } catch {
+    return {
+      kind: "demo",
+      coordinator: createDemoRuntime(options.workspaceRoot, sessionId).coordinator,
+      reason: "session_busy",
+      detail: "Session ownership unavailable; no real work may start",
+    };
+  }
 
   // Rebuild prior conversation so a resumed Session continues with its history.
   // A rebuild failure blocks sending; it must not silently start fresh.
-  const prior = await rebuildPriorConversation(eventLog, options.sessionId, assembly.ownedKeys);
-
-  // Unknown capacity is distinct from a known window that cannot fit the prompt.
-  const computed = computeContextBudget({
-    window: assembly.config.contextWindow,
-    modelMaxOutput: assembly.config.maxOutputTokens,
-    userMaxOutput: assembly.config.maxOutputTokens,
-    // The fixed part is the guidance block plus the tool schemas; both are sent
-    // every request and are not reducible by summarisation.
-    fixed: conservativeEstimate(estimateFixedTokens(contextBlock, toolDefinitions)),
-  });
-  const contextBudget = computed.ok ? computed.value : null;
-  const budgetWarning =
-    computed.ok || computed.code === "model_context_unknown"
-      ? null
-      : `model requests blocked (${computed.code})`;
-
-  return {
-    kind: "real",
-    config: assembly.config,
-    enableWrites,
-    warnings: budgetWarning === null ? assembly.warnings : [...assembly.warnings, budgetWarning],
-    coordinator: new RuntimeCoordinator({
-      provider: assembly.provider,
+  try {
+    const prior = await rebuildPriorConversation(eventLog, sessionId, assembly.ownedKeys);
+    const evidenceStore = createFileEvidenceStore({
+      // Match the existing event/checkpoint storage layout without migrating logs.
+      sessionDirectory: path.join(sessionRoot, "sessions", sessionId),
+      sessionId,
       ownedKeys: assembly.ownedKeys,
       refreshOwnedKeys: assembly.refreshOwnedKeys,
-      tools: createWorkspaceTools({
-        workspaceRoot: options.workspaceRoot,
-        // No interactive channel is attached to this gate, so it denies. Tools
-        // that require approval still suspend and reach the TUI.
-        approvals: { decide: async () => "denied" },
-        ids,
-        enableWrites,
-        enableProcesses,
+    });
+    let evidenceMissing = false;
+    const restoredEvents = [...prior.events];
+    const affectedRuns = new Set<string>();
+    for (const event of prior.events) {
+      const fact = event.payload;
+      const toolCallId =
+        fact.kind === "tool_execution_finished"
+          ? fact.toolCallId
+          : fact.kind === "background_task_observed"
+            ? fact.task.launchingToolCallId
+            : null;
+      const evidence =
+        fact.kind === "tool_execution_finished"
+          ? fact.evidence
+          : fact.kind === "background_task_observed" && "evidence" in fact.task
+            ? fact.task.evidence
+            : undefined;
+      if (toolCallId === null) continue;
+      if (evidence === undefined) continue;
+      const verified = evidence.rawComplete
+        ? await evidenceStore.verify(evidence, toolCallId)
+        : { ok: false as const, code: "invalid_manifest" as const };
+      if (!verified.ok) {
+        evidenceMissing = true;
+        for (const attachment of evidence.attachments) {
+          const reason =
+            verified.code === "attachment_missing"
+              ? ("attachment_missing" as const)
+              : ("hash_mismatch" as const);
+          if (
+            restoredEvents.some(
+              ({ payload }) =>
+                payload.kind === "evidence_unavailable" &&
+                payload.toolCallId === toolCallId &&
+                payload.ref.attachmentId === attachment.ref.attachmentId &&
+                payload.reason === reason,
+            )
+          )
+            continue;
+          const input = {
+            sessionId,
+            runId: event.runId,
+            correlationId: event.correlationId,
+            causationId: restoredEvents.at(-1)?.eventId ?? null,
+            timestampUtc: new Date().toISOString(),
+            type: "evidence_unavailable" as const,
+            payload: {
+              kind: "evidence_unavailable" as const,
+              toolCallId,
+              ref: attachment.ref,
+              reason,
+            },
+          };
+          assertProtectedValue(assembly.ownedKeys, input);
+          restoredEvents.push(await eventLog.append(input));
+          affectedRuns.add(event.runId);
+        }
+      }
+    }
+    const background = new Map<string, InternalEvent>();
+    for (const event of prior.events)
+      if (event.payload.kind === "background_task_observed")
+        background.set(event.payload.task.processExecutionId, event);
+    for (const event of background.values()) {
+      if (event.payload.kind !== "background_task_observed") continue;
+      const task = event.payload.task;
+      if (task.state !== "registered" && task.state !== "running") continue;
+      const input = {
+        sessionId,
+        runId: event.runId,
+        correlationId: event.correlationId,
+        causationId: restoredEvents.at(-1)?.eventId ?? null,
+        timestampUtc: new Date().toISOString(),
+        type: "background_task_observed" as const,
+        payload: {
+          kind: "background_task_observed" as const,
+          task: {
+            ...task,
+            state: "outcome_unknown" as const,
+            observedAtUtc: new Date().toISOString(),
+          },
+        },
+      };
+      assertProtectedValue(assembly.ownedKeys, input);
+      restoredEvents.push(await eventLog.append(input));
+      affectedRuns.add(event.runId);
+      evidenceMissing = true;
+    }
+    for (const runId of affectedRuns) {
+      const previous = restoredEvents.findLast(
+        ({ payload, runId: owner }) => owner === runId && payload.kind === "task_report_snapshot",
+      );
+      const started = restoredEvents.find(
+        ({ payload, runId: owner }) => owner === runId && payload.kind === "run_started",
+      );
+      if (started !== undefined) {
+        const derived = deriveTaskReport(restoredEvents, sessionId, runId);
+        if (!derived.ok) throw new Error("task_report_invalid");
+        const protocolRunState =
+          previous?.payload.kind === "task_report_snapshot"
+            ? previous.payload.protocolRunState
+            : restoredProtocolState(restoredEvents, runId);
+        const input = {
+          sessionId,
+          runId,
+          correlationId: started.correlationId,
+          causationId: restoredEvents.at(-1)?.eventId ?? null,
+          timestampUtc: new Date().toISOString(),
+          type: "task_report_snapshot" as const,
+          payload: {
+            kind: "task_report_snapshot" as const,
+            protocolRunState,
+            report: derived.value,
+          },
+        };
+        assertProtectedValue(assembly.ownedKeys, input);
+        restoredEvents.push(await eventLog.append(input));
+      }
+    }
+
+    // Unknown capacity is distinct from a known window that cannot fit the prompt.
+    const computed = computeContextBudget({
+      window: assembly.config.contextWindow,
+      modelMaxOutput: assembly.config.maxOutputTokens,
+      userMaxOutput: assembly.config.maxOutputTokens,
+      // The fixed part is the guidance block plus the tool schemas; both are sent
+      // every request and are not reducible by summarisation.
+      fixed: conservativeEstimate(estimateFixedTokens(contextBlock, toolDefinitions)),
+    });
+    const contextBudget = computed.ok ? computed.value : null;
+    const budgetWarning = computed.ok ? null : `model requests blocked (${computed.code})`;
+
+    return {
+      kind: "real",
+      config: assembly.config,
+      enableWrites,
+      warnings: [
+        ...assembly.warnings,
+        ...(budgetWarning === null ? [] : [budgetWarning]),
+        ...(evidenceMissing
+          ? ["stored evidence is incomplete or unavailable; verification remains blocked"]
+          : []),
+      ],
+      coordinator: new RuntimeCoordinator({
+        provider: assembly.provider,
         ownedKeys: assembly.ownedKeys,
         refreshOwnedKeys: assembly.refreshOwnedKeys,
-      }),
-      approvals: { decide: async () => "denied" },
-      eventLog,
-      checkpoints,
-      ids,
-      nowUtc: () => new Date().toISOString(),
-      ...(prior.summary.kind === "failed"
-        ? { preflightFailure: "protocol_history_incompatible" as const }
-        : !computed.ok && computed.code !== "model_context_unknown"
-          ? { preflightFailure: "context_capacity_insufficient" as const }
-          : {}),
-      suspendOnApproval: true,
-      ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
-      ...(prior.conversation.length === 0 ? {} : { priorConversation: prior.conversation }),
-      ...(contextBlock === "" ? {} : { projectContext: contextBlock }),
-      // Budgeting applies only when a verified window was configured. Without one,
-      // no compaction runs and an oversized prompt fails at the provider instead of
-      // being silently truncated.
-      ...(contextBudget === null ? {} : { contextBudget }),
-      // Scoped refresh: when the Run touches a new path, gap the loader up to that
-      // directory so a subdirectory AGENTS.md is injected too.
-      resolveProjectGuidance: async (touched) => {
-        const loader = createGuidanceLoader({ workspaceRoot: options.workspaceRoot });
-        const seen = new Set<string>();
-        const blocks: GuidanceBlock[] = [];
-        for (const entry of touched) {
-          const loaded = await loader.load({
-            targetPath: entry.path,
-            targetIsDirectory: entry.isDirectory,
-          });
-          if (!loaded.ok) continue;
-          for (const block of loaded.blocks) {
-            if (seen.has(block.path)) continue;
-            seen.add(block.path);
-            blocks.push(block);
+        tools: createWorkspaceTools({
+          workspaceRoot: options.workspaceRoot,
+          // No interactive channel is attached to this gate, so it denies. Tools
+          // that require approval still suspend and reach the TUI.
+          approvals: { decide: async () => "denied" },
+          ids,
+          enableWrites,
+          enableProcesses,
+          ownedKeys: assembly.ownedKeys,
+          refreshOwnedKeys: assembly.refreshOwnedKeys,
+          evidenceStore,
+        }),
+        approvals: { decide: async () => "denied" },
+        eventLog,
+        checkpoints,
+        ids,
+        nowUtc: () => new Date().toISOString(),
+        nowMs: () => performance.now(),
+        persistReports: true,
+        releaseSession: () => ownership.release(),
+        runBinding: assembly.runBinding,
+        resolveCredentialRevision: assembly.resolveCredentialRevision,
+        requestFingerprint: assembly.requestFingerprint,
+        sensitiveSources: restoreSensitiveSources(prior.events),
+        ...(prior.summary.kind === "failed"
+          ? { preflightFailure: "protocol_history_incompatible" as const }
+          : !computed.ok
+            ? {
+                preflightFailure:
+                  computed.code === "model_context_unknown"
+                    ? ("model_context_unknown" as const)
+                    : ("context_capacity_insufficient" as const),
+              }
+            : {}),
+        suspendOnApproval: true,
+        sessionId,
+        ...(prior.conversation.length === 0 ? {} : { priorConversation: prior.conversation }),
+        ...(contextBlock === "" ? {} : { projectContext: contextBlock }),
+        // Unknown capacity blocks sends; there is no guessed window or silent trim.
+        ...(contextBudget === null ? {} : { contextBudget }),
+        // Scoped refresh: when the Run touches a new path, gap the loader up to that
+        // directory so a subdirectory AGENTS.md is injected too.
+        resolveProjectGuidance: async (touched) => {
+          const loader = createGuidanceLoader({ workspaceRoot: options.workspaceRoot });
+          const seen = new Set<string>();
+          const blocks: GuidanceBlock[] = [];
+          for (const entry of touched) {
+            const loaded = await loader.load({
+              targetPath: entry.path,
+              targetIsDirectory: entry.isDirectory,
+            });
+            if (!loaded.ok) continue;
+            for (const block of loaded.blocks) {
+              if (seen.has(block.path)) continue;
+              seen.add(block.path);
+              blocks.push(block);
+            }
           }
-        }
-        if (blocks.length === 0) return null;
-        return {
-          text: renderGuidanceBlock(blocks),
-          sources: blocks.map((block) => block.path),
-        };
-      },
-    }),
-    guidance: guidance.summary,
-    prior: prior.summary,
-    historyEvents: prior.events,
-    skills: skills.summary,
-  };
+          if (blocks.length === 0) return null;
+          return {
+            text: renderGuidanceBlock(blocks),
+            sources: blocks.map((block) => block.path),
+          };
+        },
+      }),
+      guidance: guidance.summary,
+      prior: prior.summary,
+      historyEvents: restoredEvents,
+      skills: skills.summary,
+    };
+  } catch (error) {
+    ownership.release();
+    throw error;
+  }
+}
+
+function restoredProtocolState(
+  events: readonly InternalEvent[],
+  runId: string,
+): "active" | "waiting" | "completed" | "failed" | "cancelled" {
+  let state: ReturnType<typeof restoredProtocolState> = "active";
+  for (const event of events) {
+    if (event.runId !== runId) continue;
+    switch (event.payload.kind) {
+      case "run_waiting":
+        state = "waiting";
+        break;
+      case "run_resumed":
+        state = "active";
+        break;
+      case "run_completed":
+        state = "completed";
+        break;
+      case "run_failed":
+        state = "failed";
+        break;
+      case "run_cancelled":
+        state = "cancelled";
+        break;
+    }
+  }
+  return state;
 }
 
 /** Human-readable launch summary, printed before the TUI takes the screen. */
@@ -383,7 +571,7 @@ async function rebuildPriorConversation(
       return { conversation: [], events: [], summary: { kind: "failed", code: stored.code } };
     }
     assertProtectedValue(ownedKeys, stored.events);
-    const { rebuildConversation, trimConversation } = await import(
+    const { rebuildConversation } = await import(
       "../application/coordinator/conversation-rebuild.ts"
     );
     const rebuilt = rebuildConversation(stored.events);
@@ -395,15 +583,60 @@ async function rebuildPriorConversation(
     }
     // Bound the rebuilt history so a long Session does not consume the whole
     // context before the new task is even considered.
-    const trimmed = trimConversation(rebuilt.conversation, 40);
     return {
-      conversation: trimmed,
+      conversation: rebuilt.conversation,
       events: stored.events,
-      summary: { kind: "rebuilt", runs: rebuilt.runs, items: trimmed.length },
+      summary: { kind: "rebuilt", runs: rebuilt.runs, items: rebuilt.conversation.length },
     };
   } catch {
     return { conversation: [], events: [], summary: { kind: "failed", code: "rebuild_failed" } };
   }
+}
+
+function restoreSensitiveSources(events: readonly InternalEvent[]): readonly SensitiveSource[] {
+  const sources = new Map<string, SensitiveSource>();
+  const calls = new Map<string, { name: string; label: string }>();
+  const approved = new Set<string>();
+  const bindings = new Map<string, NonNullable<SensitiveSource["origin"]>>();
+  for (const event of events) {
+    const fact = event.payload;
+    if (fact.kind === "run_model_binding") bindings.set(event.runId, fact);
+    if (fact.kind === "sensitive_source_recorded") sources.set(fact.source.sourceId, fact.source);
+    if (fact.kind === "tool_call_received")
+      calls.set(fact.toolCallId, {
+        name: fact.toolName,
+        label:
+          typeof fact.arguments === "object" &&
+          fact.arguments !== null &&
+          "path" in fact.arguments &&
+          typeof fact.arguments.path === "string"
+            ? fact.arguments.path
+            : "legacy approved read",
+      });
+    if (fact.kind === "approval_decided" && fact.decision === "approved")
+      approved.add(fact.toolCallId);
+    if (
+      fact.kind === "tool_execution_finished" &&
+      fact.status === "succeeded" &&
+      fact.text !== null
+    ) {
+      const call = calls.get(fact.toolCallId);
+      if (
+        !sources.has(fact.toolCallId) &&
+        approved.has(fact.toolCallId) &&
+        call !== undefined &&
+        ["read_file", "grep", "glob", "list_dir"].includes(call.name)
+      ) {
+        sources.set(fact.toolCallId, {
+          sourceId: fact.toolCallId,
+          label: call.label,
+          contentDigest: event.hash,
+          origin: bindings.get(event.runId) ?? null,
+        });
+      }
+    }
+  }
+  return [...sources.values()];
 }
 
 export type SkillsSummary =

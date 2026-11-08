@@ -33,6 +33,7 @@ export type BackgroundToolDependencies = Readonly<{
     label: string,
     toolCallId?: string,
     signal?: AbortSignal,
+    owner?: ToolExecutionRequest["owner"],
   ) => Promise<BackgroundStartOutcome>;
   /** Read the current supervised state of a task. */
   getTask: (taskId: string) => Promise<BackgroundTask | null>;
@@ -115,7 +116,13 @@ export function createBackgroundTools(dependencies: BackgroundToolDependencies):
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
       switch (request.toolName) {
         case BACKGROUND_START_DEFINITION.name:
-          return executeStart(dependencies, request.arguments, request.toolCallId, request.signal);
+          return executeStart(
+            dependencies,
+            request.arguments,
+            request.toolCallId,
+            request.signal,
+            request.owner,
+          );
         case BACKGROUND_STATUS_DEFINITION.name:
           return executeStatus(dependencies, request.arguments);
         case BACKGROUND_OUTPUT_DEFINITION.name:
@@ -198,6 +205,7 @@ async function executeStart(
   args: unknown,
   toolCallId: string,
   signal?: AbortSignal,
+  owner?: ToolExecutionRequest["owner"],
 ): Promise<ToolExecutionResult> {
   if (dependencies.sessionMode === "read_only") {
     return { status: "failed", safeCode: "read_only_session", text: null };
@@ -233,6 +241,7 @@ async function executeStart(
       parsed.value.label ?? "",
       toolCallId,
       signal,
+      owner,
     );
   } catch {
     return { status: "outcome_unknown", safeCode: "background_start_unknown" };

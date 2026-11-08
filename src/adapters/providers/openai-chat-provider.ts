@@ -87,7 +87,21 @@ export class OpenAiChatProvider implements ModelProvider {
         accept: "application/json",
         authorization: `Bearer ${apiKey}`,
       },
-      bodyText: JSON.stringify(buildChatRequestBody(this.#options, request.conversation)),
+      bodyText: JSON.stringify(
+        buildChatRequestBody(
+          request.compaction === undefined
+            ? this.#options
+            : {
+                ...this.#options,
+                tools: [],
+                maxTokens: Math.min(
+                  this.#options.maxTokens ?? OPENAI_CHAT_DEFAULTS.maxTokens,
+                  request.compaction.maxOutputTokens,
+                ),
+              },
+          request.conversation,
+        ),
+      ),
       ...(this.#options.trustedCaPem === undefined
         ? {}
         : { trustedCaPem: this.#options.trustedCaPem }),

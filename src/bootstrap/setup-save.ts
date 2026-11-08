@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ConfigDocument, ConfigStore } from "../adapters/windows/config-store.ts";
 import type { FileVault } from "../adapters/windows/file-credential-vault.ts";
 import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
@@ -75,7 +75,14 @@ export async function saveSetup(input: {
     baseUrl: input.draft.baseUrl,
     model: input.draft.model,
     credentialRef: input.draft.credentialRef,
-    ...(existing.ok ? { maxOutputTokens: existing.value.maxOutputTokens } : {}),
+    maxOutputTokens: parseNumericDraft(
+      input.draft.maxOutputTokens,
+      existing.ok ? existing.value.maxOutputTokens : undefined,
+    ),
+    contextWindow: parseNumericDraft(
+      input.draft.contextWindow,
+      existing.ok ? existing.value.contextWindow : null,
+    ),
     reasoningEffort:
       input.draft.reasoningEffort ??
       (protocol === "anthropic_messages"
@@ -93,13 +100,20 @@ export async function saveSetup(input: {
       detail: validated.code,
     };
   }
-  const config = validated.value;
+  // Every supplied key gets a new identity. A failed final settings CAS must
+  // never replace the key used by the old (or another writer's) configuration.
+  const config = {
+    ...validated.value,
+    credentialRef:
+      input.draft.apiKey.length > 0 ? `provider-${randomUUID()}` : validated.value.credentialRef,
+  };
   const withProvider = writeProviderBlock(base?.text ?? DEFAULT_SCHEMA_HEADER, {
     protocol: config.protocol,
     baseUrl: config.baseUrl,
     model: config.model,
     credentialRef: config.credentialRef,
     maxOutputTokens: config.maxOutputTokens,
+    contextWindow: config.contextWindow,
     ...(config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
   });
   if (!withProvider.ok) {
@@ -191,6 +205,7 @@ type ProviderBlock = Readonly<{
   model: string;
   credentialRef: string;
   maxOutputTokens: number;
+  contextWindow: number | null;
   reasoningEffort?: ReasoningEffort;
 }>;
 
@@ -248,6 +263,7 @@ function serializeObjectLiteral(block: ProviderBlock): string {
     `"model": ${JSON.stringify(block.model)}`,
     `"credentialRef": ${JSON.stringify(block.credentialRef)}`,
     `"maxOutputTokens": ${block.maxOutputTokens}`,
+    `"contextWindow": ${JSON.stringify(block.contextWindow)}`,
     ...(block.reasoningEffort === undefined
       ? []
       : [`"reasoningEffort": ${JSON.stringify(block.reasoningEffort)}`]),
@@ -295,6 +311,8 @@ function mapField(field: string | undefined): SetupField | undefined {
   if (field === "model") return "model";
   if (field === "credentialRef") return "credentialRef";
   if (field === "reasoningEffort") return "reasoningEffort";
+  if (field === "contextWindow") return "contextWindow";
+  if (field === "maxOutputTokens") return "maxOutputTokens";
   return undefined;
 }
 
@@ -306,3 +324,13 @@ export function draftHash(draft: SetupDraft): string {
 }
 
 export type { ProviderConfigResult };
+
+function parseNumericDraft(
+  value: string | number | null | undefined,
+  fallback: number | null | undefined,
+): number | null | undefined {
+  if (value === undefined) return fallback;
+  if (typeof value !== "string") return value;
+  if (value === "") return null;
+  return /^\d+$/u.test(value) ? Number(value) : Number.NaN;
+}

@@ -44,6 +44,10 @@ lycwl --resume <session-id>
 The current directory is the session workspace. `--write` enables file changes
 with approval; `--shell` also enables shell commands with approval.
 Provider settings are configured in the TUI.
+Set `Context tokens` to the model's documented window (or a smaller safety
+limit) and `Output tokens` to an accepted output limit in `/config`. Unknown
+context capacity blocks model requests instead of guessing or dropping history.
+The entered capacity is user-supplied, not an upstream compatibility test.
 
 Messages submitted during model activity appear immediately as `queued`.
 They become `ready` when added to task context, `sending` with the next main
@@ -83,6 +87,8 @@ Available commands:
 | `/session resume <id>` | Restore the selected recorded conversation |
 | `/help` | Show the command list |
 | `/cancel` | Cancel the current Run |
+| `/key` | Correct only the current connection key during an authentication wait |
+| `/resume` | Explicitly continue the same Run after correcting its key |
 | `/quit` | Close the session and exit |
 
 Model/configuration and session changes require an idle or ended Run.
@@ -91,6 +97,28 @@ available while running. Model selection applies to the next Run; opening
 configuration does not clear the current conversation. Session switching waits
 for current resource cleanup. Missing session IDs remain on the current screen.
 Session history is selected by ID; a searchable history catalog is not provided.
+Saving a corrected key does not resume a waiting Run. `/key` keeps its current
+Provider, endpoint, protocol, model and credential reference; `/config` still
+cannot change routes while a Run waits. Sensitive history may require separate
+request-specific redisclosure consent after account/key changes.
+
+Session history is checked for sequence/hash-chain corruption before restoration
+and append. A live Session holds exclusive Windows ownership; another launch
+cannot resume that ID until cleanup finishes. These checks detect corruption,
+not deliberate same-user history rewriting.
+
+Build the application JavaScript without downloading dependencies:
+
+```powershell
+npm.cmd run build
+npm.cmd run start:built -- --help
+```
+
+`dist/` is a local build, not the reviewed portable Windows release. Full raw
+evidence/report persistence, complete Provider/tool coverage and release
+acceptance remain work in progress. Local tests and architecture documents are
+excluded from Git under the current repository policy, so a fresh clone does
+not reproduce the full local verification suite.
 
 OpenAI Chat, Responses and Anthropic Messages expose a Reasoning selector in the form and a
 Reasoning column to the right of Model in the model browser. Use Right or Tab

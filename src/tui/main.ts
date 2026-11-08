@@ -66,6 +66,11 @@ export function startTui(
         controller.closePanel();
         refresh();
       },
+      onCorrectCredential: async (secret) => {
+        const saved = (await controller.correctCredential?.(secret)) ?? false;
+        refresh();
+        return saved;
+      },
       onSubmit: (text) => {
         return controller.submit(text).then((accepted) => {
           const request = controller.takeNavigationRequest();

@@ -1,10 +1,48 @@
+import type { AttachmentEvidence } from "../domain/evidence/evidence-ref.ts";
+import type { ToolEvidence } from "../domain/evidence/tool-evidence.ts";
+import type { ReportSnapshot } from "../domain/evidence/verification.ts";
+import type { RunBudget } from "../domain/run/run-budget.ts";
+import type { BackgroundTaskFact } from "./background-task.ts";
 import type { DigestService, IdentifierFactory } from "./identity.ts";
+import type { SensitiveSource } from "./sensitive-context.ts";
 
 /**
  * Stage 1 internal verification event contract. This is not an adopted
  * external JSON Schema or durable compatibility promise.
  */
 export type InternalEventPayload =
+  | Readonly<{ kind: "background_task_observed"; task: BackgroundTaskFact }>
+  | Readonly<{
+      kind: "task_report_snapshot";
+      protocolRunState: "active" | "waiting" | "completed" | "failed" | "cancelled";
+      report: ReportSnapshot;
+    }>
+  | Readonly<{
+      kind: "evidence_unavailable";
+      toolCallId: string;
+      ref: AttachmentEvidence;
+      reason: "attachment_missing" | "hash_mismatch" | "content_not_stored";
+    }>
+  | Readonly<{ kind: "run_budget_updated"; budget: RunBudget; costUnknown: boolean }>
+  | Readonly<{ kind: "sensitive_source_recorded"; source: SensitiveSource }>
+  | Readonly<{
+      kind: "sensitive_disclosure_requested";
+      disclosureId: string;
+      modelRequestId: string;
+      requestVersion: number;
+      requestFingerprint: string;
+      safePreview: string;
+      sourceIds: readonly string[];
+    }>
+  | Readonly<{
+      kind: "sensitive_disclosure_decided";
+      disclosureId: string;
+      modelRequestId: string;
+      requestVersion: number;
+      requestFingerprint: string;
+      decision: "approved" | "denied" | "cancelled" | "invalidated";
+      commandId: string | null;
+    }>
   | Readonly<{ kind: "run_started"; input: string }>
   | Readonly<{
       kind: "run_model_binding";
@@ -50,6 +88,8 @@ export type InternalEventPayload =
        * original turns it was meant to replace.
        */
       summaryText: string;
+      /** Actual current-Run inputs retained verbatim alongside the summary. */
+      pinnedUserInputs?: readonly string[];
     }>
   | Readonly<{
       kind: "context_compaction_rejected";
@@ -205,11 +245,12 @@ export type InternalEventPayload =
   | Readonly<{
       kind: "tool_execution_finished";
       toolCallId: string;
-      status: "succeeded" | "failed" | "outcome_unknown";
+      status: "succeeded" | "failed" | "cancelled" | "outcome_unknown";
       safeCode: string | null;
       text: string | null;
       /** Name of the tool, so a replay can rebuild the result without a lookup. */
       toolName?: string;
+      evidence?: ToolEvidence;
     }>
   | Readonly<{
       kind: "tool_execution_denied";

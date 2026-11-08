@@ -32,6 +32,8 @@ export type SetupField =
   | "model"
   | "reasoningEffort"
   | "apiKey"
+  | "contextWindow"
+  | "maxOutputTokens"
   | "credentialRef";
 
 export type SetupDraft = Readonly<{
@@ -41,6 +43,8 @@ export type SetupDraft = Readonly<{
   apiKey: string;
   credentialRef: string;
   reasoningEffort?: ReasoningEffort;
+  contextWindow?: string | number | null;
+  maxOutputTokens?: string | number;
 }>;
 
 export type SetupProps = Readonly<{
@@ -67,6 +71,8 @@ const FIELD_ORDER: readonly SetupField[] = [
   "apiKey",
   "model",
   "reasoningEffort",
+  "contextWindow",
+  "maxOutputTokens",
   "credentialRef",
 ];
 
@@ -77,6 +83,8 @@ const FIELD_LABEL: Readonly<Record<SetupField, string>> = {
   credentialRef: "Credential reference",
   apiKey: "API key",
   reasoningEffort: "Reasoning",
+  contextWindow: "Context tokens",
+  maxOutputTokens: "Output tokens",
 };
 const PROTOCOL_LABEL: Readonly<Record<SupportedProtocol, string>> = {
   anthropic_messages: "Anthropic",
@@ -85,13 +93,21 @@ const PROTOCOL_LABEL: Readonly<Record<SupportedProtocol, string>> = {
 };
 
 export function SetupScreen(props: SetupProps): ReactElement {
-  const [draft, setDraft] = useState<SetupDraft & { protocol: SupportedProtocol }>({
+  const [draft, setDraft] = useState<
+    SetupDraft & {
+      protocol: SupportedProtocol;
+      contextWindow: string;
+      maxOutputTokens: string;
+    }
+  >({
     protocol: props.initial.protocol ?? "anthropic_messages",
     baseUrl: props.initial.baseUrl ?? "https://api.anthropic.com",
     model: props.initial.model ?? "",
     apiKey: props.initial.apiKey ?? "",
     credentialRef: props.initial.credentialRef ?? "provider-main",
     reasoningEffort: props.initial.reasoningEffort ?? "default",
+    contextWindow: props.initial.contextWindow == null ? "" : String(props.initial.contextWindow),
+    maxOutputTokens: String(props.initial.maxOutputTokens ?? 4096),
   });
   const actions = [...FIELD_ORDER, ...(props.onBrowse ? ["models"] : []), "save", "discard"];
   const [focus, setFocus] = useState<string>(props.hasStoredCredential ? "baseUrl" : "protocol");
@@ -103,6 +119,8 @@ export function SetupScreen(props: SetupProps): ReactElement {
     credentialRef: characters(props.initial.credentialRef ?? "provider-main").length,
     apiKey: characters(props.initial.apiKey ?? "").length,
     reasoningEffort: 0,
+    contextWindow: String(props.initial.contextWindow ?? "").length,
+    maxOutputTokens: String(props.initial.maxOutputTokens ?? 4096).length,
   });
   const viewport = useViewport(props.viewport);
   const width = Math.max(1, Math.min(84, viewport.columns - 4));

@@ -1,8 +1,10 @@
-import { createHash } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, open, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import { parseJsonc } from "../../domain/config/jsonc.ts";
+import { readBoundedUtf8 } from "../persistence/bounded-utf8-file.ts";
+import { acquireExclusiveFileLease } from "./exclusive-file-lease.ts";
 
 /**
  * User settings persistence with a local-user configuration lock and
@@ -93,14 +95,19 @@ export function createConfigStore(options: ConfigStoreOptions) {
     options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
   async function load(): Promise<ConfigLoadResult> {
-    let text: string;
-    try {
-      text = await readFile(filePath, "utf8");
-    } catch (error) {
-      if (isNotFound(error)) return { ok: false, code: "config_missing" };
-      return { ok: false, code: "config_unreadable" };
-    }
-    return validateDocument(text);
+    const read = await readBoundedUtf8(filePath, CONFIG_LIMITS.maxDocumentBytes);
+    if (read.ok) return validateDocument(read.text);
+    return {
+      ok: false,
+      code:
+        read.code === "missing"
+          ? "config_missing"
+          : read.code === "too_large"
+            ? "config_too_large"
+            : read.code === "invalid_utf8"
+              ? "config_invalid"
+              : "config_unreadable",
+    };
   }
 
   /**
@@ -143,7 +150,7 @@ export function createConfigStore(options: ConfigStoreOptions) {
             current: current.value,
           };
         }
-      } else if (input.baseRevision !== 0) {
+      } else if (input.baseRevision !== 0 || input.baseDocumentHash !== "") {
         // The caller expected an existing document that is no longer there.
         return { ok: false, code: "config_conflict", draft: input.draft };
       }
@@ -154,9 +161,15 @@ export function createConfigStore(options: ConfigStoreOptions) {
         return { ok: false, code: "config_invalid", draft: input.draft };
       }
 
-      const temporary = path.join(options.directory, `${SETTINGS_FILENAME}.${process.pid}.tmp`);
+      const temporary = path.join(options.directory, `${SETTINGS_FILENAME}.${randomUUID()}.tmp`);
       try {
-        await writeFile(temporary, text, "utf8");
+        const handle = await open(temporary, "wx", 0o600);
+        try {
+          await handle.writeFile(text, "utf8");
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
         await rename(temporary, filePath);
       } catch {
         await unlink(temporary).catch(() => undefined);
@@ -167,29 +180,21 @@ export function createConfigStore(options: ConfigStoreOptions) {
       if (!reloaded.ok) return { ok: false, code: "config_invalid" };
       return { ok: true, value: reloaded.value };
     } finally {
-      await releaseLock();
+      lock.release();
     }
   }
 
-  async function acquireLock(): Promise<{ ok: true } | { ok: false; code: "config_busy" }> {
-    const deadline = now() + CONFIG_LIMITS.lockTimeoutMs;
-    for (;;) {
-      try {
-        // `wx` fails when the file exists, which is the lock: this avoids a
-        // read-modify-write race between two instances.
-        const handle = await open(lockPath, "wx");
-        await handle.close();
-        return { ok: true };
-      } catch (error) {
-        if (!isAlreadyExists(error)) return { ok: false, code: "config_busy" };
-        if (now() >= deadline) return { ok: false, code: "config_busy" };
-        await sleep(CONFIG_LIMITS.lockRetryMs);
-      }
+  async function acquireLock() {
+    try {
+      const lease = await acquireExclusiveFileLease(lockPath, {
+        timeoutMs: CONFIG_LIMITS.lockTimeoutMs,
+        now,
+        sleep,
+      });
+      return { ok: true as const, release: lease.release };
+    } catch {
+      return { ok: false as const, code: "config_busy" as const };
     }
-  }
-
-  async function releaseLock(): Promise<void> {
-    await unlink(lockPath).catch(() => undefined);
   }
 
   return { load, save, filePath };
@@ -244,16 +249,4 @@ function readInteger(
   if (member.value.kind !== "number") return null;
   const value = member.value.value;
   return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
-}
-
-function isNotFound(error: unknown): boolean {
-  return (
-    typeof error === "object" && error !== null && (error as { code?: unknown }).code === "ENOENT"
-  );
-}
-
-function isAlreadyExists(error: unknown): boolean {
-  return (
-    typeof error === "object" && error !== null && (error as { code?: unknown }).code === "EEXIST"
-  );
 }

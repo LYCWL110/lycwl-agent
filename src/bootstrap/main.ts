@@ -180,6 +180,19 @@ async function startSession(): Promise<void> {
       coordinator: chosen.coordinator,
       ...(chosen.kind === "real" ? { initialEvents: chosen.historyEvents } : {}),
       canResumeSession: (id) => canResumeSession(dataDirectory, id),
+      ...(chosen.kind !== "real"
+        ? {}
+        : {
+            correctCredential: async (secret: string) => {
+              if (chosen.coordinator.configurationWaitView() === null) return false;
+              const written = await vault.write({
+                reference: chosen.config.credentialRef,
+                purpose: "provider_api_key",
+                secret,
+              });
+              return written.ok;
+            },
+          }),
     }),
     {
       ...(chosen.kind === "real" ? { modelLabel: chosen.config.model } : {}),

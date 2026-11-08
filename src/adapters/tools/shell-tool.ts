@@ -1,3 +1,4 @@
+import type { ToolEvidence } from "../../domain/evidence/tool-evidence.ts";
 import {
   filterChildEnvironment,
   formatShellPreview,
@@ -17,25 +18,31 @@ export const SHELL_RAW_CAP_BYTES = 8 * 1024 * 1024;
 /** Model-facing text cap in UTF-16 code units. */
 export const SHELL_MODEL_CAP_UNITS = 20_000;
 
-export type ShellRunOutcome =
-  | Readonly<{
-      kind: "completed";
-      exitCode: number;
-      stdout: string;
-      stderr: string;
-      rawBytes?: number;
-      captureComplete?: boolean;
-      deliveryBlocked?: "owned_key_detected" | "guard_failure" | null;
-    }>
-  | Readonly<{
-      kind: "timed_out";
-      stdout: string;
-      stderr: string;
-      rawBytes?: number;
-      captureComplete?: boolean;
-      deliveryBlocked?: "owned_key_detected" | "guard_failure" | null;
-    }>
-  | Readonly<{ kind: "unknown"; safeCode: string }>;
+export type ShellRunOutcome = Readonly<{ evidence?: ToolEvidence }> &
+  (
+    | Readonly<{
+        kind: "completed";
+        exitCode: number;
+        stdout: string;
+        stderr: string;
+        rawBytes?: number;
+        captureComplete?: boolean;
+        deliveryBlocked?: "owned_key_detected" | "guard_failure" | null;
+      }>
+    | Readonly<{
+        kind: "timed_out";
+        stdout: string;
+        stderr: string;
+        rawBytes?: number;
+        captureComplete?: boolean;
+        deliveryBlocked?: "owned_key_detected" | "guard_failure" | null;
+      }>
+    | Readonly<{
+        kind: "unknown";
+        safeCode: string;
+        deliveryBlocked?: "owned_key_detected" | "guard_failure" | null;
+      }>
+  );
 
 export type ShellToolDependencies = Readonly<{
   sessionMode: "read_only" | "workspace_write";
@@ -124,17 +131,29 @@ export function createShellTool(dependencies: ShellToolDependencies): ToolExecut
       }
 
       if (outcome.kind === "unknown") {
-        return { status: "outcome_unknown", safeCode: outcome.safeCode };
+        return {
+          status: "outcome_unknown",
+          safeCode: outcome.safeCode,
+          ...(outcome.evidence === undefined ? {} : { evidence: outcome.evidence }),
+          ...(outcome.deliveryBlocked == null ? {} : { deliveryBlocked: outcome.deliveryBlocked }),
+        };
       }
+      const evidence = outcome.evidence === undefined ? {} : { evidence: outcome.evidence };
       if (outcome.deliveryBlocked != null) {
         const succeeded = outcome.kind === "completed" && outcome.exitCode === 0;
         return succeeded
-          ? { status: "succeeded", text: null, deliveryBlocked: outcome.deliveryBlocked }
+          ? {
+              status: "succeeded",
+              text: null,
+              deliveryBlocked: outcome.deliveryBlocked,
+              ...evidence,
+            }
           : {
               status: "failed",
               safeCode: outcome.kind === "timed_out" ? "shell_timeout" : "nonzero_exit",
               text: null,
               deliveryBlocked: outcome.deliveryBlocked,
+              ...evidence,
             };
       }
 
@@ -147,17 +166,18 @@ export function createShellTool(dependencies: ShellToolDependencies): ToolExecut
           status: "failed",
           safeCode: combined > SHELL_RAW_CAP_BYTES ? "output_limit_exceeded" : "capture_incomplete",
           text: `${truncateForModel(outcome.stdout, outcome.stderr)}\n[capture incomplete; command effects are not rolled back]`,
+          ...evidence,
         };
       }
 
       const text = truncateForModel(outcome.stdout, outcome.stderr);
       if (outcome.kind === "timed_out") {
-        return { status: "failed", safeCode: "shell_timeout", text };
+        return { status: "failed", safeCode: "shell_timeout", text, ...evidence };
       }
       if (outcome.exitCode !== 0) {
-        return { status: "failed", safeCode: "nonzero_exit", text };
+        return { status: "failed", safeCode: "nonzero_exit", text, ...evidence };
       }
-      return { status: "succeeded", text };
+      return { status: "succeeded", text, ...evidence };
     },
   };
 }

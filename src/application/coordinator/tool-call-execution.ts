@@ -502,6 +502,7 @@ async function dispatchAndExecute(
     safeCode: result.status === "succeeded" ? null : result.safeCode,
     text: delivery.text,
     toolName: call.toolName,
+    ...(result.evidence === undefined ? {} : { evidence: result.evidence }),
   });
 
   if (result.status === "outcome_unknown") {

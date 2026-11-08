@@ -49,6 +49,8 @@ export type ProviderRequest = Readonly<{
   attemptNo: number;
   conversation: readonly ProviderConversationItem[];
   signal?: AbortSignal;
+  /** Trusted Runtime auxiliary mode; disables tool declarations and caps output. */
+  compaction?: Readonly<{ maxOutputTokens: number }>;
 }>;
 
 export interface ModelProvider {

@@ -1,5 +1,6 @@
 import type {
   PendingApprovalView,
+  PendingDisclosureView,
   PendingQuestionView,
 } from "../application/coordinator/runtime-coordinator.ts";
 import { isSessionId } from "../domain/identity/session-id.ts";
@@ -26,7 +27,7 @@ export type WaitingKind = "approval" | "question" | "configuration" | "other";
 export type RunActivity = "thinking" | "working";
 
 export type TuiViewState = Readonly<{
-  localPanel?: "help" | "session" | null;
+  localPanel?: "help" | "session" | "credential" | null;
   commandNotice?: string | null;
   runStatus: RunStatus;
   waitingKind: WaitingKind | null;
@@ -35,6 +36,7 @@ export type TuiViewState = Readonly<{
   transcript: readonly TranscriptEntry[];
   todo: TodoList | null;
   pendingApproval: PendingApprovalView | null;
+  pendingDisclosure?: PendingDisclosureView | null;
   /**
    * The exact preview shown to the user for the pending approval. A null preview
    * means the approval panel cannot honestly describe the operation, so it must
@@ -60,6 +62,7 @@ export const EMPTY_VIEW: TuiViewState = {
   transcript: [],
   todo: null,
   pendingApproval: null,
+  pendingDisclosure: null,
   pendingApprovalPreview: null,
   answerError: null,
   pendingQuestion: null,
@@ -74,6 +77,7 @@ export type ViewInput = Readonly<{
   events: readonly InternalEvent[];
   todo: TodoList | null;
   pendingApproval: PendingApprovalView | null;
+  pendingDisclosure?: PendingDisclosureView | null;
   pendingQuestion: PendingQuestionView | null;
   /** Set by the controller when an answer could not be resolved. */
   answerError?: string | null;
@@ -95,6 +99,7 @@ export function deriveView(input: ViewInput): TuiViewState {
     transcript: buildTranscript(input.events),
     todo: input.todo,
     pendingApproval: input.pendingApproval,
+    pendingDisclosure: input.pendingDisclosure ?? null,
     pendingApprovalPreview: deriveApprovalPreview(input),
     answerError: input.answerError ?? null,
     pendingQuestion: input.pendingQuestion,
@@ -149,6 +154,7 @@ function deriveApprovalPreview(input: ViewInput): readonly string[] | null {
 }
 
 function deriveWaitingKind(input: ViewInput): WaitingKind | null {
+  if (input.pendingDisclosure != null) return "approval";
   if (input.pendingApproval !== null) return "approval";
   if (input.pendingQuestion !== null) return "question";
   if (input.runStatus !== "active" && input.runStatus !== "waiting") return null;
@@ -306,7 +312,21 @@ function buildTranscript(events: readonly InternalEvent[]): readonly TranscriptE
           payload.toolCallId,
           payload.toolName,
           payload.status,
-          [payload.safeCode, payload.text].filter((text) => text != null).join("\n") || null,
+          [
+            payload.safeCode,
+            payload.text,
+            ...(payload.evidence === undefined
+              ? []
+              : [
+                  `evidence=${payload.evidence.rawComplete ? "complete" : payload.evidence.rawTruncationReason}; bytes=${payload.evidence.capturedBytes}`,
+                  ...payload.evidence.attachments.map(
+                    ({ stream, ref }) =>
+                      `${stream}: ${ref.attachmentId} sha256=${ref.sha256} bytes=[${ref.start},${ref.end})`,
+                  ),
+                ]),
+          ]
+            .filter((text) => text != null)
+            .join("\n") || null,
         );
         break;
       }
@@ -394,6 +414,8 @@ export type ComposerIntent =
   | Readonly<{ kind: "open_panel"; panel: "help" | "session" }>
   | Readonly<{ kind: "switch_session"; sessionId: string | null }>
   | Readonly<{ kind: "cancel_run" }>
+  | Readonly<{ kind: "resume_run" }>
+  | Readonly<{ kind: "correct_credential" }>
   | Readonly<{ kind: "quit" }>
   | Readonly<{
       kind: "reject";
@@ -407,6 +429,8 @@ export const COMPOSER_COMMANDS = [
   { name: "/new", description: "Start a fresh session", idleOnly: true },
   { name: "/help", description: "Show commands", idleOnly: false },
   { name: "/cancel", description: "Cancel the current run", idleOnly: false },
+  { name: "/key", description: "Correct the waiting connection key", idleOnly: false },
+  { name: "/resume", description: "Explicitly resume after key correction", idleOnly: false },
   { name: "/quit", description: "Close the application", idleOnly: false },
 ] as const;
 
@@ -414,6 +438,8 @@ export function commandEnabled(
   view: TuiViewState,
   command: (typeof COMPOSER_COMMANDS)[number],
 ): boolean {
+  if (command.name === "/key" || command.name === "/resume")
+    return view.runStatus === "waiting" && view.waitingKind === "configuration";
   return (
     !command.idleOnly ||
     (view.runStatus !== "active" && view.runStatus !== "waiting" && view.waitingKind === null)
@@ -455,6 +481,10 @@ export function interpretComposer(
         return { kind: "open_panel", panel: "help" };
       case "/cancel":
         return { kind: "cancel_run" };
+      case "/key":
+        return { kind: "correct_credential" };
+      case "/resume":
+        return { kind: "resume_run" };
       case "/quit":
         return { kind: "quit" };
     }

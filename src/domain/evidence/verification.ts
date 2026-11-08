@@ -145,7 +145,10 @@ export function aggregateVerification(assertions: readonly Assertion[]): Aggrega
 
   const requiredFailures = assertions.filter(
     (assertion) =>
-      assertion.required && assertion.state === "failed" && isApplicable(assertion.applicability),
+      assertion.required &&
+      assertion.kind !== "model_claim" &&
+      assertion.state === "failed" &&
+      isApplicable(assertion.applicability),
   );
   if (requiredFailures.length > 0) {
     return { status: "failed", blockers, perAssertion };
@@ -173,6 +176,7 @@ export function aggregateVerification(assertions: readonly Assertion[]): Aggrega
   const allRequiredPassed = required.every(
     (assertion) =>
       assertion.state === "passed" &&
+      assertion.kind !== "model_claim" &&
       isApplicable(assertion.applicability) &&
       assertion.unavailableEvidence.length === 0 &&
       hasSubstantiveEvidence(assertion.evidence),
@@ -187,6 +191,7 @@ export function aggregateVerification(assertions: readonly Assertion[]): Aggrega
   const anyPositive = required.some(
     (assertion) =>
       assertion.state === "passed" &&
+      assertion.kind !== "model_claim" &&
       isApplicable(assertion.applicability) &&
       hasSubstantiveEvidence(assertion.evidence),
   );
@@ -369,6 +374,7 @@ function isApplicable(applicability: Applicability): boolean {
 }
 
 function statusOf(assertion: Assertion): VerificationStatus {
+  if (assertion.kind === "model_claim") return "unverified";
   if (assertion.state === "failed" && isApplicable(assertion.applicability)) return "failed";
   if (assertion.unavailableEvidence.length > 0) return "blocked";
   if (assertion.applicability === "indeterminate") return "blocked";
@@ -379,6 +385,5 @@ function statusOf(assertion: Assertion): VerificationStatus {
   ) {
     return "verified";
   }
-  if (assertion.kind === "model_claim") return "unverified";
   return "unverified";
 }

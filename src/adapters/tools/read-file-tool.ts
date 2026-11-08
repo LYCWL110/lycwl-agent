@@ -138,9 +138,22 @@ export function createReadFileTool(dependencies: ReadFileToolDependencies): Tool
       }
 
       const fact = result.value;
+      const sourceFacts = saved?.facts ?? (await dependencies.inspectTarget(parsed.value.path));
+      const sensitiveSources =
+        decideResolvedReadPermission(dependencies.workspaceRoot, sourceFacts.target).outcome ===
+        "approval_required"
+          ? [
+              {
+                sourceId: request.toolCallId,
+                label: sourceFacts.target.resolvedPath,
+                contentDigest: fact.snapshot.fileSha256,
+              },
+            ]
+          : [];
       if (fact.slice.kind === "empty") {
         return {
           status: "succeeded",
+          sensitiveSources,
           text: `read_file: empty slice at line ${fact.slice.atLine}\n`,
         };
       }
@@ -152,7 +165,7 @@ export function createReadFileTool(dependencies: ReadFileToolDependencies): Tool
         `lineEndings ${fact.snapshot.lineEndings}`,
         fact.textTruncated ? "modelText truncated" : "modelText complete",
       ].join("; ");
-      return { status: "succeeded", text: `${header}\n${fact.content}` };
+      return { status: "succeeded", text: `${header}\n${fact.content}`, sensitiveSources };
     },
   };
 }

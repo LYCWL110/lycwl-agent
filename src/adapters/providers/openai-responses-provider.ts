@@ -86,7 +86,21 @@ export class OpenAiResponsesProvider implements ModelProvider {
         accept: "application/json",
         authorization: `Bearer ${apiKey}`,
       },
-      bodyText: JSON.stringify(buildResponsesRequestBody(this.#options, request.conversation)),
+      bodyText: JSON.stringify(
+        buildResponsesRequestBody(
+          request.compaction === undefined
+            ? this.#options
+            : {
+                ...this.#options,
+                tools: [],
+                maxOutputTokens: Math.min(
+                  this.#options.maxOutputTokens ?? OPENAI_RESPONSES_DEFAULTS.maxOutputTokens,
+                  request.compaction.maxOutputTokens,
+                ),
+              },
+          request.conversation,
+        ),
+      ),
       ...(this.#options.trustedCaPem === undefined
         ? {}
         : { trustedCaPem: this.#options.trustedCaPem }),
