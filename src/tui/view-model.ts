@@ -405,7 +405,12 @@ function toolSummary(name: string, args: unknown): string {
  * ResumeRun. It either starts a new task or queues ordinary input.
  */
 export type ComposerIntent =
-  | Readonly<{ kind: "start_run"; text: string }>
+  | Readonly<{
+      kind: "start_run";
+      text: string;
+      /** Present when the composer asked to load a skill for this Run. */
+      skillId?: string;
+    }>
   | Readonly<{ kind: "queue_input"; text: string }>
   | Readonly<{ kind: "withdraw"; inputId: string }>
   /** Open the provider browser. Only available when no Run is in flight. */
@@ -430,6 +435,7 @@ export const COMPOSER_COMMANDS = [
   { name: "/session", description: "Current, new or resume session", idleOnly: true },
   { name: "/new", description: "Start a fresh session", idleOnly: true },
   { name: "/init", description: "Draft an AGENTS.md for this project", idleOnly: true },
+  { name: "/skill", description: "Run with a workspace skill loaded", idleOnly: true },
   { name: "/help", description: "Show commands", idleOnly: false },
   { name: "/cancel", description: "Cancel the current run", idleOnly: false },
   { name: "/key", description: "Correct the waiting connection key", idleOnly: false },
@@ -462,7 +468,7 @@ export function interpretComposer(
     if (!commandEnabled(view, command)) {
       return { kind: "reject", reason: "run_active" };
     }
-    if (args.length > 0 && name !== "/session")
+    if (args.length > 0 && name !== "/session" && name !== "/skill")
       return { kind: "reject", reason: "invalid_command" };
     switch (name) {
       case "/config":
@@ -482,6 +488,15 @@ export function interpretComposer(
         return { kind: "switch_session", sessionId: null };
       case "/init":
         return { kind: "project_init" };
+      case "/skill": {
+        // The id becomes part of the task text so the coordinator can resolve and
+        // inject the body at the same safe boundary as any other input.
+        const skillId = args[0] ?? "";
+        if (args.length !== 1 || !isValidSkillIdForCommand(skillId)) {
+          return { kind: "reject", reason: "invalid_command" };
+        }
+        return { kind: "start_run", text: `/skill ${skillId}`, skillId };
+      }
       case "/help":
         return { kind: "open_panel", panel: "help" };
       case "/cancel":
@@ -511,4 +526,14 @@ export type PanelAction = "close" | "open";
 
 export function panelActionKeepsWait(action: PanelAction): boolean {
   return action === "close" || action === "open";
+}
+
+/**
+ * Validate a skill id at the command layer.
+ *
+ * The loader validates again; this exists so a malformed id is rejected as a command
+ * error rather than starting a Run that would fail at the tool.
+ */
+function isValidSkillIdForCommand(value: string): boolean {
+  return /^[a-z0-9]+(-[a-z0-9]+)*$/u.test(value) && value.length <= 64;
 }

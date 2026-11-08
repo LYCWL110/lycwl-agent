@@ -203,7 +203,10 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     localPanel = null;
     runStatus = "active";
     safeCode = null;
-    const run = deps.coordinator.run(intent.text);
+    const run =
+      intent.skillId === undefined
+        ? deps.coordinator.run(intent.text)
+        : deps.coordinator.run(intent.text, { skillId: intent.skillId });
     activeRun = run;
     const result = await run;
     // Only clear when this is still the active Run: a later Run may have started.

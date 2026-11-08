@@ -115,6 +115,15 @@ export type CoordinatorDependencies = Readonly<{
    * instead of rewriting it.
    */
   ownedKeys?: OwnedKeyRegistry;
+  /**
+   * Load a workspace Skill body for `/skill`. Absent means the command is refused,
+   * because a Run must not claim to have loaded a skill it cannot read.
+   */
+  loadSkill?: (input: {
+    skillId: string;
+  }) => Promise<
+    Readonly<{ ok: true; block: string; skillId: string }> | Readonly<{ ok: false; code: string }>
+  >;
   /** Refresh protective copies before a new Run and each model attempt. */
   refreshOwnedKeys?: () => Promise<void>;
   /**
@@ -753,12 +762,19 @@ export class RuntimeCoordinator {
     return { ok: true, duplicate: false };
   }
 
-  run(input: string): Promise<CoordinatorResult> {
+  /**
+   * Start a Run.
+   *
+   * `skillId` asks the coordinator to load that workspace Skill and inject its body
+   * as a user message before the task. The body is untrusted project material with
+   * a provenance header; it grants no approval and changes no policy.
+   */
+  run(input: string, options: Readonly<{ skillId?: string }> = {}): Promise<CoordinatorResult> {
     if (this.#closing !== null) return Promise.reject(new Error("session_closed"));
     if (this.#persistenceFailed) return Promise.reject(new Error("session_persistence_failed"));
     if (this.#pendingRun !== null || this.#activeContext !== null)
       return Promise.reject(new Error("session_busy"));
-    const pending = this.#startRun(input);
+    const pending = this.#startRun(input, options);
     this.#pendingRun = pending;
     const clear = () => {
       if (this.#pendingRun === pending) this.#pendingRun = null;
@@ -767,8 +783,28 @@ export class RuntimeCoordinator {
     return pending;
   }
 
-  async #startRun(input: string): Promise<CoordinatorResult> {
+  async #startRun(
+    input: string,
+    options: Readonly<{ skillId?: string }>,
+  ): Promise<CoordinatorResult> {
     const projectContext = this.#deps.projectContext;
+
+    // A requested skill is loaded before the Run starts, so a failure is a clean
+    // refusal rather than a Run that fails partway. The body becomes a user
+    // message with a provenance header; it grants nothing.
+    let skillBlock: string | null = null;
+    if (options.skillId !== undefined) {
+      const loader = this.#deps.loadSkill;
+      if (loader === undefined) {
+        return this.#refuseBeforeStart("skill_tool_unavailable");
+      }
+      const loaded = await loader({ skillId: options.skillId });
+      if (!loaded.ok) {
+        return this.#refuseBeforeStart(`skill_${loaded.code}`);
+      }
+      skillBlock = loaded.block;
+    }
+
     const context: MutableRunContext = {
       run: startRun(),
       sessionId: this.#sessionId,
@@ -785,6 +821,7 @@ export class RuntimeCoordinator {
       conversation: [
         ...(projectContext === undefined ? [] : [{ kind: "user" as const, text: projectContext }]),
         ...this.#conversation,
+        ...(skillBlock === null ? [] : [{ kind: "user" as const, text: skillBlock }]),
         { kind: "user", text: input },
       ],
       inputQueue: emptyRunInputQueue(),
@@ -2454,6 +2491,18 @@ export class RuntimeCoordinator {
     } as CoordinatorResult;
     this.#lastResult = result;
     return result;
+  }
+  /**
+   * Refuse a Run before it starts.
+   *
+   * No Run context exists yet, so this cannot write events. It returns a failed
+   * result with the reason, which is honest: nothing was attempted and nothing was
+   * recorded because there was no Run to record.
+   */
+  #refuseBeforeStart(safeCode: string): Promise<CoordinatorResult> {
+    // `run` rejects for pre-start problems, matching how it already reports a
+    // closed session or a busy one. The reason is the safe code, not free text.
+    return Promise.reject(new Error(safeCode));
   }
 }
 

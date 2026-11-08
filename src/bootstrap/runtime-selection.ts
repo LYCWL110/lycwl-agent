@@ -5,6 +5,7 @@ import {
   type GuidanceBlock,
   renderGuidanceBlock,
 } from "../adapters/windows/guidance-loader.ts";
+import { createSkillLoader } from "../adapters/windows/skill-loader.ts";
 import type { RuntimeCoordinator } from "../application/coordinator/runtime-coordinator.ts";
 import { deriveTaskReport } from "../application/task-report/derive-task-report.ts";
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
@@ -345,6 +346,20 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
       coordinator: new RuntimeCoordinator({
         provider: assembly.provider,
         ownedKeys: assembly.ownedKeys,
+        ...(options.enableSkills === true
+          ? {
+              loadSkill: async ({ skillId }) => {
+                const loaded = await createSkillLoader({
+                  workspaceRoot: options.workspaceRoot,
+                }).load({
+                  skillId,
+                });
+                return loaded.ok
+                  ? { ok: true as const, block: loaded.block, skillId: loaded.skillId }
+                  : { ok: false as const, code: loaded.code };
+              },
+            }
+          : {}),
         refreshOwnedKeys: assembly.refreshOwnedKeys,
         tools: createWorkspaceTools({
           workspaceRoot: options.workspaceRoot,
