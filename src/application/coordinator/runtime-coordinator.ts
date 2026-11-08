@@ -386,7 +386,12 @@ export class RuntimeCoordinator {
         if (this.#activeContext !== null) {
           this.#activeContext.deliveryBlocked = true;
           this.#activeContext.deliveryBlockReason = task.deliveryBlocked;
-          this.#activeContext.abortController.abort();
+          // Deliberately not aborting the in-flight request here. Aborting made the
+          // Run report `tool_cancelled` and skip the delivery-block wait entirely,
+          // because the cancellation path wins before the block is observed. The
+          // flag is checked at the next safe boundary, which is where a blocked
+          // result must take effect: the current response finishes, then the Run
+          // enters recovery review with the real reason preserved.
         }
       }
       if (!["registered", "running"].includes(task.state)) this.#backgroundTerminal.add(identity);
