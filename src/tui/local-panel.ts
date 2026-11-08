@@ -7,12 +7,17 @@ import { TextInput } from "./text-input.ts";
 import { COMPOSER_COMMANDS } from "./view-model.ts";
 
 export function LocalPanel(props: {
-  kind: "help" | "session";
+  kind: "help" | "session" | "skills";
   sessionId?: string | undefined;
   notice?: string | null | undefined;
   viewport: Viewport;
   capabilities: Capabilities;
   onSubmit: (text: string) => void;
+  /** Catalog entries for the skills panel; null when unavailable. */
+  skillCatalog?:
+    | readonly Readonly<{ skillId: string; description: string; bytes: number }>[]
+    | null;
+  skillCatalogError?: string | null;
   onClose: () => void;
 }): ReactElement {
   const [selected, setSelected] = useState(0);
@@ -34,6 +39,10 @@ export function LocalPanel(props: {
     }
     if (key.ctrl && input === "c") {
       props.onSubmit("/cancel");
+      return;
+    }
+    if (props.kind === "skills") {
+      if (key.return) props.onClose();
       return;
     }
     if (props.kind === "help") {
@@ -76,38 +85,42 @@ export function LocalPanel(props: {
     h(
       Text,
       { bold: true, ...colorProps(colorFor("primary", props.capabilities)) },
-      props.kind === "help" ? "Commands" : "Session",
+      props.kind === "help" ? "Commands" : props.kind === "skills" ? "Skills" : "Session",
     ),
     h(
       Box,
       { flexDirection: "column", flexGrow: 1, overflow: "hidden" },
-      ...(props.kind === "help"
-        ? helpLines.slice(offset, offset + rows).map((line, index) => h(Text, { key: index }, line))
-        : [
-            h(
-              Text,
-              { key: "id", wrap: "wrap", ...colorProps(colorFor("dim", props.capabilities)) },
-              `Current: ${props.sessionId ?? "unavailable"}`,
-            ),
-            ...["Keep current session", "New session", "Resume by ID"].map((label, index) =>
+      ...(props.kind === "skills"
+        ? renderSkillLines(props, width)
+        : props.kind === "help"
+          ? helpLines
+              .slice(offset, offset + rows)
+              .map((line, index) => h(Text, { key: index }, line))
+          : [
               h(
                 Text,
-                {
-                  key: label,
-                  inverse: selected === index && resume === null,
-                },
-                clipText(`${selected === index ? ">" : " "} ${label}`, width),
+                { key: "id", wrap: "wrap", ...colorProps(colorFor("dim", props.capabilities)) },
+                `Current: ${props.sessionId ?? "unavailable"}`,
               ),
-            ),
-            resume === null
-              ? null
-              : h(
-                  Box,
-                  { key: "input" },
-                  h(Text, null, "ID: "),
-                  h(TextInput, { ...resume, width: Math.max(1, width - 4) }),
+              ...["Keep current session", "New session", "Resume by ID"].map((label, index) =>
+                h(
+                  Text,
+                  {
+                    key: label,
+                    inverse: selected === index && resume === null,
+                  },
+                  clipText(`${selected === index ? ">" : " "} ${label}`, width),
                 ),
-          ]),
+              ),
+              resume === null
+                ? null
+                : h(
+                    Box,
+                    { key: "input" },
+                    h(Text, null, "ID: "),
+                    h(TextInput, { ...resume, width: Math.max(1, width - 4) }),
+                  ),
+            ]),
     ),
     h(
       Text,
@@ -120,4 +133,53 @@ export function LocalPanel(props: {
       clipText(props.kind === "help" ? "Enter / Esc close" : "Enter select  Esc back", width),
     ),
   );
+}
+
+/**
+ * Skill catalog lines.
+ *
+ * A failure is shown as its reason rather than as an empty list: an empty list would
+ * claim the workspace has no skills, which is a different fact.
+ */
+function renderSkillLines(
+  props: Readonly<{
+    skillCatalog?:
+      | readonly Readonly<{ skillId: string; description: string; bytes: number }>[]
+      | null;
+    skillCatalogError?: string | null;
+    capabilities: Capabilities;
+  }>,
+  width: number,
+): ReactElement[] {
+  if (props.skillCatalogError !== null && props.skillCatalogError !== undefined) {
+    return [
+      h(
+        Text,
+        { key: "err", ...colorProps(colorFor("tertiary", props.capabilities)) },
+        clipText(`unavailable: ${props.skillCatalogError}`, width),
+      ),
+    ];
+  }
+  const catalog = props.skillCatalog ?? [];
+  if (catalog.length === 0) {
+    return [
+      h(
+        Text,
+        { key: "none", ...colorProps(colorFor("faint", props.capabilities)) },
+        clipText("no skills in .agents/skills", width),
+      ),
+    ];
+  }
+  return catalog.flatMap((entry) => [
+    h(
+      Text,
+      { key: entry.skillId, bold: true, ...colorProps(colorFor("primary", props.capabilities)) },
+      clipText(entry.skillId, width),
+    ),
+    h(
+      Text,
+      { key: `${entry.skillId}-d`, ...colorProps(colorFor("dim", props.capabilities)) },
+      clipText(`  ${entry.description}`, width),
+    ),
+  ]);
 }

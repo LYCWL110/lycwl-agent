@@ -234,6 +234,10 @@ export function App(props: AppProps): ReactElement {
       key: view.localPanel,
       kind: view.localPanel,
       sessionId: props.sessionId,
+      ...(view.skillCatalog === undefined ? {} : { skillCatalog: view.skillCatalog }),
+      ...(view.skillCatalogError === undefined
+        ? {}
+        : { skillCatalogError: view.skillCatalogError }),
       notice: view.commandNotice,
       viewport,
       capabilities,

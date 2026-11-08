@@ -179,6 +179,26 @@ async function startSession(): Promise<void> {
   process.stderr.write(`${describeSelection(chosen).join("\n")}\n\n`);
   startTui(
     createTuiController({
+      ...(args.includes("--skills")
+        ? {
+            skillCatalog: async () => {
+              const { createSkillDiscovery } = await import(
+                "../adapters/windows/skill-discovery.ts"
+              );
+              const discovery = createSkillDiscovery({ workspaceRoot: process.cwd() });
+              const result = await discovery.discover({ enabled: true });
+              if (!result.ok) return { ok: false as const, code: result.code };
+              return {
+                ok: true as const,
+                skills: result.catalog.skills.map((skill) => ({
+                  skillId: skill.skillId,
+                  description: skill.description,
+                  bytes: skill.bytes,
+                })),
+              };
+            },
+          }
+        : {}),
       coordinator: chosen.coordinator,
       ...(chosen.kind === "real" ? { initialEvents: chosen.historyEvents } : {}),
       canResumeSession: (id) => canResumeSession(dataDirectory, id),

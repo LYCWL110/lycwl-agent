@@ -27,7 +27,17 @@ export type WaitingKind = "approval" | "question" | "configuration" | "other";
 export type RunActivity = "thinking" | "working";
 
 export type TuiViewState = Readonly<{
-  localPanel?: "help" | "session" | "credential" | null;
+  localPanel?: "help" | "session" | "credential" | "skills" | null;
+  /** Workspace Skill catalog, when discovery ran and succeeded. */
+  skillCatalog?:
+    | readonly Readonly<{
+        skillId: string;
+        description: string;
+        bytes: number;
+      }>[]
+    | null;
+  /** Why the catalog is unavailable, when it is. */
+  skillCatalogError?: string | null;
   commandNotice?: string | null;
   runStatus: RunStatus;
   waitingKind: WaitingKind | null;
@@ -418,7 +428,7 @@ export type ComposerIntent =
   /** Generate an AGENTS.md draft for the workspace. */
   | Readonly<{ kind: "project_init" }>
   | Readonly<{ kind: "open_model" }>
-  | Readonly<{ kind: "open_panel"; panel: "help" | "session" }>
+  | Readonly<{ kind: "open_panel"; panel: "help" | "session" | "skills" }>
   | Readonly<{ kind: "switch_session"; sessionId: string | null }>
   | Readonly<{ kind: "cancel_run" }>
   | Readonly<{ kind: "resume_run" }>
@@ -436,6 +446,7 @@ export const COMPOSER_COMMANDS = [
   { name: "/new", description: "Start a fresh session", idleOnly: true },
   { name: "/init", description: "Draft an AGENTS.md for this project", idleOnly: true },
   { name: "/skill", description: "Run with a workspace skill loaded", idleOnly: true },
+  { name: "/skills", description: "List the workspace skill catalog", idleOnly: false },
   { name: "/help", description: "Show commands", idleOnly: false },
   { name: "/cancel", description: "Cancel the current run", idleOnly: false },
   { name: "/key", description: "Correct the waiting connection key", idleOnly: false },
@@ -488,6 +499,8 @@ export function interpretComposer(
         return { kind: "switch_session", sessionId: null };
       case "/init":
         return { kind: "project_init" };
+      case "/skills":
+        return { kind: "open_panel", panel: "skills" };
       case "/skill": {
         // The id becomes part of the task text so the coordinator can resolve and
         // inject the body at the same safe boundary as any other input.

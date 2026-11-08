@@ -13,12 +13,26 @@ import { deriveView, interpretComposer, type TuiViewState } from "./view-model.t
  * Bridges the Runtime coordinator to the TUI view. It holds only projection
  * state plus a draft; every authority decision stays inside the coordinator.
  */
+export type SkillCatalogEntry = Readonly<{
+  skillId: string;
+  description: string;
+  bytes: number;
+}>;
+
 export type TuiSessionDeps = Readonly<{
   coordinator: RuntimeCoordinator;
   initialEvents?: readonly InternalEvent[];
   canResumeSession?: (sessionId: string) => Promise<boolean>;
   /** Trusted composition corrects only the current fixed-route key reference. */
   correctCredential?: (secret: string) => Promise<boolean>;
+  /**
+   * Workspace Skill catalog for the `/skills` panel. Absent means skills are
+   * disabled; a failure is reported rather than shown as an empty catalog.
+   */
+  skillCatalog?: () => Promise<
+    | Readonly<{ ok: true; skills: readonly SkillCatalogEntry[] }>
+    | Readonly<{ ok: false; code: string }>
+  >;
 }>;
 
 export type TuiNavigationRequest =
@@ -59,7 +73,10 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   /** Why the last answer was rejected, shown in the question panel. */
   let answerError: string | null = null;
   let navigation: TuiNavigationRequest | null = null;
-  let localPanel: "help" | "session" | "credential" | null = null;
+  let localPanel: "help" | "session" | "credential" | "skills" | null = null;
+  /** Loaded once per panel open, so the view never performs I/O. */
+  let skillCatalog: readonly SkillCatalogEntry[] | null = null;
+  let skillCatalogError: string | null = null;
   let commandNotice: string | null = null;
   let checkingSession = false;
   let closing: Promise<void> | null = null;
@@ -91,6 +108,33 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     applyResult(result);
   }
 
+  /**
+   * Load the Skill catalog for the panel.
+   *
+   * A failure is kept as a reason rather than rendered as an empty catalog: an empty
+   * list would claim the workspace has no skills, which is a different fact.
+   */
+  async function loadSkillCatalog(): Promise<void> {
+    const loader = deps.skillCatalog;
+    if (loader === undefined) {
+      skillCatalog = null;
+      skillCatalogError = "skills are disabled";
+      return;
+    }
+    try {
+      const loaded = await loader();
+      if (loaded.ok) {
+        skillCatalog = loaded.skills;
+        skillCatalogError = null;
+        return;
+      }
+      skillCatalog = null;
+      skillCatalogError = loaded.code;
+    } catch {
+      skillCatalog = null;
+      skillCatalogError = "catalog_unavailable";
+    }
+  }
   function view(): TuiViewState {
     const live = deps.coordinator.currentRunProjection();
     return {
@@ -106,6 +150,8 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
         draft,
       }),
       localPanel,
+      skillCatalog,
+      skillCatalogError,
       commandNotice,
     };
   }
@@ -168,6 +214,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     }
     if (intent.kind === "open_panel") {
       localPanel = intent.panel;
+      if (intent.panel === "skills") await loadSkillCatalog();
       return;
     }
     if (intent.kind === "switch_session") {
