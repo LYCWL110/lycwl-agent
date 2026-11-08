@@ -27,7 +27,7 @@ export type WaitingKind = "approval" | "question" | "configuration" | "other";
 export type RunActivity = "thinking" | "working";
 
 export type TuiViewState = Readonly<{
-  localPanel?: "help" | "session" | "credential" | "skills" | null;
+  localPanel?: "help" | "session" | "credential" | "skills" | "mcp" | null;
   /** Workspace Skill catalog, when discovery ran and succeeded. */
   skillCatalog?:
     | readonly Readonly<{
@@ -38,6 +38,18 @@ export type TuiViewState = Readonly<{
     | null;
   /** Why the catalog is unavailable, when it is. */
   skillCatalogError?: string | null;
+  /** Declared MCP servers, loaded when the panel opens. */
+  mcpServers?:
+    | readonly Readonly<{
+        serverId: string;
+        command: string;
+        args: readonly string[];
+      }>[]
+    | null;
+  /** Why the MCP server list could not be read, when it could not. */
+  mcpError?: string | null;
+  /** True while an MCP edit is being saved. */
+  mcpBusy?: boolean;
   commandNotice?: string | null;
   runStatus: RunStatus;
   waitingKind: WaitingKind | null;
@@ -428,7 +440,7 @@ export type ComposerIntent =
   /** Generate an AGENTS.md draft for the workspace. */
   | Readonly<{ kind: "project_init" }>
   | Readonly<{ kind: "open_model" }>
-  | Readonly<{ kind: "open_panel"; panel: "help" | "session" | "skills" }>
+  | Readonly<{ kind: "open_panel"; panel: "help" | "session" | "skills" | "mcp" }>
   | Readonly<{ kind: "switch_session"; sessionId: string | null }>
   | Readonly<{ kind: "cancel_run" }>
   | Readonly<{ kind: "resume_run" }>
@@ -447,6 +459,7 @@ export const COMPOSER_COMMANDS = [
   { name: "/init", description: "Draft an AGENTS.md for this project", idleOnly: true },
   { name: "/skill", description: "Run with a workspace skill loaded", idleOnly: true },
   { name: "/skills", description: "List the workspace skill catalog", idleOnly: false },
+  { name: "/mcp", description: "Declare MCP servers", idleOnly: true },
   { name: "/help", description: "Show commands", idleOnly: false },
   { name: "/cancel", description: "Cancel the current run", idleOnly: false },
   { name: "/key", description: "Correct the waiting connection key", idleOnly: false },
@@ -501,6 +514,8 @@ export function interpretComposer(
         return { kind: "project_init" };
       case "/skills":
         return { kind: "open_panel", panel: "skills" };
+      case "/mcp":
+        return { kind: "open_panel", panel: "mcp" };
       case "/skill": {
         // The id becomes part of the task text so the coordinator can resolve and
         // inject the body at the same safe boundary as any other input.

@@ -5,6 +5,7 @@ import { Brand, clipText, colorProps, useViewport, type Viewport, wrapText } fro
 import { CommandMenu } from "./command-menu.ts";
 import { CredentialScreen } from "./credential-screen.ts";
 import { LocalPanel } from "./local-panel.ts";
+import { McpPanel } from "./mcp-panel.ts";
 import { type Capabilities, colorFor, detectCapabilities } from "./palette.ts";
 import { useTerminalWheel } from "./terminal-wheel.ts";
 import { characters, editText, type TextEdit } from "./text-edit.ts";
@@ -39,6 +40,11 @@ export type AppProps = Readonly<{
   onQuit: () => void;
   onClosePanel?: () => void;
   onCorrectCredential?: (secret: string) => Promise<boolean>;
+  /** MCP declaration edits; the caller owns the config store write. */
+  onMcpAdd?: (
+    entry: Readonly<{ serverId: string; command: string; args: readonly string[] }>,
+  ) => void;
+  onMcpRemove?: (serverId: string) => void;
   sessionId?: string;
   /** Injected so a test can exercise every colour depth. */
   capabilities?: Capabilities;
@@ -227,6 +233,18 @@ export function App(props: AppProps): ReactElement {
     return h(CredentialScreen, {
       width,
       onSave: props.onCorrectCredential ?? (async () => false),
+      onClose: () => props.onClosePanel?.(),
+    });
+  if (view.localPanel === "mcp")
+    return h(McpPanel, {
+      viewport,
+      capabilities,
+      servers: view.mcpServers ?? null,
+      error: view.mcpError ?? null,
+      busy: view.mcpBusy === true,
+      notice: view.commandNotice ?? null,
+      onAdd: (entry) => props.onMcpAdd?.(entry),
+      onRemove: (serverId) => props.onMcpRemove?.(serverId),
       onClose: () => props.onClosePanel?.(),
     });
   if (view.localPanel != null)

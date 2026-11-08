@@ -7,6 +7,7 @@ import type { TodoList } from "../domain/planning/todo.ts";
 import { emptyTodoList, replaceTodoList } from "../domain/planning/todo.ts";
 import type { InternalEvent } from "../ports/event-log.ts";
 import { resolveAnswer } from "./answer-input.ts";
+import type { McpPanelEntry } from "./mcp-panel.ts";
 import { deriveView, interpretComposer, type TuiViewState } from "./view-model.ts";
 
 /**
@@ -33,6 +34,22 @@ export type TuiSessionDeps = Readonly<{
     | Readonly<{ ok: true; skills: readonly SkillCatalogEntry[] }>
     | Readonly<{ ok: false; code: string }>
   >;
+  /**
+   * Read the declared MCP servers for the panel. Absent means the panel cannot
+   * read configuration, which is reported rather than shown as an empty list.
+   */
+  mcpServers?: () => Promise<
+    | Readonly<{ ok: true; servers: readonly McpPanelEntry[] }>
+    | Readonly<{ ok: false; code: string }>
+  >;
+  /** Apply an MCP change. The caller owns the config store write. */
+  mcpChange?: (change: {
+    add?: McpPanelEntry;
+    remove?: string;
+  }) => Promise<
+    | Readonly<{ ok: true; servers: readonly McpPanelEntry[] }>
+    | Readonly<{ ok: false; code: string }>
+  >;
 }>;
 
 export type TuiNavigationRequest =
@@ -53,6 +70,8 @@ export type TuiController = Readonly<{
   lastResult: () => CoordinatorResult | null;
   takeNavigationRequest: () => TuiNavigationRequest | null;
   closePanel: () => void;
+  addMcpServer: (entry: McpPanelEntry) => Promise<void>;
+  removeMcpServer: (serverId: string) => Promise<void>;
   correctCredential?: (secret: string) => Promise<boolean>;
 }>;
 
@@ -73,10 +92,13 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   /** Why the last answer was rejected, shown in the question panel. */
   let answerError: string | null = null;
   let navigation: TuiNavigationRequest | null = null;
-  let localPanel: "help" | "session" | "credential" | "skills" | null = null;
+  let localPanel: "help" | "session" | "credential" | "skills" | "mcp" | null = null;
   /** Loaded once per panel open, so the view never performs I/O. */
   let skillCatalog: readonly SkillCatalogEntry[] | null = null;
   let skillCatalogError: string | null = null;
+  let mcpServers: readonly McpPanelEntry[] | null = null;
+  let mcpError: string | null = null;
+  let mcpBusy = false;
   let commandNotice: string | null = null;
   let checkingSession = false;
   let closing: Promise<void> | null = null;
@@ -135,6 +157,58 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       skillCatalogError = "catalog_unavailable";
     }
   }
+  /** Read the declared MCP servers. A failure is kept as a reason, not an empty list. */
+  async function loadMcpServers(): Promise<void> {
+    const loader = deps.mcpServers;
+    if (loader === undefined) {
+      mcpServers = null;
+      mcpError = "configuration is not readable in this build";
+      return;
+    }
+    try {
+      const loaded = await loader();
+      if (loaded.ok) {
+        mcpServers = loaded.servers;
+        mcpError = null;
+        return;
+      }
+      mcpServers = null;
+      mcpError = loaded.code;
+    } catch {
+      mcpServers = null;
+      mcpError = "configuration could not be read";
+    }
+  }
+
+  /**
+   * Apply an MCP edit. The list is re-read from the result rather than patched
+   * locally, so the panel shows what the document actually contains.
+   */
+  async function changeMcp(change: { add?: McpPanelEntry; remove?: string }): Promise<void> {
+    if (mcpBusy) return;
+    const apply = deps.mcpChange;
+    if (apply === undefined) {
+      mcpError = "configuration is not writable in this build";
+      return;
+    }
+    mcpBusy = true;
+    commandNotice = null;
+    try {
+      const result = await apply(change);
+      if (result.ok) {
+        mcpServers = result.servers;
+        mcpError = null;
+        commandNotice = change.remove === undefined ? "server added" : "server removed";
+      } else {
+        mcpError = result.code;
+      }
+    } catch {
+      mcpError = "configuration could not be saved";
+    } finally {
+      mcpBusy = false;
+    }
+  }
+
   function view(): TuiViewState {
     const live = deps.coordinator.currentRunProjection();
     return {
@@ -152,6 +226,9 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       localPanel,
       skillCatalog,
       skillCatalogError,
+      mcpServers,
+      mcpError,
+      mcpBusy,
       commandNotice,
     };
   }
@@ -215,6 +292,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     if (intent.kind === "open_panel") {
       localPanel = intent.panel;
       if (intent.panel === "skills") await loadSkillCatalog();
+      if (intent.panel === "mcp") await loadMcpServers();
       return;
     }
     if (intent.kind === "switch_session") {
@@ -381,6 +459,8 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       localPanel = null;
       commandNotice = null;
     },
+    addMcpServer: (entry) => changeMcp({ add: entry }),
+    removeMcpServer: (serverId) => changeMcp({ remove: serverId }),
     takeNavigationRequest: () => {
       const requested = navigation;
       navigation = null;

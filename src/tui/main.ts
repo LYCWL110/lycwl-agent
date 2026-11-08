@@ -74,6 +74,12 @@ export function startTui(
         refresh();
         return saved;
       },
+      onMcpAdd: (entry) => {
+        void controller.addMcpServer(entry).then(refresh);
+      },
+      onMcpRemove: (serverId) => {
+        void controller.removeMcpServer(serverId).then(refresh);
+      },
       onSubmit: (text) => {
         return controller.submit(text).then((accepted) => {
           const request = controller.takeNavigationRequest();

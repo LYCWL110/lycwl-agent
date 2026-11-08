@@ -5,11 +5,13 @@ import { fetchModelDetails, fetchModelList } from "../adapters/providers/model-l
 import { createConfigStore, defaultConfigDirectory } from "../adapters/windows/config-store.ts";
 import { createFileVault } from "../adapters/windows/file-credential-vault.ts";
 import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
+import { readMcpServerEntries } from "../domain/config/mcp-edit.ts";
 import type { CatalogModel } from "../domain/config/model-catalog.ts";
 import { readProviderConfig } from "../domain/config/provider-config.ts";
 import { createTuiController } from "../tui/controller.ts";
 import { startTui } from "../tui/main.ts";
 import { hasProvider, startConfigFlow } from "./config-flow.ts";
+import { saveMcpChange } from "./mcp-save.ts";
 import { describeSelection, selectRuntime } from "./runtime-selection.ts";
 import { canResumeSession, selectSessionLaunch } from "./session-launch.ts";
 import { createTerminalApproval } from "./terminal-approval.ts";
@@ -226,6 +228,36 @@ async function startSession(): Promise<void> {
               return written.ok;
             },
           }),
+      mcpServers: async () => {
+        const loaded = await configStore.load();
+        if (!loaded.ok) return { ok: false as const, code: loaded.code };
+        const parsed = parseJsonc(loaded.value.text);
+        if (!parsed.ok) return { ok: false as const, code: "config_invalid" };
+        return {
+          ok: true as const,
+          servers: readMcpServerEntries(loaded.value.text).map((entry) => ({
+            serverId: entry.serverId,
+            command: entry.command,
+            args: entry.args,
+          })),
+        };
+      },
+      mcpChange: async (change) => {
+        const saved = await saveMcpChange({
+          store: configStore,
+          ...(change.add === undefined ? {} : { add: { ...change.add, environment: {} } }),
+          ...(change.remove === undefined ? {} : { remove: change.remove }),
+        });
+        if (!saved.ok) return { ok: false as const, code: saved.code };
+        return {
+          ok: true as const,
+          servers: saved.entries.map((entry) => ({
+            serverId: entry.serverId,
+            command: entry.command,
+            args: entry.args,
+          })),
+        };
+      },
     }),
     {
       ...(chosen.kind === "real" ? { modelLabel: chosen.config.model } : {}),
