@@ -2,6 +2,7 @@ import type { spawn } from "node:child_process";
 import { connectMcpServer, type McpConnection } from "../adapters/windows/mcp-connection.ts";
 import {
   type McpServerDeclaration,
+  type McpValidatedTool,
   validateMcpServers,
   validateMcpTools,
 } from "../domain/mcp/mcp-server.ts";
@@ -39,7 +40,12 @@ export type McpStartupResult =
       connections: readonly Readonly<{
         declaration: McpServerDeclaration;
         connection: McpConnection;
-        tools: readonly Readonly<{ name: string; namespaced: string; description: string }>[];
+        tools: readonly Readonly<{
+          name: string;
+          namespaced: string;
+          description: string;
+          inputSchema: Readonly<Record<string, unknown>>;
+        }>[];
       }>[];
       warnings: readonly string[];
     }>
@@ -81,7 +87,7 @@ export async function startMcpServers(options: StartMcpOptions): Promise<McpStar
   const connections: {
     declaration: McpServerDeclaration;
     connection: McpConnection;
-    tools: { name: string; namespaced: string; description: string }[];
+    tools: McpValidatedTool[];
   }[] = [];
   const warnings: string[] = [];
   let lastFailure: Readonly<{ code: McpStartupFailure; detail?: string }> | null = null;
@@ -132,19 +138,23 @@ export async function startMcpServers(options: StartMcpOptions): Promise<McpStar
       continue;
     }
 
-    let tools: readonly Readonly<{ name: string; namespaced: string; description: string }>[];
+    let tools: readonly McpValidatedTool[];
     try {
       const listed = await started.connection.listTools();
       const validated = validateMcpTools(
         declaration.serverId,
-        listed.map((tool) => ({ name: tool.name, description: tool.description })),
+        listed.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+        })),
       );
       if (!validated.ok) {
         await started.connection.close();
         lastFailure = { code: "no_tools", detail: `${declaration.serverId}: ${validated.code}` };
         continue;
       }
-      tools = validated.tools;
+      tools = [...validated.tools];
     } catch {
       await started.connection.close();
       lastFailure = { code: "handshake_failed", detail: declaration.serverId };

@@ -2,6 +2,12 @@ import path from "node:path";
 import { createFileEvidenceStore } from "../adapters/persistence/file-evidence-store.ts";
 import { createSnapshotStore } from "../adapters/persistence/snapshot-store.ts";
 import { createSpillStore } from "../adapters/persistence/spill-store.ts";
+import {
+  createDiscoverToolsTool,
+  DISCOVER_TOOLS_NAME,
+  DISCOVERY_TOOL_DESCRIPTION,
+  DISCOVERY_TOOL_SCHEMA,
+} from "../adapters/tools/discover-tools.ts";
 import { createMcpTools, mcpToolDefinitions } from "../adapters/tools/mcp-tools.ts";
 import { createFormatterRunner } from "../adapters/windows/formatter-runner.ts";
 import {
@@ -14,6 +20,11 @@ import type { RuntimeCoordinator } from "../application/coordinator/runtime-coor
 import { deriveTaskReport } from "../application/task-report/derive-task-report.ts";
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.ts";
+import {
+  type DiscoverableTool,
+  renderServerCatalog,
+  shouldDiscover,
+} from "../domain/mcp/tool-discovery.ts";
 import { filterChildEnvironment } from "../domain/process/shell.ts";
 import type { OwnedKeyRegistry } from "../domain/security/owned-key-guard.ts";
 import { availableTools, COORDINATOR_TOOL_NAMES } from "../domain/tool-catalog/tool-catalog.ts";
@@ -133,6 +144,14 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     mcpStarted !== null && mcpStarted.ok && mcpStarted.connections.length > 0
       ? createMcpTools(mcpStarted.connections)
       : undefined;
+  const discoverable = discoverableTools(mcpStarted);
+  // With a handful of MCP tools, listing them is cheaper than a discovery round trip.
+  // Past the threshold the schemas dominate the request, so only a compact server
+  // catalog is sent and the model asks for the schemas it needs.
+  const useDiscovery = shouldDiscover(discoverable.length);
+  const discoverExecutor = useDiscovery
+    ? createDiscoverToolsTool({ tools: () => discoverable })
+    : undefined;
   const mcpWarnings =
     mcpStarted === null
       ? mcpDeclared === undefined
@@ -154,6 +173,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     enableProcesses,
     enableSkills: options.enableSkills === true,
     ...(mcpExecutor === undefined ? {} : { mcp: mcpExecutor }),
+    ...(discoverExecutor === undefined ? {} : { discover: discoverExecutor }),
   });
 
   // Advertise only tools this composition actually exposes under the current
@@ -163,22 +183,34 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   const catalog = availableTools(
     (name) => name === COORDINATOR_TOOL_NAMES.ask_user || tools.getDefinition(name) !== null,
   );
+  const mcpDefinitions =
+    mcpStarted !== null && mcpStarted.ok ? mcpToolDefinitions(mcpStarted.connections) : [];
   const toolDefinitions = [
     ...catalog.map((entry) => ({
       name: entry.name,
       description: entry.description,
       inputSchema: entry.inputSchema as unknown as Readonly<Record<string, unknown>>,
     })),
-    // MCP tool schemas come from the server, not from the built-in catalog, so they
-    // are appended rather than looked up. The namespaced name is what the model calls.
-    ...(mcpStarted !== null && mcpStarted.ok
-      ? mcpToolDefinitions(mcpStarted.connections).map((tool) => ({
+    ...(useDiscovery
+      ? [
+          {
+            name: DISCOVER_TOOLS_NAME,
+            description: DISCOVERY_TOOL_DESCRIPTION,
+            inputSchema: DISCOVERY_TOOL_SCHEMA,
+          },
+        ]
+      : mcpDefinitions.map((tool) => ({
           name: tool.name,
           description: tool.description,
-          inputSchema: {} as Readonly<Record<string, unknown>>,
-        }))
-      : []),
+          inputSchema: tool.inputSchema,
+        }))),
   ];
+
+  // The catalog goes into the sourced project context, not the system prompt: it is
+  // server-supplied text and must not acquire the authority of application rules.
+  const mcpCatalogBlock = useDiscovery
+    ? `[mcp-catalog]\nConnected MCP servers. Their tools are not listed here; use \`${DISCOVER_TOOLS_NAME}\` with a query to get a tool's schema before calling it.\n${renderServerCatalog(discoverable)}`
+    : "";
 
   const assembly = await assembleRuntime({
     settings: options.settings,
@@ -209,7 +241,9 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
 
   // One sourced block holds guidance and the skill catalog, guidance first so a
   // skill description cannot appear to override project rules.
-  const contextBlock = [guidance.block, skills.block].filter((part) => part !== "").join("\n\n");
+  const contextBlock = [guidance.block, skills.block, mcpCatalogBlock]
+    .filter((part) => part !== "")
+    .join("\n\n");
 
   const { RuntimeCoordinator } = await import("../application/coordinator/runtime-coordinator.ts");
   const { JsonlEventLog } = await import("../adapters/persistence/jsonl-event-log.ts");
@@ -430,6 +464,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
           refreshOwnedKeys: assembly.refreshOwnedKeys,
           evidenceStore,
           ...(mcpExecutor === undefined ? {} : { mcp: mcpExecutor }),
+          ...(discoverExecutor === undefined ? {} : { discover: discoverExecutor }),
         }),
         approvals: { decide: async () => "denied" },
         eventLog,
@@ -742,6 +777,22 @@ function formatterEnvironment(): Readonly<Record<string, string>> {
     if (value !== undefined) inherited[name] = value;
   }
   return filterChildEnvironment(inherited).environment;
+}
+
+/** Flatten connected MCP tools into the shape discovery matches against. */
+function discoverableTools(
+  started: Awaited<ReturnType<typeof startMcpServers>> | null,
+): readonly DiscoverableTool[] {
+  if (started === null || !started.ok) return [];
+  return started.connections.flatMap((connection) =>
+    connection.tools.map((tool) => ({
+      name: tool.namespaced,
+      serverId: connection.declaration.serverId,
+      toolName: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+    })),
+  );
 }
 
 export type SkillsSummary =

@@ -304,7 +304,8 @@ export async function connectMcpServer(
         result.push({
           name,
           description: typeof record["description"] === "string" ? record["description"] : "",
-          inputSchema: record["inputSchema"] ?? {},
+          // Passed through as-is; the domain layer normalizes the shape.
+          inputSchema: record["inputSchema"],
         });
       }
       return result;

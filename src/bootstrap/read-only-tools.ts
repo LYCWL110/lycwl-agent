@@ -97,6 +97,11 @@ export type WorkspaceToolsOptions = Readonly<{
    * are namespaced and every call still needs its own approval.
    */
   mcp?: ToolExecutor;
+  /**
+   * The discovery tool, present only when the MCP tool count makes listing every
+   * schema wasteful.
+   */
+  discover?: ToolExecutor;
 }>;
 
 export function createReadOnlyWorkspaceTools(options: WorkspaceToolsOptions): ToolExecutor {
@@ -428,6 +433,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
   }
 
   if (options.mcp !== undefined) delegates.push(options.mcp);
+  if (options.discover !== undefined) delegates.push(options.discover);
 
   function resolveDelegate(toolName: string): ToolExecutor | null {
     for (const delegate of delegates) {

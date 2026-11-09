@@ -170,14 +170,46 @@ export function parseMcpToolName(name: string): McpToolNameParse {
 export type McpToolDescriptor = Readonly<{
   name: string;
   description: string;
+  /**
+   * The server's JSON Schema for the arguments.
+   *
+   * It is forwarded to the model rather than replaced with an empty object: a tool
+   * without a schema gives the model no way to know what arguments it accepts, so
+   * the first call becomes a guess. The schema is the server's contract and the
+   * model needs it verbatim.
+   */
+  inputSchema?: unknown;
+}>;
+
+export type McpValidatedTool = Readonly<{
+  name: string;
+  namespaced: string;
+  description: string;
+  inputSchema: Readonly<Record<string, unknown>>;
 }>;
 
 export type McpToolValidation =
-  | Readonly<{
-      ok: true;
-      tools: readonly Readonly<{ name: string; namespaced: string; description: string }>[];
-    }>
+  | Readonly<{ ok: true; tools: readonly McpValidatedTool[] }>
   | Readonly<{ ok: false; code: McpServerFailure; detail?: string }>;
+
+/**
+ * Normalize a server-supplied schema into something a provider will accept.
+ *
+ * The MCP contract says `inputSchema` is a JSON Schema object. A server that sends
+ * something else is broken, and substituting an empty object would hide that: the
+ * model would then call the tool blind. Returning an object-shaped schema with no
+ * properties at least says "no arguments are declared", which is honest.
+ */
+export function normalizeInputSchema(value: unknown): Readonly<Record<string, unknown>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { type: "object", properties: {} };
+  }
+  const record = value as Record<string, unknown>;
+  // A schema without a type is treated as an object schema, which is what every
+  // tool argument schema is.
+  if (record["type"] === undefined) return { type: "object", ...record };
+  return record;
+}
 
 /**
  * Validate the tool list a server returned.
@@ -192,7 +224,7 @@ export function validateMcpTools(
   tools: readonly McpToolDescriptor[],
 ): McpToolValidation {
   const seen = new Set<string>();
-  const validated: { name: string; namespaced: string; description: string }[] = [];
+  const validated: McpValidatedTool[] = [];
 
   for (const tool of tools) {
     if (typeof tool.name !== "string" || tool.name.length === 0) {
@@ -211,7 +243,12 @@ export function validateMcpTools(
       typeof tool.description === "string"
         ? tool.description.slice(0, MCP_LIMITS.maxToolDescriptionLength)
         : "";
-    validated.push({ name: tool.name, namespaced, description });
+    validated.push({
+      name: tool.name,
+      namespaced,
+      description,
+      inputSchema: normalizeInputSchema(tool.inputSchema),
+    });
   }
 
   return { ok: true, tools: validated };

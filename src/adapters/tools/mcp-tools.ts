@@ -130,16 +130,32 @@ export function createMcpTools(runtimes: readonly McpServerRuntime[]): ToolExecu
   };
 }
 
-/** Namespaced definitions for a set of runtimes, for the model-facing catalog. */
-export function mcpToolDefinitions(
-  runtimes: readonly McpServerRuntime[],
-): readonly Readonly<{ name: string; description: string }>[] {
-  const definitions: { name: string; description: string }[] = [];
+/**
+ * Namespaced definitions for a set of runtimes, for the model-facing catalog.
+ *
+ * The server's own argument schema is carried through. A tool advertised without one
+ * leaves the model guessing at its arguments, which turns the first call into a
+ * failed guess rather than an action.
+ */
+export function mcpToolDefinitions(runtimes: readonly McpServerRuntime[]): readonly Readonly<{
+  name: string;
+  description: string;
+  inputSchema: Readonly<Record<string, unknown>>;
+}>[] {
+  const definitions: {
+    name: string;
+    description: string;
+    inputSchema: Readonly<Record<string, unknown>>;
+  }[] = [];
   for (const runtime of runtimes) {
     const validated = validateMcpTools(runtime.declaration.serverId, runtime.tools);
     if (!validated.ok) continue;
     for (const tool of validated.tools) {
-      definitions.push({ name: tool.namespaced, description: tool.description });
+      definitions.push({
+        name: tool.namespaced,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+      });
     }
   }
   return definitions;
