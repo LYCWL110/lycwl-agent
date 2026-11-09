@@ -322,6 +322,14 @@ type MutableRunContext = {
   budget: ReturnType<typeof createRunBudget>;
   /** Accumulated token usage for this Run; undefined until a provider reports any. */
   usage: TokenUsage | undefined;
+  /**
+   * Spilled previews keyed by provider tool call id.
+   *
+   * The event path and the conversation path both need the delivered text. The
+   * spill file can only be written once, so the preview produced on the event path
+   * is remembered here and reused when the conversation is updated.
+   */
+  spilledPreviews: Map<string, string>;
   lastBudgetTick: number;
   accountingActive: boolean;
   costUnknown: boolean;
@@ -831,6 +839,7 @@ export class RuntimeCoordinator {
       events: [],
       budget: createRunBudget(),
       usage: undefined,
+      spilledPreviews: new Map<string, string>(),
       lastBudgetTick: this.#nowMs(),
       accountingActive: true,
       costUnknown: false,
@@ -1901,6 +1910,24 @@ export class RuntimeCoordinator {
           ? {}
           : { refreshOwnedKeys: this.#deps.refreshOwnedKeys }),
         onEvent: async (type, payload) => {
+          // A finished tool result is recorded here, before the conversation is
+          // updated. Spilling at this point keeps the two consistent: a rebuilt
+          // conversation then replays exactly what the model originally saw, and the
+          // log does not carry a full copy of text the model never received.
+          if (type === "tool_execution_finished") {
+            const fact = payload as Extract<
+              InternalEvent["payload"],
+              { kind: "tool_execution_finished" }
+            >;
+            const spilled = await this.#spillToolText(context, call, fact.text);
+            if (spilled !== fact.text && spilled !== null)
+              context.spilledPreviews.set(call.providerToolCallId, spilled);
+            await this.#record(context, type, {
+              ...fact,
+              text: spilled,
+            } as InternalEvent["payload"]);
+            return;
+          }
           await this.#record(context, type, payload as InternalEvent["payload"]);
         },
       },
@@ -2209,26 +2236,29 @@ export class RuntimeCoordinator {
       context.deliveryBlocked = true;
       context.deliveryBlockReason = delivery.reason;
     }
-    // A large result is stored and replaced with a preview. This happens after the
-    // guard, so the owned-key check still sees the real text; the stored copy is
-    // never the thing that reaches the model.
-    const delivered = await this.#spillIfLarge(context, call, delivery.text);
+    // The event path already spilled this text, so the preview is what the
+    // conversation carries; the two must agree for a rebuild to be faithful.
+    const preview = context.spilledPreviews.get(call.providerToolCallId);
+    if (preview !== undefined) context.spilledPreviews.delete(call.providerToolCallId);
     context.conversation.push({
       kind: "tool_result",
       providerToolCallId: call.providerToolCallId,
       toolName: call.toolName,
       status,
-      text: delivered,
+      text: preview ?? delivery.text,
     });
   }
 
   /**
    * Replace an oversized result with a preview pointing at the stored copy.
    *
+   * The spill file is keyed by the provider tool call id, so the event path and the
+   * conversation path find the same file rather than writing it twice.
+   *
    * A failed store keeps the text inline: spilling is an optimisation, and losing
    * the result because storage was unavailable would be worse than a large turn.
    */
-  async #spillIfLarge(
+  async #spillToolText(
     context: MutableRunContext,
     call: ProviderToolCall,
     text: string | null,
@@ -2238,9 +2268,8 @@ export class RuntimeCoordinator {
     const store = this.#deps.spillStore;
     if (store === undefined) return text;
 
-    const toolCallId = this.#deps.ids.create();
     const stored = await store.spill({
-      toolCallId,
+      toolCallId: call.providerToolCallId,
       toolName: call.toolName,
       text,
     });
@@ -2253,7 +2282,7 @@ export class RuntimeCoordinator {
     if (spilled.kind === "inline") return text;
     await this.#record(context, "tool_output_spilled", {
       kind: "tool_output_spilled",
-      toolCallId,
+      toolCallId: call.providerToolCallId,
       providerToolCallId: call.providerToolCallId,
       toolName: call.toolName,
       totalUnits: text.length,
