@@ -3,6 +3,7 @@ import { createFileEvidenceStore } from "../adapters/persistence/file-evidence-s
 import { createSnapshotStore } from "../adapters/persistence/snapshot-store.ts";
 import { createSpillStore } from "../adapters/persistence/spill-store.ts";
 import { createMcpTools, mcpToolDefinitions } from "../adapters/tools/mcp-tools.ts";
+import { createFormatterRunner } from "../adapters/windows/formatter-runner.ts";
 import {
   createGuidanceLoader,
   type GuidanceBlock,
@@ -13,6 +14,7 @@ import type { RuntimeCoordinator } from "../application/coordinator/runtime-coor
 import { deriveTaskReport } from "../application/task-report/derive-task-report.ts";
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.ts";
+import { filterChildEnvironment } from "../domain/process/shell.ts";
 import type { OwnedKeyRegistry } from "../domain/security/owned-key-guard.ts";
 import { availableTools, COORDINATOR_TOOL_NAMES } from "../domain/tool-catalog/tool-catalog.ts";
 import type { ApprovalGate } from "../ports/approval-gate.ts";
@@ -460,6 +462,14 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
           sessionDirectory: path.join(sessionRoot, "sessions", sessionId),
           workspaceRoot: options.workspaceRoot,
         }),
+        formatter: createFormatterRunner({
+          workspaceRoot: options.workspaceRoot,
+          // The same C09 filter every other child process gets: a formatter has no
+          // business seeing a Provider key.
+          environment: formatterEnvironment(),
+        }),
+        resolveWorkspacePath: (relativePath) =>
+          path.resolve(options.workspaceRoot, ...relativePath.split("/")),
         sessionId,
         ...(prior.conversation.length === 0 ? {} : { priorConversation: prior.conversation }),
         ...(contextBlock === "" ? {} : { projectContext: contextBlock }),
@@ -717,6 +727,21 @@ function restoreSensitiveSources(events: readonly InternalEvent[]): readonly Sen
     }
   }
   return [...sources.values()];
+}
+
+/**
+ * The environment for a formatter child process.
+ *
+ * Built through the shared C09 filter rather than inherited, so a formatter cannot
+ * read a credential the user never intended to expose. The formatter needs PATH
+ * and, on Windows, the usual system variables, which the filter keeps.
+ */
+function formatterEnvironment(): Readonly<Record<string, string>> {
+  const inherited: Record<string, string> = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value !== undefined) inherited[name] = value;
+  }
+  return filterChildEnvironment(inherited).environment;
 }
 
 export type SkillsSummary =

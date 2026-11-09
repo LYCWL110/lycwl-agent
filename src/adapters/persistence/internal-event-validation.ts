@@ -271,6 +271,18 @@ const payloadChecks = {
     ref: attachmentRef,
     reason: oneOf("attachment_missing", "hash_mismatch", "content_not_stored"),
   }),
+  tool_output_formatted: object({
+    kind: text,
+    toolCallId: id,
+    path: text,
+    formatter: id,
+  }),
+  tool_output_format_failed: object({
+    kind: text,
+    toolCallId: id,
+    path: text,
+    reason: id,
+  }),
   snapshot_unavailable: object({
     kind: text,
     toolCallId: id,

@@ -43,6 +43,7 @@ import {
 import { finishRun, type Run, resumeRun, startRun, waitRun } from "../../domain/run/run-state.ts";
 import type { OwnedKeyRegistry } from "../../domain/security/owned-key-guard.ts";
 import type { ApprovalGate } from "../../ports/approval-gate.ts";
+import type { FormatterRunner } from "../../ports/formatter.ts";
 import type { IdentifierFactory } from "../../ports/identity.ts";
 import type {
   ModelProvider,
@@ -148,6 +149,13 @@ export type CoordinatorDependencies = Readonly<{
    * Pre-change file snapshots, so a Run can be reverted. Absent disables undo.
    */
   snapshotStore?: SnapshotStore;
+  /**
+   * The project's formatter, run after a successful file mutation. Absent leaves
+   * written files exactly as the tool produced them.
+   */
+  formatter?: FormatterRunner;
+  /** Resolve a workspace-relative path to an absolute one, for the formatter. */
+  resolveWorkspacePath?: (relativePath: string) => string;
   /**
    * Sourced, untrusted material placed before the user's task, such as project
    * guidance. It is a separate user turn, never merged into the system prompt: a
@@ -1974,6 +1982,10 @@ export class RuntimeCoordinator {
       return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
     }
     await this.#appendToolResult(context, call, outcome.status, outcome.text);
+    // A successful file change is followed by the project's own formatter, when it
+    // has one. This runs after the result is recorded so a formatting failure is
+    // reported as its own fact rather than turning the write into a failure.
+    if (outcome.status === "succeeded") await this.#formatTouchedFiles(context, call);
     context.stopSiblings =
       outcome.status !== "succeeded" &&
       this.#deps.tools.getDefinition(call.toolName)?.sideEffectClass === "filesystem_mutation";
@@ -2265,6 +2277,49 @@ export class RuntimeCoordinator {
       status,
       text: preview ?? delivery.text,
     });
+  }
+
+  /**
+   * Run the project's formatter over the files a successful mutation wrote.
+   *
+   * The formatter is an external program, so this is not silent: it records a
+   * `tool_output_formatted` event with the outcome, and a failure leaves the file as
+   * the tool wrote it rather than reverting. Reverting would discard a successful
+   * edit because a formatter objected, which is a worse outcome than unformatted
+   * code.
+   */
+  async #formatTouchedFiles(context: MutableRunContext, call: ProviderToolCall): Promise<void> {
+    const runner = this.#deps.formatter;
+    if (runner === undefined) return;
+    const definition = this.#deps.tools.getDefinition(call.toolName);
+    if (definition?.sideEffectClass !== "filesystem_mutation") return;
+
+    for (const relativePath of snapshotTargets(call.arguments)) {
+      const formatted = await runner.format({
+        relativePath,
+        resolvedPath: this.#deps.resolveWorkspacePath?.(relativePath) ?? relativePath,
+      });
+      if (formatted.ok) {
+        await this.#record(context, "tool_output_formatted", {
+          kind: "tool_output_formatted",
+          toolCallId: call.providerToolCallId,
+          path: relativePath,
+          formatter: formatted.formatter,
+        });
+        continue;
+      }
+      // "No formatter configured" is not a failure worth reporting on every write;
+      // it is the normal state of most projects.
+      if (formatted.code === "no_configuration" || formatted.code === "unsupported_extension") {
+        continue;
+      }
+      await this.#record(context, "tool_output_format_failed", {
+        kind: "tool_output_format_failed",
+        toolCallId: call.providerToolCallId,
+        path: relativePath,
+        reason: formatted.code,
+      });
+    }
   }
 
   /**
