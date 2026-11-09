@@ -10,10 +10,36 @@ export type ProviderCompletion =
       kind: "completed";
       toolCalls: readonly ProviderToolCall[];
       text: string | null;
+      /**
+       * Token counts the provider reported for this request.
+       *
+       * Absent when the provider did not report them or the adapter could not read
+       * them. Absent is not zero: a missing count means the cost is unknown, and
+       * treating it as zero would make a Run look free when it was not.
+       */
+      usage?: TokenUsage;
     }>
   | Readonly<{ kind: "transient_failure"; safeCode: string; retryAfterMs?: number }>
   | Readonly<{ kind: "authentication_failure"; safeCode: string }>
   | Readonly<{ kind: "invalid_response"; safeCode: string }>;
+
+/**
+ * Token usage for one logical request.
+ *
+ * Counts are per request, not cumulative. A Run's total is the sum over its
+ * requests, which the coordinator accumulates rather than asking the provider for
+ * a running figure it does not track.
+ */
+export type TokenUsage = Readonly<{
+  /** Tokens the provider counted in the prompt, including any cached prefix. */
+  inputTokens: number;
+  /** Tokens the provider generated, including reasoning where it is billed. */
+  outputTokens: number;
+  /** Prompt tokens served from the provider's cache, when reported separately. */
+  cachedInputTokens?: number;
+  /** Reasoning tokens, when the provider reports them separately from output. */
+  reasoningTokens?: number;
+}>;
 
 /**
  * Provider-neutral conversation item (V1_BEHAVIOR_CONTRAINTS section 8).

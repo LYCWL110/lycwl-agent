@@ -3,6 +3,7 @@ import type {
   ModelProvider,
   ProviderConversationItem,
   ProviderToolCall,
+  TokenUsage,
 } from "../../ports/model-provider.ts";
 
 export type ModelAttemptOutcome =
@@ -12,6 +13,8 @@ export type ModelAttemptOutcome =
       attemptNo: number;
       toolCalls: readonly ProviderToolCall[];
       text: string | null;
+      /** Provider-reported token counts; absent means unknown. */
+      usage?: TokenUsage;
     }>
   | Readonly<{ kind: "authentication_failure"; safeCode: string }>
   | Readonly<{ kind: "invalid_response"; safeCode: string }>
@@ -106,6 +109,7 @@ export async function completeWithBoundedRetries(
         attemptNo,
         toolCalls: completion.toolCalls,
         text: completion.text,
+        ...(completion.usage === undefined ? {} : { usage: completion.usage }),
       };
     }
     if (completion.kind === "authentication_failure") {

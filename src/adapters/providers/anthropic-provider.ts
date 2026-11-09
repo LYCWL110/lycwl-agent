@@ -2,6 +2,7 @@ import {
   protocolReasoningEfforts,
   type ReasoningEffort,
 } from "../../domain/config/provider-config.ts";
+import { parseAnthropicUsage } from "../../domain/model-request/token-usage.ts";
 import type {
   ModelProvider,
   ProviderCompletion,
@@ -290,9 +291,13 @@ export function interpretMessageResponse(bodyText: string): ProviderCompletion {
     return { kind: "invalid_response", safeCode: "anthropic_block_unknown" };
   }
 
+  // Usage is optional: a provider that omits it leaves the cost unknown rather
+  // than reporting zero.
+  const usage = parseAnthropicUsage(record);
   return {
     kind: "completed",
     toolCalls,
     text: textParts.length === 0 ? null : textParts.join(""),
+    ...(usage === undefined ? {} : { usage }),
   };
 }

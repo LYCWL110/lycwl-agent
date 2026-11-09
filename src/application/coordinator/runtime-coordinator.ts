@@ -12,6 +12,7 @@ import {
 } from "../../domain/context/touched-paths.ts";
 import type { RunModelBinding } from "../../domain/model-request/run-binding.ts";
 import { bindAttempt } from "../../domain/model-request/run-binding.ts";
+import { addUsage } from "../../domain/model-request/token-usage.ts";
 import { emptyTodoList, replaceTodoList, type TodoList } from "../../domain/planning/todo.ts";
 import {
   type AnswerFailure,
@@ -46,6 +47,7 @@ import type {
   ModelProvider,
   ProviderConversationItem,
   ProviderToolCall,
+  TokenUsage,
 } from "../../ports/model-provider.ts";
 import type { SensitiveSource } from "../../ports/sensitive-context.ts";
 import type { ToolExecutionRequest, ToolExecutor } from "../../ports/tool-executor.ts";
@@ -74,6 +76,11 @@ export type CoordinatorResult =
       events: readonly InternalEvent[];
       text: string | null;
       safeCode: string | null;
+      /**
+       * Token usage accumulated over this Run, or undefined when the provider
+       * reported none. Undefined is not zero: the cost is unknown.
+       */
+      usage?: TokenUsage;
     }>
   | Readonly<{
       status: "waiting";
@@ -81,6 +88,7 @@ export type CoordinatorResult =
       events: readonly InternalEvent[];
       text: null;
       safeCode: string;
+      usage?: TokenUsage;
     }>;
 
 export type CheckpointWriter = Readonly<{
@@ -304,6 +312,8 @@ type MutableRunContext = {
   readonly correlationId: string;
   readonly events: InternalEvent[];
   budget: ReturnType<typeof createRunBudget>;
+  /** Accumulated token usage for this Run; undefined until a provider reports any. */
+  usage: TokenUsage | undefined;
   lastBudgetTick: number;
   accountingActive: boolean;
   costUnknown: boolean;
@@ -812,6 +822,7 @@ export class RuntimeCoordinator {
       correlationId: this.#deps.ids.create(),
       events: [],
       budget: createRunBudget(),
+      usage: undefined,
       lastBudgetTick: this.#nowMs(),
       accountingActive: true,
       costUnknown: false,
@@ -997,7 +1008,15 @@ export class RuntimeCoordinator {
           toolCallCount: completion.toolCalls.length,
           text: guardedCompletionText,
           toolCalls: completion.toolCalls,
+          ...(completion.usage === undefined ? {} : { usage: completion.usage }),
         });
+
+        // Usage is recorded per request and accumulated per Run. A provider that
+        // reports nothing leaves the total unknown; that is reported as unknown
+        // rather than silently counted as zero.
+        if (completion.usage !== undefined) {
+          context.usage = addUsage(context.usage, completion.usage);
+        }
 
         // Section 8: the assistant turn belongs in the history. Without it the
         // following tool results answer calls the model never made, which is an
@@ -1183,6 +1202,7 @@ export class RuntimeCoordinator {
         attemptNo: number;
         toolCalls: readonly ProviderToolCall[];
         text: string | null;
+        usage?: TokenUsage;
       }>
     | Readonly<{ kind: "terminal"; result: CoordinatorResult }>
     | Readonly<{ kind: "waiting"; result: CoordinatorResult }>
@@ -2488,6 +2508,7 @@ export class RuntimeCoordinator {
       events: [...context.events],
       text,
       safeCode,
+      ...(context.usage === undefined ? {} : { usage: context.usage }),
     } as CoordinatorResult;
     this.#lastResult = result;
     return result;

@@ -1,4 +1,5 @@
 import { protocolEndpoint, type ReasoningEffort } from "../../domain/config/provider-config.ts";
+import { parseOpenAiChatUsage } from "../../domain/model-request/token-usage.ts";
 import type {
   ModelProvider,
   ProviderCompletion,
@@ -308,5 +309,11 @@ export function interpretChatResponse(bodyText: string): ProviderCompletion {
     return { kind: "invalid_response", safeCode: "openai_chat_content_invalid" };
   }
 
-  return { kind: "completed", toolCalls, text };
+  const usage = parseOpenAiChatUsage(record);
+  return {
+    kind: "completed",
+    toolCalls,
+    text,
+    ...(usage === undefined ? {} : { usage }),
+  };
 }

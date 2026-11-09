@@ -42,6 +42,10 @@ function object(required: Record<string, Check>, optional: Record<string, Check>
 }
 
 const call = object({ providerToolCallId: id, toolName: id, arguments: anyJson });
+const tokenUsage = object(
+  { inputTokens: integer, outputTokens: integer },
+  { cachedInputTokens: integer, reasoningTokens: integer },
+);
 const questionLink = { questionId: id, toolCallId: id };
 const toolLink = { toolCallId: id, toolName: id };
 const toolEvidenceShape = object({
@@ -383,7 +387,7 @@ const payloadChecks = {
       toolCallCount: integer,
       text: nullable(text),
     },
-    { toolCalls: array(call) },
+    { toolCalls: array(call), usage: tokenUsage },
   ),
   tool_call_received: object({
     kind: text,

@@ -1,4 +1,5 @@
 import { protocolEndpoint, type ReasoningEffort } from "../../domain/config/provider-config.ts";
+import { parseOpenAiResponsesUsage } from "../../domain/model-request/token-usage.ts";
 import type {
   ModelProvider,
   ProviderCompletion,
@@ -313,9 +314,11 @@ export function interpretResponsesResponse(bodyText: string): ProviderCompletion
     return { kind: "invalid_response", safeCode: "openai_responses_item_unknown" };
   }
 
+  const usage = parseOpenAiResponsesUsage(record);
   return {
     kind: "completed",
     toolCalls,
     text: textParts.length === 0 ? null : textParts.join(""),
+    ...(usage === undefined ? {} : { usage }),
   };
 }

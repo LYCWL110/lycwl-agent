@@ -129,6 +129,16 @@ export type InternalEventPayload =
         toolName: string;
         arguments: unknown;
       }>[];
+      /**
+       * Token counts the provider reported for this request, when it reported any.
+       * Absent means unknown, which is not the same as zero.
+       */
+      usage?: Readonly<{
+        inputTokens: number;
+        outputTokens: number;
+        cachedInputTokens?: number;
+        reasoningTokens?: number;
+      }>;
     }>
   | Readonly<{
       kind: "tool_call_received";
