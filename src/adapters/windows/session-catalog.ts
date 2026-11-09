@@ -3,7 +3,9 @@ import path from "node:path";
 import { isSessionId } from "../../domain/identity/session-id.ts";
 import {
   assertSessionId,
+  compareSessionsNewestFirst,
   firstInputFromHead,
+  lastActivityFromTail,
   readSidecarTitle,
   SESSION_TITLE_LIMITS,
   type SessionCatalogFailure,
@@ -78,16 +80,8 @@ export function createSessionCatalog(options: SessionCatalogOptions): SessionCat
       if (summary !== null) sessions.push(summary);
     }
 
-    // Newest first: the session a user wants is almost always the last one touched.
-    sessions.sort((left, right) =>
-      left.modifiedAtUtc === right.modifiedAtUtc
-        ? left.sessionId < right.sessionId
-          ? 1
-          : -1
-        : left.modifiedAtUtc < right.modifiedAtUtc
-          ? 1
-          : -1,
-    );
+    // Newest first, by recorded activity rather than by file timestamp.
+    sessions.sort(compareSessionsNewestFirst);
     return { ok: true, sessions };
   }
 
@@ -106,12 +100,15 @@ export function createSessionCatalog(options: SessionCatalogOptions): SessionCat
 
     const title = await readTitle(directory);
     const firstInput = await readFirstInput(eventsPath);
+    const activity = await readLastActivity(eventsPath, info.size);
     return {
       sessionId,
       title,
       firstInput,
       bytes: info.size,
-      modifiedAtUtc: info.mtime.toISOString(),
+      // The mtime is a fallback, not the source: a copied data directory rewrites
+      // it and every session would then claim to have been used at copy time.
+      modifiedAtUtc: activity ?? info.mtime.toISOString(),
     };
   }
 
@@ -122,6 +119,37 @@ export function createSessionCatalog(options: SessionCatalogOptions): SessionCat
       return readSidecarTitle(await readFile(path.join(directory, SIDECAR_FILENAME), "utf8"));
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Read the tail of the log to find the newest recorded timestamp.
+   *
+   * Only the tail is read, for the same reason only the head is read: a long
+   * session's log can be many megabytes. The window grows once if the first
+   * attempt finds no complete record, which happens when a single event is larger
+   * than the window.
+   */
+  async function readLastActivity(eventsPath: string, size: number): Promise<string | null> {
+    let handle: Awaited<ReturnType<typeof open>> | null = null;
+    try {
+      handle = await open(eventsPath, "r");
+      for (const window of [
+        SESSION_TITLE_LIMITS.maxTailBytes,
+        SESSION_TITLE_LIMITS.maxTailBytes * 8,
+      ]) {
+        const length = Math.min(window, size);
+        if (length === 0) return null;
+        const buffer = Buffer.alloc(length);
+        const { bytesRead } = await handle.read(buffer, 0, length, size - length);
+        const activity = lastActivityFromTail(buffer.subarray(0, bytesRead).toString("utf8"));
+        if (activity !== null) return activity;
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      await handle?.close();
     }
   }
 

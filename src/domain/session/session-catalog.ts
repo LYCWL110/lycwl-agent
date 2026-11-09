@@ -20,6 +20,8 @@ export const SESSION_TITLE_LIMITS = Object.freeze({
   maxSidecarBytes: 4_096,
   /** Only the head of the log is read to find the first task. */
   maxHeadBytes: 65_536,
+  /** Only the tail is read to find the newest event time. */
+  maxTailBytes: 32_768,
 });
 
 export type SessionSummary = Readonly<{
@@ -30,7 +32,10 @@ export type SessionSummary = Readonly<{
   firstInput: string | null;
   /** Size of `events.jsonl` in bytes. */
   bytes: number;
-  /** Last write to `events.jsonl`. */
+  /**
+   * Last activity: the `timestampUtc` of the newest event, falling back to the file
+   * mtime only when the log has no readable timestamp.
+   */
   modifiedAtUtc: string;
 }>;
 
@@ -142,4 +147,55 @@ export function firstInputFromHead(head: string): string | null {
 /** Reject anything that is not a single safe path segment before touching disk. */
 export function assertSessionId(value: string): void {
   if (!isSessionId(value)) throw new Error("invalid_session_id");
+}
+
+/**
+ * The last activity time from the tail of a log.
+ *
+ * `timestampUtc` on the newest event is the authoritative activity time. A file
+ * mtime is not: copying, backing up or restoring a data directory rewrites it, and
+ * then every session claims to have been used at the moment of the copy. The event
+ * time is what actually happened.
+ *
+ * The tail is scanned backwards and the newest parseable `timestampUtc` wins. A
+ * truncated final line is skipped rather than reported as corruption, because an
+ * append interrupted by a crash is exactly what the log is designed to survive.
+ */
+export function lastActivityFromTail(tail: string): string | null {
+  const lines = tail.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const trimmed = lines[index]?.trim() ?? "";
+    if (trimmed.length === 0) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (typeof parsed !== "object" || parsed === null) continue;
+    const timestamp = (parsed as Record<string, unknown>)["timestampUtc"];
+    if (typeof timestamp !== "string") continue;
+    if (!Number.isFinite(Date.parse(timestamp))) continue;
+    return timestamp;
+  }
+  return null;
+}
+
+/**
+ * Order sessions newest first.
+ *
+ * A session with no readable timestamp sorts last rather than first: an unknown
+ * time must not displace a session known to be recent. The id breaks ties so the
+ * order is deterministic, which matters because the panel's selection index is
+ * positional.
+ */
+export function compareSessionsNewestFirst(left: SessionSummary, right: SessionSummary): number {
+  const leftTime = Date.parse(left.modifiedAtUtc);
+  const rightTime = Date.parse(right.modifiedAtUtc);
+  const leftKnown = Number.isFinite(leftTime);
+  const rightKnown = Number.isFinite(rightTime);
+  if (leftKnown !== rightKnown) return leftKnown ? -1 : 1;
+  if (leftKnown && rightKnown && leftTime !== rightTime) return rightTime - leftTime;
+  if (left.sessionId === right.sessionId) return 0;
+  return left.sessionId < right.sessionId ? 1 : -1;
 }

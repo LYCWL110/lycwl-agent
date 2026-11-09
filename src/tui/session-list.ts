@@ -237,12 +237,34 @@ function renderBody(
   return lines;
 }
 
-/** Show a local date and time; the stored value is UTC. */
-function formatWhen(iso: string): string {
+/**
+ * Show a local date and time, with a relative hint for recent activity.
+ *
+ * The relative form is what makes the sort order legible at a glance: a list
+ * ordered by time is hard to read when every row shows an absolute timestamp.
+ */
+function formatWhen(iso: string, nowMs = Date.now()): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
   const pad = (value: number) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const absolute = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const relative = formatRelative(date.getTime(), nowMs);
+  return relative === null ? absolute : `${absolute}  (${relative})`;
+}
+
+/** Coarse age: enough to read the order, not a precise interval. */
+function formatRelative(thenMs: number, nowMs: number): string | null {
+  const elapsed = nowMs - thenMs;
+  // A future timestamp means a clock change, not a prediction; show no age claim.
+  if (elapsed < 0) return null;
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return null;
 }
 
 function formatBytes(bytes: number): string {
