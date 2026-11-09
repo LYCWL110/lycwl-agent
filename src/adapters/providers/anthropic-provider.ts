@@ -186,7 +186,22 @@ function toAnthropicMessages(
 
   for (const item of conversation) {
     if (item.kind === "user") {
-      messages.push({ role: "user", content: item.text });
+      // Anthropic takes images as content blocks, and the image must precede the
+      // text it refers to for the model to read it as "look at this, then answer".
+      if (item.images === undefined || item.images.length === 0) {
+        messages.push({ role: "user", content: item.text });
+        continue;
+      }
+      messages.push({
+        role: "user",
+        content: [
+          ...item.images.map((image) => ({
+            type: "image",
+            source: { type: "base64", media_type: image.mediaType, data: image.base64 },
+          })),
+          { type: "text", text: item.text },
+        ],
+      });
       continue;
     }
     if (item.kind === "assistant") {

@@ -173,7 +173,15 @@ function toResponsesInput(
       items.push({
         type: "message",
         role: "user",
-        content: [{ type: "input_text", text: item.text }],
+        content: [
+          // Responses uses input_image with a data URL, in the same content array as
+          // the text.
+          ...(item.images ?? []).map((image) => ({
+            type: "input_image",
+            image_url: `data:${image.mediaType};base64,${image.base64}`,
+          })),
+          { type: "input_text", text: item.text },
+        ],
       });
       continue;
     }

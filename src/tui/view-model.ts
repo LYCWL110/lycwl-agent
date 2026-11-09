@@ -82,6 +82,14 @@ export type TuiViewState = Readonly<{
   pendingApprovalPreview: readonly string[] | null;
   /** Why the last question answer was rejected; null when there is no error. */
   answerError: string | null;
+  /** Context window occupancy, or null when nothing is known yet. */
+  meter: Readonly<{
+    used: number;
+    window: number | null;
+    fraction: number | null;
+    source: "measured" | "estimated";
+    atCompaction: boolean;
+  }> | null;
   /**
    * Token usage for the last finished Run. Absent when the provider reported none,
    * which is shown as unknown rather than as zero.
@@ -116,6 +124,7 @@ export const EMPTY_VIEW: TuiViewState = {
   draft: "",
   canSubmit: true,
   queueingInput: false,
+  meter: null,
 };
 
 export type ViewInput = Readonly<{
@@ -149,6 +158,7 @@ export function deriveView(input: ViewInput): TuiViewState {
     pendingDisclosure: input.pendingDisclosure ?? null,
     pendingApprovalPreview: deriveApprovalPreview(input),
     answerError: input.answerError ?? null,
+    meter: null,
     pendingQuestion: input.pendingQuestion,
     draft: input.draft,
     canSubmit: runStatus !== "active" && waitingKind === null,
@@ -457,6 +467,8 @@ export type ComposerIntent =
       text: string;
       /** Present when the composer asked to load a skill for this Run. */
       skillId?: string;
+      /** Image paths to attach to the task, read and validated by the caller. */
+      images?: readonly string[];
     }>
   | Readonly<{ kind: "queue_input"; text: string }>
   | Readonly<{ kind: "withdraw"; inputId: string }>
@@ -466,6 +478,7 @@ export type ComposerIntent =
   | Readonly<{ kind: "project_init" }>
   | Readonly<{ kind: "open_model" }>
   | Readonly<{ kind: "open_panel"; panel: "help" | "session" | "skills" | "mcp" | "sessions" }>
+  | Readonly<{ kind: "undo_changes" }>
   | Readonly<{ kind: "rename_session"; sessionId: string; title: string | null }>
   | Readonly<{ kind: "delete_session"; sessionId: string }>
   | Readonly<{ kind: "switch_session"; sessionId: string | null }>
@@ -488,6 +501,8 @@ export const COMPOSER_COMMANDS = [
   { name: "/skill", description: "Run with a workspace skill loaded", idleOnly: true },
   { name: "/skills", description: "List the workspace skill catalog", idleOnly: false },
   { name: "/mcp", description: "Declare MCP servers", idleOnly: true },
+  { name: "/undo", description: "Revert the files this session changed", idleOnly: true },
+  { name: "/image", description: "Attach an image to the next task", idleOnly: true },
   { name: "/help", description: "Show commands", idleOnly: false },
   { name: "/cancel", description: "Cancel the current run", idleOnly: false },
   { name: "/key", description: "Correct the waiting connection key", idleOnly: false },
@@ -520,7 +535,7 @@ export function interpretComposer(
     if (!commandEnabled(view, command)) {
       return { kind: "reject", reason: "run_active" };
     }
-    if (args.length > 0 && name !== "/session" && name !== "/skill")
+    if (args.length > 0 && name !== "/session" && name !== "/skill" && name !== "/image")
       return { kind: "reject", reason: "invalid_command" };
     switch (name) {
       case "/config":
@@ -546,6 +561,17 @@ export function interpretComposer(
         return { kind: "open_panel", panel: "skills" };
       case "/mcp":
         return { kind: "open_panel", panel: "mcp" };
+      case "/undo":
+        return { kind: "undo_changes" };
+      case "/image": {
+        // The path becomes part of the task text so the caller can resolve and read
+        // it at the same boundary as any other input.
+        const path = args[0] ?? "";
+        if (args.length !== 1 || path.length === 0) {
+          return { kind: "reject", reason: "invalid_command" };
+        }
+        return { kind: "start_run", text: `/image ${path}`, images: [path] };
+      }
       case "/skill": {
         // The id becomes part of the task text so the coordinator can resolve and
         // inject the body at the same safe boundary as any other input.

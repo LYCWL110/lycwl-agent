@@ -47,10 +47,12 @@ import type { IdentifierFactory } from "../../ports/identity.ts";
 import type {
   ModelProvider,
   ProviderConversationItem,
+  ProviderImage,
   ProviderToolCall,
   TokenUsage,
 } from "../../ports/model-provider.ts";
 import type { SensitiveSource } from "../../ports/sensitive-context.ts";
+import type { SnapshotStore } from "../../ports/snapshot-store.ts";
 import type { SpillStore } from "../../ports/spill-store.ts";
 import type { ToolExecutionRequest, ToolExecutor } from "../../ports/tool-executor.ts";
 import {
@@ -142,6 +144,10 @@ export type CoordinatorDependencies = Readonly<{
    * pre-existing behaviour.
    */
   spillStore?: SpillStore;
+  /**
+   * Pre-change file snapshots, so a Run can be reverted. Absent disables undo.
+   */
+  snapshotStore?: SnapshotStore;
   /**
    * Sourced, untrusted material placed before the user's task, such as project
    * guidance. It is a separate user turn, never merged into the system prompt: a
@@ -795,7 +801,10 @@ export class RuntimeCoordinator {
    * as a user message before the task. The body is untrusted project material with
    * a provenance header; it grants no approval and changes no policy.
    */
-  run(input: string, options: Readonly<{ skillId?: string }> = {}): Promise<CoordinatorResult> {
+  run(
+    input: string,
+    options: Readonly<{ skillId?: string; images?: readonly ProviderImage[] }> = {},
+  ): Promise<CoordinatorResult> {
     if (this.#closing !== null) return Promise.reject(new Error("session_closed"));
     if (this.#persistenceFailed) return Promise.reject(new Error("session_persistence_failed"));
     if (this.#pendingRun !== null || this.#activeContext !== null)
@@ -811,7 +820,7 @@ export class RuntimeCoordinator {
 
   async #startRun(
     input: string,
-    options: Readonly<{ skillId?: string }>,
+    options: Readonly<{ skillId?: string; images?: readonly ProviderImage[] }>,
   ): Promise<CoordinatorResult> {
     const projectContext = this.#deps.projectContext;
 
@@ -850,7 +859,11 @@ export class RuntimeCoordinator {
         ...(projectContext === undefined ? [] : [{ kind: "user" as const, text: projectContext }]),
         ...this.#conversation,
         ...(skillBlock === null ? [] : [{ kind: "user" as const, text: skillBlock }]),
-        { kind: "user", text: input },
+        // Images ride on the task turn, not on a separate one: the model must read
+        // them as part of the request, and a separate turn would be a second task.
+        options.images === undefined || options.images.length === 0
+          ? { kind: "user", text: input }
+          : { kind: "user", text: input, images: options.images },
       ],
       inputQueue: emptyRunInputQueue(),
       nextAcceptedSeq: 1,
@@ -1896,6 +1909,11 @@ export class RuntimeCoordinator {
       });
     }
 
+    // Capture the pre-change content of any file this call will touch, so the Run
+    // can be reverted. This happens before dispatch: after the write there is
+    // nothing left to capture.
+    await this.#captureSnapshots(context, call);
+
     context.cancelledDuring = "tool_execution";
     const outcome = await executeToolCall(
       {
@@ -2247,6 +2265,33 @@ export class RuntimeCoordinator {
       status,
       text: preview ?? delivery.text,
     });
+  }
+
+  /**
+   * Snapshot the files a mutating call will touch.
+   *
+   * Only filesystem mutations are captured: a read, a shell command or an MCP call
+   * has no target this Harness can enumerate. A shell command can still modify files,
+   * and that is a real limitation rather than an oversight: the Harness cannot know
+   * which paths a command writes, so it cannot snapshot them.
+   */
+  async #captureSnapshots(context: MutableRunContext, call: ProviderToolCall): Promise<void> {
+    const store = this.#deps.snapshotStore;
+    if (store === undefined) return;
+    const definition = this.#deps.tools.getDefinition(call.toolName);
+    if (definition?.sideEffectClass !== "filesystem_mutation") return;
+
+    for (const relativePath of snapshotTargets(call.arguments)) {
+      const captured = await store.capture({ runId: context.runId, relativePath });
+      if (!captured.ok) {
+        await this.#record(context, "snapshot_unavailable", {
+          kind: "snapshot_unavailable",
+          toolCallId: call.providerToolCallId,
+          path: relativePath,
+          reason: captured.code,
+        });
+      }
+    }
   }
 
   /**
@@ -2697,4 +2742,51 @@ function hashText(text: string): string {
     hash = Math.imul(hash, 16_777_619);
   }
   return (hash >>> 0).toString(16).padStart(8, "0").repeat(8).slice(0, 64);
+}
+
+/**
+ * Workspace-relative paths a mutating call will write.
+ *
+ * Each mutation tool names its targets differently; this reads the shapes the
+ * catalog defines rather than guessing. A tool with an unrecognized argument shape
+ * yields no targets, which means no snapshot and therefore no undo for that call -
+ * reported through the absence of an entry, not silently claimed as safe.
+ */
+function snapshotTargets(args: unknown): readonly string[] {
+  if (typeof args !== "object" || args === null) return [];
+  const record = args as Record<string, unknown>;
+
+  // create_file, edit_file, delete_path, rename_path: a single path.
+  const single = record["path"];
+  if (typeof single === "string" && single.length > 0) return [single];
+
+  // apply_patch: one or more patch sections, each naming a file.
+  const patch = record["patch"];
+  if (typeof patch === "string") return patchTargets(patch);
+
+  // Batch mutations: a list of targets.
+  const targets = record["targets"];
+  if (Array.isArray(targets)) {
+    return targets.flatMap((entry) => {
+      if (typeof entry === "string") return [entry];
+      if (typeof entry === "object" && entry !== null) {
+        const from = (entry as Record<string, unknown>)["from"];
+        const to = (entry as Record<string, unknown>)["to"];
+        return [from, to].filter((value): value is string => typeof value === "string");
+      }
+      return [];
+    });
+  }
+  return [];
+}
+
+/** File paths named by the patch markers the apply_patch tool accepts. */
+function patchTargets(patch: string): readonly string[] {
+  const found: string[] = [];
+  for (const line of patch.split("\n")) {
+    const match = /^\*\*\* (?:Update|Add|Delete) File: (.+)$/u.exec(line.trim());
+    const target = match?.[1]?.trim();
+    if (target !== undefined && target.length > 0) found.push(target);
+  }
+  return found;
 }

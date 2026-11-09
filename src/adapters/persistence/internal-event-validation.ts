@@ -271,6 +271,12 @@ const payloadChecks = {
     ref: attachmentRef,
     reason: oneOf("attachment_missing", "hash_mismatch", "content_not_stored"),
   }),
+  snapshot_unavailable: object({
+    kind: text,
+    toolCallId: id,
+    path: text,
+    reason: oneOf("too_large", "limit_exceeded", "capture_failed"),
+  }),
   tool_output_spilled: object({
     kind: text,
     toolCallId: id,

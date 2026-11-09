@@ -24,6 +24,13 @@ export type InternalEventPayload =
       reason: "attachment_missing" | "hash_mismatch" | "content_not_stored";
     }>
   | Readonly<{
+      kind: "snapshot_unavailable";
+      /** Provider tool call id of the mutation whose target could not be captured. */
+      toolCallId: string;
+      path: string;
+      reason: "too_large" | "limit_exceeded" | "capture_failed";
+    }>
+  | Readonly<{
       kind: "tool_output_spilled";
       /** Identifier of the stored copy, used as its file name. */
       toolCallId: string;

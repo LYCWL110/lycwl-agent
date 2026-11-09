@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
+import { createSnapshotStore } from "../adapters/persistence/snapshot-store.ts";
 import { fetchModelDetails, fetchModelList } from "../adapters/providers/model-list.ts";
 import { createConfigStore, defaultConfigDirectory } from "../adapters/windows/config-store.ts";
 import { createFileVault } from "../adapters/windows/file-credential-vault.ts";
+import { createImageLoader } from "../adapters/windows/image-loader.ts";
 import { createSessionCatalog } from "../adapters/windows/session-catalog.ts";
 import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
 import { readMcpServerEntries } from "../domain/config/mcp-edit.ts";
@@ -17,6 +19,7 @@ import { saveMcpChange } from "./mcp-save.ts";
 import { describeSelection, selectRuntime } from "./runtime-selection.ts";
 import { canResumeSession, selectSessionLaunch } from "./session-launch.ts";
 import { createTerminalApproval } from "./terminal-approval.ts";
+import { undoSessionChanges } from "./undo.ts";
 
 /**
  * `lycwl` entry point.
@@ -216,6 +219,9 @@ async function startSession(): Promise<void> {
         : {}),
       coordinator: chosen.coordinator,
       sessionId,
+      ...(chosen.kind === "real" && chosen.config.contextWindow !== null
+        ? { contextWindow: chosen.config.contextWindow }
+        : {}),
       ...(chosen.kind === "real" ? { initialEvents: chosen.historyEvents } : {}),
       canResumeSession: (id) => canResumeSession(dataDirectory, id),
       ...(chosen.kind !== "real"
@@ -231,6 +237,36 @@ async function startSession(): Promise<void> {
               return written.ok;
             },
           }),
+      loadImages: async (paths) => {
+        const loaded = await createImageLoader({ workspaceRoot: process.cwd() }).load(paths);
+        return loaded.ok
+          ? { ok: true as const, images: loaded.images }
+          : { ok: false as const, code: loaded.code };
+      },
+      undoChanges: async () => {
+        const snapshots = createSnapshotStore({
+          sessionDirectory: path.join(dataDirectory, "sessions", "sessions", sessionId),
+          workspaceRoot: process.cwd(),
+        });
+        // Runs that changed files, newest first: undo walks back from the most
+        // recent so a revert restores the state before this Session began.
+        const runIds = [
+          ...new Set(
+            (chosen.kind === "real" ? chosen.historyEvents : [])
+              .filter((event) => event.payload.kind === "run_started")
+              .map((event) => event.runId),
+          ),
+        ].reverse();
+        if (runIds.length === 0) return { ok: false as const, code: "no_snapshots" };
+        const undone = await undoSessionChanges({
+          store: snapshots,
+          workspaceRoot: process.cwd(),
+          runIds,
+        });
+        return undone.ok
+          ? { ok: true as const, files: undone.files }
+          : { ok: false as const, code: undone.code };
+      },
       sessionCatalog: {
         list: async () => {
           const listed = await createSessionCatalog({ dataDirectory }).list();

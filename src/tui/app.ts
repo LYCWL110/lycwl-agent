@@ -644,6 +644,21 @@ function Footer(props: {
 }
 
 /**
+ * Context occupancy.
+ *
+ * Shown before the token total because it is the figure that changes during a Run:
+ * the total only exists once the Run ends. A window that is unknown shows the raw
+ * count instead of a percentage, because a percentage without a denominator would
+ * be invented.
+ */
+function meterSegment(meter: TuiViewState["meter"]): string | null {
+  if (meter === null || meter.used === 0) return null;
+  if (meter.window === null || meter.fraction === null) return `ctx ${compact(meter.used)}`;
+  const percent = Math.floor(meter.fraction * 100);
+  return `ctx ${percent}%${meter.atCompaction ? " !" : ""}`;
+}
+
+/**
  * Token counts for the last finished Run.
  *
  * Absent means the provider reported nothing, which is shown as nothing rather

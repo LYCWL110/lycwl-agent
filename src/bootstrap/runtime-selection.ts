@@ -1,5 +1,6 @@
 import path from "node:path";
 import { createFileEvidenceStore } from "../adapters/persistence/file-evidence-store.ts";
+import { createSnapshotStore } from "../adapters/persistence/snapshot-store.ts";
 import { createSpillStore } from "../adapters/persistence/spill-store.ts";
 import { createMcpTools, mcpToolDefinitions } from "../adapters/tools/mcp-tools.ts";
 import {
@@ -452,6 +453,10 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
             : {}),
         suspendOnApproval: true,
         spillStore: createSpillStore({
+          sessionDirectory: path.join(sessionRoot, "sessions", sessionId),
+          workspaceRoot: options.workspaceRoot,
+        }),
+        snapshotStore: createSnapshotStore({
           sessionDirectory: path.join(sessionRoot, "sessions", sessionId),
           workspaceRoot: options.workspaceRoot,
         }),

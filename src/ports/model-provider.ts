@@ -50,8 +50,22 @@ export type TokenUsage = Readonly<{
  * separately bound private block, because it is only valid for the routing that
  * produced it.
  */
+/**
+ * An image attached to a user turn.
+ *
+ * Base64 is the only representation the three protocols share. A path would have to
+ * be resolved per protocol, and a URL would let the provider fetch content the user
+ * never approved, so the bytes travel inline.
+ */
+export type ProviderImage = Readonly<{
+  /** IANA media type, for example `image/png`. */
+  mediaType: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+  /** Base64 of the raw bytes, without a data-URL prefix. */
+  base64: string;
+}>;
+
 export type ProviderConversationItem =
-  | Readonly<{ kind: "user"; text: string }>
+  | Readonly<{ kind: "user"; text: string; images?: readonly ProviderImage[] }>
   | Readonly<{
       kind: "assistant";
       text: string | null;

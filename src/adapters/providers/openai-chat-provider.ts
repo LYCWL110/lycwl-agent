@@ -176,7 +176,22 @@ function toChatMessages(
 
   for (const item of conversation) {
     if (item.kind === "user") {
-      messages.push({ role: "user", content: item.text });
+      // Chat Completions takes images as content parts. The data URL carries the
+      // media type because this protocol has no separate field for it.
+      if (item.images === undefined || item.images.length === 0) {
+        messages.push({ role: "user", content: item.text });
+        continue;
+      }
+      messages.push({
+        role: "user",
+        content: [
+          ...item.images.map((image) => ({
+            type: "image_url",
+            image_url: { url: `data:${image.mediaType};base64,${image.base64}` },
+          })),
+          { type: "text", text: item.text },
+        ],
+      });
       continue;
     }
     if (item.kind === "assistant") {

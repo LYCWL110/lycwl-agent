@@ -3,9 +3,11 @@ import type {
   QueueInputOutcome,
   RuntimeCoordinator,
 } from "../application/coordinator/runtime-coordinator.ts";
+import { readContextMeter } from "../domain/context/context-meter.ts";
 import type { TodoList } from "../domain/planning/todo.ts";
 import { emptyTodoList, replaceTodoList } from "../domain/planning/todo.ts";
 import type { InternalEvent } from "../ports/event-log.ts";
+import type { ProviderImage } from "../ports/model-provider.ts";
 import { resolveAnswer } from "./answer-input.ts";
 import type { McpPanelEntry } from "./mcp-panel.ts";
 import type { SessionListEntry } from "./session-list.ts";
@@ -25,6 +27,8 @@ export type TuiSessionDeps = Readonly<{
   coordinator: RuntimeCoordinator;
   /** This process's session id, used to mark the current row. */
   sessionId?: string;
+  /** Verified model context window, for the occupancy display. */
+  contextWindow?: number;
   initialEvents?: readonly InternalEvent[];
   canResumeSession?: (sessionId: string) => Promise<boolean>;
   /** Trusted composition corrects only the current fixed-route key reference. */
@@ -52,6 +56,27 @@ export type TuiSessionDeps = Readonly<{
   }) => Promise<
     | Readonly<{ ok: true; servers: readonly McpPanelEntry[] }>
     | Readonly<{ ok: false; code: string }>
+  >;
+  /**
+   * Revert the files this Session changed.
+   *
+   * The caller owns the disk work: the controller has no file system access and
+   * must not acquire one, because undo writes files and that path needs the same
+   * workspace boundary checks as any other mutation.
+   */
+  /**
+   * Read image files for `/image`. Absent means the command is refused, because a
+   * Run must not claim to have attached an image it cannot read.
+   */
+  loadImages?: (paths: readonly string[]) => Promise<
+    | Readonly<{
+        ok: true;
+        images: readonly ProviderImage[];
+      }>
+    | Readonly<{ ok: false; code: string }>
+  >;
+  undoChanges?: () => Promise<
+    Readonly<{ ok: true; files: number }> | Readonly<{ ok: false; code: string }>
   >;
   /** Session records on disk, for the list panel. */
   sessionCatalog?: Readonly<{
@@ -106,6 +131,13 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
    * view must not derive one.
    */
   let usage: NonNullable<TuiViewState["usage"]> | null = null;
+  /**
+   * Prompt tokens the provider counted for the newest response.
+   *
+   * This is the authoritative half of the context meter: it describes the prompt
+   * the provider actually received, cache included.
+   */
+  let measuredInputTokens: number | null = null;
   let draft = "";
   let commandCounter = 0;
   let events: readonly InternalEvent[] = deps.initialEvents ?? [];
@@ -129,6 +161,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   let sessionList: readonly SessionListEntry[] | null = null;
   let sessionListError: string | null = null;
   let sessionListBusy = false;
+  let undoBusy = false;
   let commandNotice: string | null = null;
   let checkingSession = false;
   let closing: Promise<void> | null = null;
@@ -144,6 +177,13 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     runStatus = result.status;
     safeCode = result.safeCode;
     usage = result.usage ?? null;
+    for (let index = result.events.length - 1; index >= 0; index -= 1) {
+      const payload = result.events[index]?.payload;
+      if (payload?.kind === "model_response_validated" && payload.usage !== undefined) {
+        measuredInputTokens = payload.usage.inputTokens;
+        break;
+      }
+    }
     rememberEvents(result.events);
     todo = deriveTodo(todo, result.events);
   }
@@ -298,18 +338,20 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
 
   function view(): TuiViewState {
     const live = deps.coordinator.currentRunProjection();
+    const derived = deriveView({
+      runStatus: live?.status ?? runStatus,
+      safeCode,
+      events: live === null ? events : rememberEvents(live.events),
+      todo: todo.items.length === 0 ? null : todo,
+      pendingApproval: deps.coordinator.pendingApprovalView(),
+      pendingDisclosure: deps.coordinator.pendingDisclosureView(),
+      pendingQuestion: deps.coordinator.pendingQuestionView(),
+      answerError,
+      draft,
+    });
     return {
-      ...deriveView({
-        runStatus: live?.status ?? runStatus,
-        safeCode,
-        events: live === null ? events : rememberEvents(live.events),
-        todo: todo.items.length === 0 ? null : todo,
-        pendingApproval: deps.coordinator.pendingApprovalView(),
-        pendingDisclosure: deps.coordinator.pendingDisclosureView(),
-        pendingQuestion: deps.coordinator.pendingQuestionView(),
-        answerError,
-        draft,
-      }),
+      ...derived,
+      meter: meterFor(derived.transcript),
       usage,
       localPanel,
       skillCatalog,
@@ -321,6 +363,44 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       sessionListError,
       sessionListBusy,
       commandNotice,
+    };
+  }
+
+  /**
+   * Context occupancy for the footer.
+   *
+   * The transcript is the projection the user sees, which is not exactly the prompt:
+   * it omits system instructions and tool schemas. Those are counted as fixed
+   * overhead so the percentage is not optimistic. The measured provider count, when
+   * present, is preferred because it is the real prompt size.
+   */
+  function meterFor(
+    transcript: readonly Readonly<{ kind: string; text: string }>[],
+  ): NonNullable<TuiViewState["meter"]> {
+    const items = transcript
+      .filter(
+        (entry) => entry.kind === "user" || entry.kind === "assistant" || entry.kind === "tool",
+      )
+      .map((entry) =>
+        entry.kind === "tool"
+          ? ({ kind: "tool_result", text: entry.text } as const)
+          : entry.kind === "user"
+            ? ({ kind: "user", text: entry.text } as const)
+            : ({ kind: "assistant", text: entry.text, toolCalls: [] } as const),
+      );
+    const meter = readContextMeter({
+      conversation: items,
+      measuredInputTokens,
+      window: deps.contextWindow ?? null,
+      compactionTrigger: null,
+      fixedTokens: 0,
+    });
+    return {
+      used: meter.used,
+      window: meter.window,
+      fraction: meter.fraction,
+      source: meter.source,
+      atCompaction: meter.atCompaction,
     };
   }
 
@@ -429,6 +509,26 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       );
       return;
     }
+    if (intent.kind === "undo_changes") {
+      const undo = deps.undoChanges;
+      if (undo === undefined) {
+        commandNotice = "Undo is unavailable in this build.";
+        return;
+      }
+      undoBusy = true;
+      commandNotice = null;
+      try {
+        const outcome = await undo();
+        commandNotice = outcome.ok
+          ? `reverted ${outcome.files} file(s)`
+          : `undo failed: ${outcome.code}`;
+      } catch {
+        commandNotice = "undo failed";
+      } finally {
+        undoBusy = false;
+      }
+      return;
+    }
     if (intent.kind === "quit") {
       navigation = { kind: "quit" };
       return;
@@ -442,10 +542,31 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     localPanel = null;
     runStatus = "active";
     safeCode = null;
+    // An attached image is read before the Run starts, so a missing or oversized
+    // file is a clean refusal rather than a Run that fails partway.
+    let images: readonly ProviderImage[] | undefined;
+    if (intent.images !== undefined && intent.images.length > 0) {
+      const loader = deps.loadImages;
+      if (loader === undefined) {
+        commandNotice = "Image attachment is unavailable in this build.";
+        return;
+      }
+      const loaded = await loader(intent.images);
+      if (!loaded.ok) {
+        commandNotice = `Image not attached: ${loaded.code}`;
+        draft = text;
+        return;
+      }
+      images = loaded.images;
+    }
+
     const run =
-      intent.skillId === undefined
+      intent.skillId === undefined && images === undefined
         ? deps.coordinator.run(intent.text)
-        : deps.coordinator.run(intent.text, { skillId: intent.skillId });
+        : deps.coordinator.run(intent.text, {
+            ...(intent.skillId === undefined ? {} : { skillId: intent.skillId }),
+            ...(images === undefined ? {} : { images }),
+          });
     activeRun = run;
     const result = await run;
     // Only clear when this is still the active Run: a later Run may have started.
