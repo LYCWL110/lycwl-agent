@@ -6,6 +6,7 @@ import type {
 import { isSessionId } from "../domain/identity/session-id.ts";
 import type { TodoList } from "../domain/planning/todo.ts";
 import type { InternalEvent } from "../ports/event-log.ts";
+import type { ProviderImage } from "../ports/model-provider.ts";
 
 /**
  * TUI view model (V1_DESIGN_SUPPLEMENTS S02). The TUI reads projections and
@@ -467,8 +468,8 @@ export type ComposerIntent =
       text: string;
       /** Present when the composer asked to load a skill for this Run. */
       skillId?: string;
-      /** Image paths to attach to the task, read and validated by the caller. */
-      images?: readonly string[];
+      /** Images to attach to the task turn. */
+      images?: readonly ProviderImage[];
     }>
   | Readonly<{ kind: "queue_input"; text: string }>
   | Readonly<{ kind: "withdraw"; inputId: string }>
@@ -502,7 +503,6 @@ export const COMPOSER_COMMANDS = [
   { name: "/skills", description: "List the workspace skill catalog", idleOnly: false },
   { name: "/mcp", description: "Declare MCP servers", idleOnly: true },
   { name: "/undo", description: "Revert the files this session changed", idleOnly: true },
-  { name: "/image", description: "Attach an image to the next task", idleOnly: true },
   { name: "/help", description: "Show commands", idleOnly: false },
   { name: "/cancel", description: "Cancel the current run", idleOnly: false },
   { name: "/key", description: "Correct the waiting connection key", idleOnly: false },
@@ -526,6 +526,14 @@ export function interpretComposer(
   view: TuiViewState,
   text: string,
   options: Readonly<{ activeRunAcceptsInput: boolean }> = { activeRunAcceptsInput: true },
+  /**
+   * Images pasted alongside the text.
+   *
+   * They ride on the task turn rather than forming a turn of their own: the model
+   * must read them as part of the request. A slash command is text-only, so an
+   * attached image on a command is refused rather than silently dropped.
+   */
+  images?: readonly ProviderImage[],
 ): ComposerIntent {
   const trimmed = text.trim();
   if (trimmed.length === 0) return { kind: "reject", reason: "empty" };
@@ -535,7 +543,7 @@ export function interpretComposer(
     if (!commandEnabled(view, command)) {
       return { kind: "reject", reason: "run_active" };
     }
-    if (args.length > 0 && name !== "/session" && name !== "/skill" && name !== "/image")
+    if (args.length > 0 && name !== "/session" && name !== "/skill")
       return { kind: "reject", reason: "invalid_command" };
     switch (name) {
       case "/config":
@@ -563,15 +571,6 @@ export function interpretComposer(
         return { kind: "open_panel", panel: "mcp" };
       case "/undo":
         return { kind: "undo_changes" };
-      case "/image": {
-        // The path becomes part of the task text so the caller can resolve and read
-        // it at the same boundary as any other input.
-        const path = args[0] ?? "";
-        if (args.length !== 1 || path.length === 0) {
-          return { kind: "reject", reason: "invalid_command" };
-        }
-        return { kind: "start_run", text: `/image ${path}`, images: [path] };
-      }
       case "/skill": {
         // The id becomes part of the task text so the coordinator can resolve and
         // inject the body at the same safe boundary as any other input.
@@ -599,7 +598,9 @@ export function interpretComposer(
     return { kind: "queue_input", text: trimmed };
   }
   if (view.runStatus === "waiting") return { kind: "reject", reason: "run_active" };
-  return { kind: "start_run", text: trimmed };
+  return images === undefined || images.length === 0
+    ? { kind: "start_run", text: trimmed }
+    : { kind: "start_run", text: trimmed, images };
 }
 
 /**

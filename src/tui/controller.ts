@@ -64,17 +64,6 @@ export type TuiSessionDeps = Readonly<{
    * must not acquire one, because undo writes files and that path needs the same
    * workspace boundary checks as any other mutation.
    */
-  /**
-   * Read image files for `/image`. Absent means the command is refused, because a
-   * Run must not claim to have attached an image it cannot read.
-   */
-  loadImages?: (paths: readonly string[]) => Promise<
-    | Readonly<{
-        ok: true;
-        images: readonly ProviderImage[];
-      }>
-    | Readonly<{ ok: false; code: string }>
-  >;
   undoChanges?: () => Promise<
     Readonly<{ ok: true; files: number }> | Readonly<{ ok: false; code: string }>
   >;
@@ -102,7 +91,7 @@ export type TuiNavigationRequest =
 
 export type TuiController = Readonly<{
   view: () => TuiViewState;
-  submit: (text: string) => Promise<boolean | undefined>;
+  submit: (text: string, images?: readonly ProviderImage[]) => Promise<boolean | undefined>;
   approve: () => Promise<void>;
   deny: () => Promise<void>;
   answer: (text: string) => Promise<void>;
@@ -404,9 +393,12 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     };
   }
 
-  async function submit(text: string): Promise<boolean | undefined> {
+  async function submit(
+    text: string,
+    images?: readonly ProviderImage[],
+  ): Promise<boolean | undefined> {
     if (closing !== null || navigation !== null || checkingSession) return;
-    const intent = interpretComposer(view(), text);
+    const intent = interpretComposer(view(), text, undefined, images);
     draft = "";
     commandNotice = null;
     if (intent.kind === "reject") {
@@ -542,30 +534,14 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     localPanel = null;
     runStatus = "active";
     safeCode = null;
-    // An attached image is read before the Run starts, so a missing or oversized
-    // file is a clean refusal rather than a Run that fails partway.
-    let images: readonly ProviderImage[] | undefined;
-    if (intent.images !== undefined && intent.images.length > 0) {
-      const loader = deps.loadImages;
-      if (loader === undefined) {
-        commandNotice = "Image attachment is unavailable in this build.";
-        return;
-      }
-      const loaded = await loader(intent.images);
-      if (!loaded.ok) {
-        commandNotice = `Image not attached: ${loaded.code}`;
-        draft = text;
-        return;
-      }
-      images = loaded.images;
-    }
-
+    // Pasted images already carry their bytes, so there is nothing to read here.
+    const attached = intent.images;
     const run =
-      intent.skillId === undefined && images === undefined
+      intent.skillId === undefined && attached === undefined
         ? deps.coordinator.run(intent.text)
         : deps.coordinator.run(intent.text, {
             ...(intent.skillId === undefined ? {} : { skillId: intent.skillId }),
-            ...(images === undefined ? {} : { images }),
+            ...(attached === undefined ? {} : { images: attached }),
           });
     activeRun = run;
     const result = await run;

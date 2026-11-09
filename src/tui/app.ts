@@ -1,5 +1,6 @@
 import { Box, Text, useInput, usePaste } from "ink";
 import { createElement, type ReactElement, useState } from "react";
+import type { ProviderImage } from "../ports/model-provider.ts";
 import { ActivityIndicator } from "./activity-indicator.ts";
 import { Brand, clipText, colorProps, useViewport, type Viewport, wrapText } from "./chrome.ts";
 import { CommandMenu } from "./command-menu.ts";
@@ -32,7 +33,22 @@ const h = createElement;
 export type AppProps = Readonly<{
   view: TuiViewState;
   // biome-ignore lint/suspicious/noConfusingVoidType: Existing submit callbacks may acknowledge without a return value.
-  onSubmit: (text: string) => void | boolean | Promise<undefined | boolean>;
+  onSubmit: (
+    text: string,
+    images?: readonly ProviderImage[],
+  ) => void | boolean | Promise<undefined | boolean>;
+  /**
+   * Read an image from the system clipboard.
+   *
+   * Absent means Ctrl+V only pastes text, which is what a platform without a
+   * clipboard reader gets.
+   */
+  onPasteImage?: () => Promise<
+    | Readonly<{ kind: "image"; image: ProviderImage }>
+    | Readonly<{ kind: "empty" }>
+    | Readonly<{ kind: "too_large" }>
+    | Readonly<{ kind: "unavailable" }>
+  >;
   onApprove: () => void;
   onDeny: () => void;
   onAnswer: (text: string) => void;
@@ -63,6 +79,15 @@ export type AppProps = Readonly<{
 export function App(props: AppProps): ReactElement {
   const { view } = props;
   const [editor, setEditor] = useState<TextEdit>({ value: "", cursor: 0 });
+  /**
+   * Images pasted with Ctrl+V and not yet sent.
+   *
+   * A terminal paste carries text only, so the image is read from the system
+   * clipboard when the user presses the key. It is held here until the next submit
+   * and then cleared, which matches how a text draft behaves.
+   */
+  const [pastedImages, setPastedImages] = useState<readonly ProviderImage[]>([]);
+  const [imageNotice, setImageNotice] = useState<string | null>(null);
   const draft = editor.value;
   const [scroll, setScroll] = useState<number | null>(null);
   const [commandIndex, setCommandIndex] = useState(0);
@@ -116,20 +141,48 @@ export function App(props: AppProps): ReactElement {
   }
 
   function submit(text: string): void {
+    const images = pastedImages;
     setEditor({ value: "", cursor: 0 });
+    setPastedImages([]);
+    setImageNotice(null);
     setScroll(null);
-    void Promise.resolve(props.onSubmit(text)).then((accepted) => {
-      if (accepted === false)
-        setEditor((current) =>
-          current.value === "" ? { value: text, cursor: characters(text).length } : current,
-        );
-    });
+    void Promise.resolve(props.onSubmit(text, images.length === 0 ? undefined : images)).then(
+      (accepted) => {
+        if (accepted === false)
+          setEditor((current) =>
+            current.value === "" ? { value: text, cursor: characters(text).length } : current,
+          );
+      },
+    );
   }
 
   useInput((input, key) => {
     if (view.localPanel != null) return;
     if (key.ctrl && input === "c") {
       props.onCancelRun();
+      return;
+    }
+    if (key.ctrl && input === "v") {
+      // A terminal delivers the key, not the image. Reading the clipboard here is
+      // the only way to see a pasted picture.
+      const read = props.onPasteImage;
+      if (read === undefined) return;
+      void read().then((result) => {
+        if (result.kind === "image") {
+          setPastedImages((current) => [...current, result.image]);
+          setImageNotice(null);
+          return;
+        }
+        if (result.kind === "too_large") {
+          setImageNotice("pasted image is too large");
+          return;
+        }
+        if (result.kind === "unavailable") {
+          setImageNotice("could not read the clipboard");
+        }
+        // "empty" means the clipboard held text; the terminal's own paste already
+        // handled it, so nothing is reported.
+      });
       return;
     }
     if (key.ctrl && input === "t") {
@@ -309,6 +362,8 @@ export function App(props: AppProps): ReactElement {
           commands,
           selectedCommand,
           commandRows: Math.max(1, Math.min(6, Math.floor((viewport.rows - 5) / 2))),
+          attachedImages: pastedImages.length,
+          imageNotice,
           animated: props.animated,
         }),
         h(Footer, {
@@ -372,6 +427,8 @@ export function App(props: AppProps): ReactElement {
       commands,
       selectedCommand,
       commandRows: Math.max(1, Math.min(6, viewport.rows - 6)),
+      attachedImages: pastedImages.length,
+      imageNotice,
       animated: props.animated,
     }),
     h(Footer, {
@@ -543,6 +600,10 @@ function Composer(props: {
   commands: (typeof COMPOSER_COMMANDS)[number][];
   selectedCommand: number;
   commandRows: number;
+  /** Images attached to the draft but not yet sent. */
+  attachedImages: number;
+  /** Why the last paste produced no image. */
+  imageNotice: string | null;
   animated?: boolean | undefined;
 }): ReactElement {
   const { view, editor, capabilities } = props;
@@ -570,6 +631,15 @@ function Composer(props: {
       h(Text, colorProps(accent), "▌ "),
       h(Text, colorProps(accent), view.queueingInput ? "queue" : "task"),
       h(Text, null, " › "),
+      // The attachment marker sits before the input so the user sees that the next
+      // send will carry an image before typing the task.
+      props.attachedImages === 0
+        ? null
+        : h(
+            Text,
+            colorProps(colorFor("secondary", capabilities)),
+            `[image ×${props.attachedImages}] `,
+          ),
       h(TextInput, {
         value: editor.value,
         cursor: editor.cursor,
@@ -584,7 +654,7 @@ function Composer(props: {
         ? h(
             Text,
             colorProps(colorFor("faint", capabilities)),
-            clipText(view.commandNotice ?? hint, Math.max(1, props.width - 2)),
+            clipText(props.imageNotice ?? view.commandNotice ?? hint, Math.max(1, props.width - 2)),
           )
         : h(ActivityIndicator, {
             activity: view.activity,

@@ -19,6 +19,16 @@ export type StartTuiOptions = Readonly<{
   onInitRequest?: () => void;
   sessionId?: string;
   onCleanupError?: (code: string) => void;
+  /**
+   * Read an image from the system clipboard for Ctrl+V. Absent means paste carries
+   * text only.
+   */
+  readClipboardImage?: () => Promise<
+    | Readonly<{ kind: "image"; image: import("../ports/model-provider.ts").ProviderImage }>
+    | Readonly<{ kind: "empty" }>
+    | Readonly<{ kind: "too_large" }>
+    | Readonly<{ kind: "unavailable" }>
+  >;
   /** Injected terminal streams/mount for lifecycle verification. */
   mount?: (element: ReactElement, options: RenderOptions) => Pick<Instance, "rerender" | "unmount">;
 }>;
@@ -74,6 +84,9 @@ export function startTui(
         refresh();
         return saved;
       },
+      ...(options.readClipboardImage === undefined
+        ? {}
+        : { onPasteImage: options.readClipboardImage }),
       onMcpAdd: (entry) => {
         void controller.addMcpServer(entry).then(refresh);
       },
@@ -95,8 +108,8 @@ export function startTui(
       onSessionDelete: (sessionId) => {
         void controller.deleteSession(sessionId).then(refresh);
       },
-      onSubmit: (text) => {
-        return controller.submit(text).then((accepted) => {
+      onSubmit: (text, images) => {
+        return controller.submit(text, images).then((accepted) => {
           const request = controller.takeNavigationRequest();
           if (request !== null) {
             void closeSession(request);

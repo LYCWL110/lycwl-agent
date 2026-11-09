@@ -3,14 +3,15 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createSnapshotStore } from "../adapters/persistence/snapshot-store.ts";
 import { fetchModelDetails, fetchModelList } from "../adapters/providers/model-list.ts";
+import { createClipboardReader } from "../adapters/windows/clipboard-image.ts";
 import { createConfigStore, defaultConfigDirectory } from "../adapters/windows/config-store.ts";
 import { createFileVault } from "../adapters/windows/file-credential-vault.ts";
-import { createImageLoader } from "../adapters/windows/image-loader.ts";
 import { createSessionCatalog } from "../adapters/windows/session-catalog.ts";
 import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
 import { readMcpServerEntries } from "../domain/config/mcp-edit.ts";
 import type { CatalogModel } from "../domain/config/model-catalog.ts";
 import { readProviderConfig } from "../domain/config/provider-config.ts";
+import { filterChildEnvironment } from "../domain/process/shell.ts";
 import { sessionLabel } from "../domain/session/session-catalog.ts";
 import { createTuiController } from "../tui/controller.ts";
 import { startTui } from "../tui/main.ts";
@@ -72,6 +73,22 @@ if (args.includes("--version") || args.includes("-v")) {
 const dataDirectory = defaultConfigDirectory(process.env["LOCALAPPDATA"]);
 const configStore = createConfigStore({ directory: dataDirectory });
 const vault = createFileVault({ directory: dataDirectory });
+/**
+ * Clipboard reader for Ctrl+V.
+ *
+ * Created once because it only holds configuration; each read spawns its own
+ * short-lived child process. The environment goes through the shared filter like
+ * every other child.
+ */
+const clipboardReader = createClipboardReader({
+  environment: (() => {
+    const inherited: Record<string, string> = {};
+    for (const [name, value] of Object.entries(process.env)) {
+      if (value !== undefined) inherited[name] = value;
+    }
+    return filterChildEnvironment(inherited).environment as Record<string, string>;
+  })(),
+});
 
 if (args.includes("--setup")) {
   process.stdout.write(`${(await describeConfiguration(await configStore.load())).join("\n")}\n`);
@@ -237,12 +254,6 @@ async function startSession(): Promise<void> {
               return written.ok;
             },
           }),
-      loadImages: async (paths) => {
-        const loaded = await createImageLoader({ workspaceRoot: process.cwd() }).load(paths);
-        return loaded.ok
-          ? { ok: true as const, images: loaded.images }
-          : { ok: false as const, code: loaded.code };
-      },
       undoChanges: async () => {
         const snapshots = createSnapshotStore({
           sessionDirectory: path.join(dataDirectory, "sessions", "sessions", sessionId),
@@ -321,6 +332,7 @@ async function startSession(): Promise<void> {
     }),
     {
       ...(chosen.kind === "real" ? { modelLabel: chosen.config.model } : {}),
+      readClipboardImage: () => clipboardReader.readImage(),
       modeLabel: args.includes("--shell")
         ? "shell"
         : args.includes("--write")
