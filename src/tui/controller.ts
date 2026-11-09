@@ -8,6 +8,7 @@ import { emptyTodoList, replaceTodoList } from "../domain/planning/todo.ts";
 import type { InternalEvent } from "../ports/event-log.ts";
 import { resolveAnswer } from "./answer-input.ts";
 import type { McpPanelEntry } from "./mcp-panel.ts";
+import type { SessionListEntry } from "./session-list.ts";
 import { deriveView, interpretComposer, type TuiViewState } from "./view-model.ts";
 
 /**
@@ -22,6 +23,8 @@ export type SkillCatalogEntry = Readonly<{
 
 export type TuiSessionDeps = Readonly<{
   coordinator: RuntimeCoordinator;
+  /** This process's session id, used to mark the current row. */
+  sessionId?: string;
   initialEvents?: readonly InternalEvent[];
   canResumeSession?: (sessionId: string) => Promise<boolean>;
   /** Trusted composition corrects only the current fixed-route key reference. */
@@ -50,6 +53,20 @@ export type TuiSessionDeps = Readonly<{
     | Readonly<{ ok: true; servers: readonly McpPanelEntry[] }>
     | Readonly<{ ok: false; code: string }>
   >;
+  /** Session records on disk, for the list panel. */
+  sessionCatalog?: Readonly<{
+    list: () => Promise<
+      | Readonly<{ ok: true; sessions: readonly Omit<SessionListEntry, "current">[] }>
+      | Readonly<{ ok: false; code: string }>
+    >;
+    rename: (
+      sessionId: string,
+      title: string | null,
+    ) => Promise<Readonly<{ ok: true }> | Readonly<{ ok: false; code: string }>>;
+    remove: (
+      sessionId: string,
+    ) => Promise<Readonly<{ ok: true }> | Readonly<{ ok: false; code: string }>>;
+  }>;
 }>;
 
 export type TuiNavigationRequest =
@@ -72,6 +89,8 @@ export type TuiController = Readonly<{
   closePanel: () => void;
   addMcpServer: (entry: McpPanelEntry) => Promise<void>;
   removeMcpServer: (serverId: string) => Promise<void>;
+  renameSession: (sessionId: string, title: string | null) => Promise<void>;
+  deleteSession: (sessionId: string) => Promise<void>;
   correctCredential?: (secret: string) => Promise<boolean>;
 }>;
 
@@ -92,13 +111,16 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   /** Why the last answer was rejected, shown in the question panel. */
   let answerError: string | null = null;
   let navigation: TuiNavigationRequest | null = null;
-  let localPanel: "help" | "session" | "credential" | "skills" | "mcp" | null = null;
+  let localPanel: "help" | "session" | "credential" | "skills" | "mcp" | "sessions" | null = null;
   /** Loaded once per panel open, so the view never performs I/O. */
   let skillCatalog: readonly SkillCatalogEntry[] | null = null;
   let skillCatalogError: string | null = null;
   let mcpServers: readonly McpPanelEntry[] | null = null;
   let mcpError: string | null = null;
   let mcpBusy = false;
+  let sessionList: readonly SessionListEntry[] | null = null;
+  let sessionListError: string | null = null;
+  let sessionListBusy = false;
   let commandNotice: string | null = null;
   let checkingSession = false;
   let closing: Promise<void> | null = null;
@@ -157,6 +179,62 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       skillCatalogError = "catalog_unavailable";
     }
   }
+  /** Read the recorded sessions. A failure is a reason, not an empty catalog. */
+  async function loadSessionList(): Promise<void> {
+    const loader = deps.sessionCatalog;
+    if (loader === undefined) {
+      sessionList = null;
+      sessionListError = "session records are not readable in this build";
+      return;
+    }
+    try {
+      const loaded = await loader.list();
+      if (loaded.ok) {
+        // The current session is marked here rather than by the store: only this
+        // process knows which id it owns.
+        sessionList = loaded.sessions.map((entry) => ({
+          ...entry,
+          current: entry.sessionId === deps.sessionId,
+        }));
+        sessionListError = null;
+        return;
+      }
+      sessionList = null;
+      sessionListError = loaded.code;
+    } catch {
+      sessionList = null;
+      sessionListError = "session records could not be read";
+    }
+  }
+
+  /**
+   * Apply a session edit and re-read the list from disk.
+   *
+   * Re-reading rather than patching locally is what makes the panel show what the
+   * directory actually contains after a rename or a delete.
+   */
+  async function changeSession(
+    apply: () => Promise<Readonly<{ ok: true }> | Readonly<{ ok: false; code: string }>>,
+    successNotice: string,
+  ): Promise<void> {
+    if (sessionListBusy) return;
+    sessionListBusy = true;
+    commandNotice = null;
+    try {
+      const result = await apply();
+      if (!result.ok) {
+        sessionListError = result.code;
+        return;
+      }
+      commandNotice = successNotice;
+      await loadSessionList();
+    } catch {
+      sessionListError = "the change could not be saved";
+    } finally {
+      sessionListBusy = false;
+    }
+  }
+
   /** Read the declared MCP servers. A failure is kept as a reason, not an empty list. */
   async function loadMcpServers(): Promise<void> {
     const loader = deps.mcpServers;
@@ -229,6 +307,9 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       mcpServers,
       mcpError,
       mcpBusy,
+      sessionList,
+      sessionListError,
+      sessionListBusy,
       commandNotice,
     };
   }
@@ -293,6 +374,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       localPanel = intent.panel;
       if (intent.panel === "skills") await loadSkillCatalog();
       if (intent.panel === "mcp") await loadMcpServers();
+      if (intent.panel === "sessions") await loadSessionList();
       return;
     }
     if (intent.kind === "switch_session") {
@@ -313,6 +395,28 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     if (intent.kind === "cancel_run") {
       localPanel = null;
       await cancelRun();
+      return;
+    }
+    if (intent.kind === "rename_session") {
+      await changeSession(
+        async () =>
+          (await deps.sessionCatalog?.rename(intent.sessionId, intent.title)) ?? {
+            ok: false as const,
+            code: "unavailable",
+          },
+        intent.title === null ? "title cleared" : "session renamed",
+      );
+      return;
+    }
+    if (intent.kind === "delete_session") {
+      await changeSession(
+        async () =>
+          (await deps.sessionCatalog?.remove(intent.sessionId)) ?? {
+            ok: false as const,
+            code: "unavailable",
+          },
+        "session deleted",
+      );
       return;
     }
     if (intent.kind === "quit") {
@@ -461,6 +565,24 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     },
     addMcpServer: (entry) => changeMcp({ add: entry }),
     removeMcpServer: (serverId) => changeMcp({ remove: serverId }),
+    renameSession: (sessionId, title) =>
+      changeSession(
+        async () =>
+          (await deps.sessionCatalog?.rename(sessionId, title)) ?? {
+            ok: false as const,
+            code: "unavailable",
+          },
+        title === null ? "title cleared" : "session renamed",
+      ),
+    deleteSession: (sessionId) =>
+      changeSession(
+        async () =>
+          (await deps.sessionCatalog?.remove(sessionId)) ?? {
+            ok: false as const,
+            code: "unavailable",
+          },
+        "session deleted",
+      ),
     takeNavigationRequest: () => {
       const requested = navigation;
       navigation = null;

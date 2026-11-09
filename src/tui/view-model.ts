@@ -27,7 +27,7 @@ export type WaitingKind = "approval" | "question" | "configuration" | "other";
 export type RunActivity = "thinking" | "working";
 
 export type TuiViewState = Readonly<{
-  localPanel?: "help" | "session" | "credential" | "skills" | "mcp" | null;
+  localPanel?: "help" | "session" | "credential" | "skills" | "mcp" | "sessions" | null;
   /** Workspace Skill catalog, when discovery ran and succeeded. */
   skillCatalog?:
     | readonly Readonly<{
@@ -50,6 +50,21 @@ export type TuiViewState = Readonly<{
   mcpError?: string | null;
   /** True while an MCP edit is being saved. */
   mcpBusy?: boolean;
+  /** Every recorded session, newest first, loaded when the panel opens. */
+  sessionList?:
+    | readonly Readonly<{
+        sessionId: string;
+        label: string;
+        title: string | null;
+        modifiedAtUtc: string;
+        bytes: number;
+        current: boolean;
+      }>[]
+    | null;
+  /** Why the session list could not be read, when it could not. */
+  sessionListError?: string | null;
+  /** True while a rename or delete is in flight. */
+  sessionListBusy?: boolean;
   commandNotice?: string | null;
   runStatus: RunStatus;
   waitingKind: WaitingKind | null;
@@ -440,7 +455,9 @@ export type ComposerIntent =
   /** Generate an AGENTS.md draft for the workspace. */
   | Readonly<{ kind: "project_init" }>
   | Readonly<{ kind: "open_model" }>
-  | Readonly<{ kind: "open_panel"; panel: "help" | "session" | "skills" | "mcp" }>
+  | Readonly<{ kind: "open_panel"; panel: "help" | "session" | "skills" | "mcp" | "sessions" }>
+  | Readonly<{ kind: "rename_session"; sessionId: string; title: string | null }>
+  | Readonly<{ kind: "delete_session"; sessionId: string }>
   | Readonly<{ kind: "switch_session"; sessionId: string | null }>
   | Readonly<{ kind: "cancel_run" }>
   | Readonly<{ kind: "resume_run" }>
@@ -455,6 +472,7 @@ export const COMPOSER_COMMANDS = [
   { name: "/config", description: "Provider settings", idleOnly: true },
   { name: "/model", description: "Select model and reasoning", idleOnly: true },
   { name: "/session", description: "Current, new or resume session", idleOnly: true },
+  { name: "/sessions", description: "List, rename or delete recorded sessions", idleOnly: true },
   { name: "/new", description: "Start a fresh session", idleOnly: true },
   { name: "/init", description: "Draft an AGENTS.md for this project", idleOnly: true },
   { name: "/skill", description: "Run with a workspace skill loaded", idleOnly: true },
@@ -499,6 +517,8 @@ export function interpretComposer(
         return { kind: "open_config" };
       case "/model":
         return { kind: "open_model" };
+      case "/sessions":
+        return { kind: "open_panel", panel: "sessions" };
       case "/session":
         if (args.length === 0) return { kind: "open_panel", panel: "session" };
         if (args.length === 2 && args[0] === "resume" && isSessionId(args[1] ?? ""))

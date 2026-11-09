@@ -7,6 +7,7 @@ import { CredentialScreen } from "./credential-screen.ts";
 import { LocalPanel } from "./local-panel.ts";
 import { McpPanel } from "./mcp-panel.ts";
 import { type Capabilities, colorFor, detectCapabilities } from "./palette.ts";
+import { SessionList } from "./session-list.ts";
 import { useTerminalWheel } from "./terminal-wheel.ts";
 import { characters, editText, type TextEdit } from "./text-edit.ts";
 import { TextInput } from "./text-input.ts";
@@ -45,6 +46,10 @@ export type AppProps = Readonly<{
     entry: Readonly<{ serverId: string; command: string; args: readonly string[] }>,
   ) => void;
   onMcpRemove?: (serverId: string) => void;
+  /** Session list actions; the caller owns the disk operations. */
+  onSessionResume?: (sessionId: string) => void;
+  onSessionRename?: (sessionId: string, title: string | null) => void;
+  onSessionDelete?: (sessionId: string) => void;
   sessionId?: string;
   /** Injected so a test can exercise every colour depth. */
   capabilities?: Capabilities;
@@ -233,6 +238,19 @@ export function App(props: AppProps): ReactElement {
     return h(CredentialScreen, {
       width,
       onSave: props.onCorrectCredential ?? (async () => false),
+      onClose: () => props.onClosePanel?.(),
+    });
+  if (view.localPanel === "sessions")
+    return h(SessionList, {
+      viewport,
+      capabilities,
+      sessions: view.sessionList ?? null,
+      error: view.sessionListError ?? null,
+      busy: view.sessionListBusy === true,
+      notice: view.commandNotice ?? null,
+      onResume: (sessionId) => props.onSessionResume?.(sessionId),
+      onRename: (sessionId, title) => props.onSessionRename?.(sessionId, title),
+      onDelete: (sessionId) => props.onSessionDelete?.(sessionId),
       onClose: () => props.onClosePanel?.(),
     });
   if (view.localPanel === "mcp")

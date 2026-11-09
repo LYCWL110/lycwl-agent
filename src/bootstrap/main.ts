@@ -4,10 +4,12 @@ import path from "node:path";
 import { fetchModelDetails, fetchModelList } from "../adapters/providers/model-list.ts";
 import { createConfigStore, defaultConfigDirectory } from "../adapters/windows/config-store.ts";
 import { createFileVault } from "../adapters/windows/file-credential-vault.ts";
+import { createSessionCatalog } from "../adapters/windows/session-catalog.ts";
 import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
 import { readMcpServerEntries } from "../domain/config/mcp-edit.ts";
 import type { CatalogModel } from "../domain/config/model-catalog.ts";
 import { readProviderConfig } from "../domain/config/provider-config.ts";
+import { sessionLabel } from "../domain/session/session-catalog.ts";
 import { createTuiController } from "../tui/controller.ts";
 import { startTui } from "../tui/main.ts";
 import { hasProvider, startConfigFlow } from "./config-flow.ts";
@@ -213,6 +215,7 @@ async function startSession(): Promise<void> {
           }
         : {}),
       coordinator: chosen.coordinator,
+      sessionId,
       ...(chosen.kind === "real" ? { initialEvents: chosen.historyEvents } : {}),
       canResumeSession: (id) => canResumeSession(dataDirectory, id),
       ...(chosen.kind !== "real"
@@ -228,6 +231,27 @@ async function startSession(): Promise<void> {
               return written.ok;
             },
           }),
+      sessionCatalog: {
+        list: async () => {
+          const listed = await createSessionCatalog({ dataDirectory }).list();
+          if (!listed.ok) return listed;
+          return {
+            ok: true as const,
+            sessions: listed.sessions.map((entry) => ({
+              sessionId: entry.sessionId,
+              // The label is derived here, once, so the panel never reimplements the
+              // precedence rule and a rename cannot disagree with it.
+              label: sessionLabel(entry),
+              title: entry.title,
+              modifiedAtUtc: entry.modifiedAtUtc,
+              bytes: entry.bytes,
+            })),
+          };
+        },
+        rename: (sessionId, title) =>
+          createSessionCatalog({ dataDirectory }).rename(sessionId, title),
+        remove: (sessionId) => createSessionCatalog({ dataDirectory }).remove(sessionId),
+      },
       mcpServers: async () => {
         const loaded = await configStore.load();
         if (!loaded.ok) return { ok: false as const, code: loaded.code };

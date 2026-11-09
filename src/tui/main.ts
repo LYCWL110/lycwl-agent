@@ -80,6 +80,21 @@ export function startTui(
       onMcpRemove: (serverId) => {
         void controller.removeMcpServer(serverId).then(refresh);
       },
+      onSessionResume: (sessionId) => {
+        // Resuming replaces the whole Session, so it leaves the TUI the same way
+        // /session does rather than mutating the live one.
+        void controller.submit(`/session resume ${sessionId}`).then(() => {
+          const request = controller.takeNavigationRequest();
+          if (request !== null) void closeSession(request);
+          else refresh();
+        });
+      },
+      onSessionRename: (sessionId, title) => {
+        void controller.renameSession(sessionId, title).then(refresh);
+      },
+      onSessionDelete: (sessionId) => {
+        void controller.deleteSession(sessionId).then(refresh);
+      },
       onSubmit: (text) => {
         return controller.submit(text).then((accepted) => {
           const request = controller.takeNavigationRequest();
