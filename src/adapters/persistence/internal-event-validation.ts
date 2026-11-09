@@ -271,6 +271,16 @@ const payloadChecks = {
     ref: attachmentRef,
     reason: oneOf("attachment_missing", "hash_mismatch", "content_not_stored"),
   }),
+  tool_output_spilled: object({
+    kind: text,
+    toolCallId: id,
+    providerToolCallId: id,
+    toolName: id,
+    totalUnits: integer,
+    previewUnits: integer,
+    reference: text,
+    readable: (value) => typeof value === "boolean",
+  }),
   run_budget_updated: object({
     kind: text,
     budget: object({

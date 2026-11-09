@@ -10,6 +10,7 @@ import {
   type TouchedPath,
   touchedPaths,
 } from "../../domain/context/touched-paths.ts";
+import { exceedsSpillThreshold, spillToolOutput } from "../../domain/evidence/tool-spill.ts";
 import type { RunModelBinding } from "../../domain/model-request/run-binding.ts";
 import { bindAttempt } from "../../domain/model-request/run-binding.ts";
 import { addUsage } from "../../domain/model-request/token-usage.ts";
@@ -50,6 +51,7 @@ import type {
   TokenUsage,
 } from "../../ports/model-provider.ts";
 import type { SensitiveSource } from "../../ports/sensitive-context.ts";
+import type { SpillStore } from "../../ports/spill-store.ts";
 import type { ToolExecutionRequest, ToolExecutor } from "../../ports/tool-executor.ts";
 import {
   assertProtectedValue,
@@ -134,6 +136,12 @@ export type CoordinatorDependencies = Readonly<{
   >;
   /** Refresh protective copies before a new Run and each model attempt. */
   refreshOwnedKeys?: () => Promise<void>;
+  /**
+   * Stores oversized tool output so the model receives a preview and a reference
+   * instead of the whole text. Absent keeps every result inline, which is the
+   * pre-existing behaviour.
+   */
+  spillStore?: SpillStore;
   /**
    * Sourced, untrusted material placed before the user's task, such as project
    * guidance. It is a separate user turn, never merged into the system prompt: a
@@ -1077,7 +1085,7 @@ export class RuntimeCoordinator {
           if (context.stopSiblings) {
             context.stopSiblings = false;
             for (const remaining of completion.toolCalls.slice(index + 1)) {
-              this.#appendToolResult(
+              await this.#appendToolResult(
                 context,
                 remaining,
                 "failed",
@@ -1178,7 +1186,7 @@ export class RuntimeCoordinator {
           toolName: call.toolName,
           reason: "user_input_superseded",
         });
-        this.#appendToolResult(context, call, "cancelled", null);
+        await this.#appendToolResult(context, call, "cancelled", null);
       }
       for (const item of pending) {
         context.conversation.push({ kind: "user", text: item.text });
@@ -1905,7 +1913,7 @@ export class RuntimeCoordinator {
     }
 
     if (outcome.kind === "unknown")
-      this.#appendToolResult(context, call, "outcome_unknown", outcome.safeCode);
+      await this.#appendToolResult(context, call, "outcome_unknown", outcome.safeCode);
     if (context.cancelRequested && outcome.kind !== "continue")
       return { kind: "stop", result: await this.#cancel(context) };
     if (outcome.kind === "waiting") {
@@ -1920,7 +1928,7 @@ export class RuntimeCoordinator {
     if (outcome.kind === "unknown") {
       return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
     }
-    this.#appendToolResult(context, call, outcome.status, outcome.text);
+    await this.#appendToolResult(context, call, outcome.status, outcome.text);
     context.stopSiblings =
       outcome.status !== "succeeded" &&
       this.#deps.tools.getDefinition(call.toolName)?.sideEffectClass === "filesystem_mutation";
@@ -2040,7 +2048,7 @@ export class RuntimeCoordinator {
     }
 
     if (outcome.kind === "unknown")
-      this.#appendToolResult(context, pending.call, "outcome_unknown", outcome.safeCode);
+      await this.#appendToolResult(context, pending.call, "outcome_unknown", outcome.safeCode);
     if (context.cancelRequested && outcome.kind !== "continue")
       return { kind: "stop", result: await this.#cancel(context) };
     if (outcome.kind === "waiting") return this.#awaitApproval(context, outcome);
@@ -2053,7 +2061,7 @@ export class RuntimeCoordinator {
     if (outcome.kind === "question_waiting") {
       return { kind: "stop", result: await this.#fail(context, "approval_wait_repeated") };
     }
-    this.#appendToolResult(context, pending.call, outcome.status, outcome.text);
+    await this.#appendToolResult(context, pending.call, outcome.status, outcome.text);
     context.stopSiblings =
       outcome.status !== "succeeded" &&
       this.#deps.tools.getDefinition(pending.call.toolName)?.sideEffectClass ===
@@ -2162,7 +2170,7 @@ export class RuntimeCoordinator {
     if (outcome.kind === "waiting" || outcome.kind === "question_waiting") {
       return { kind: "stop", result: await this.#fail(context, "question_wait_repeated") };
     }
-    this.#appendToolResult(context, pending.call, outcome.status, outcome.text);
+    await this.#appendToolResult(context, pending.call, outcome.status, outcome.text);
     context.callHistory.push({
       fingerprint: {
         toolName: pending.call.toolName,
@@ -2184,12 +2192,12 @@ export class RuntimeCoordinator {
     return { kind: "continue" };
   }
 
-  #appendToolResult(
+  async #appendToolResult(
     context: MutableRunContext,
     call: ProviderToolCall,
     status: "succeeded" | "failed" | "denied" | "cancelled" | "outcome_unknown",
     text: string | null,
-  ): void {
+  ): Promise<void> {
     // C10: a blocked tool result keeps its real status but its text never
     // reaches model context. Blocking is not evidence of non-execution.
     const registry = this.#deps.ownedKeys;
@@ -2201,13 +2209,59 @@ export class RuntimeCoordinator {
       context.deliveryBlocked = true;
       context.deliveryBlockReason = delivery.reason;
     }
+    // A large result is stored and replaced with a preview. This happens after the
+    // guard, so the owned-key check still sees the real text; the stored copy is
+    // never the thing that reaches the model.
+    const delivered = await this.#spillIfLarge(context, call, delivery.text);
     context.conversation.push({
       kind: "tool_result",
       providerToolCallId: call.providerToolCallId,
       toolName: call.toolName,
       status,
-      text: delivery.text,
+      text: delivered,
     });
+  }
+
+  /**
+   * Replace an oversized result with a preview pointing at the stored copy.
+   *
+   * A failed store keeps the text inline: spilling is an optimisation, and losing
+   * the result because storage was unavailable would be worse than a large turn.
+   */
+  async #spillIfLarge(
+    context: MutableRunContext,
+    call: ProviderToolCall,
+    text: string | null,
+  ): Promise<string | null> {
+    if (text === null) return null;
+    if (!exceedsSpillThreshold(text.length)) return text;
+    const store = this.#deps.spillStore;
+    if (store === undefined) return text;
+
+    const toolCallId = this.#deps.ids.create();
+    const stored = await store.spill({
+      toolCallId,
+      toolName: call.toolName,
+      text,
+    });
+    if (stored.reference === null) return text;
+
+    const reference = stored.readable
+      ? stored.reference
+      : `${stored.reference} (outside the workspace; reading it needs approval)`;
+    const spilled = spillToolOutput({ text, reference, toolName: call.toolName });
+    if (spilled.kind === "inline") return text;
+    await this.#record(context, "tool_output_spilled", {
+      kind: "tool_output_spilled",
+      toolCallId,
+      providerToolCallId: call.providerToolCallId,
+      toolName: call.toolName,
+      totalUnits: text.length,
+      previewUnits: spilled.preview.length,
+      reference: stored.reference,
+      readable: stored.readable,
+    });
+    return spilled.preview;
   }
 
   #record(
@@ -2440,7 +2494,7 @@ export class RuntimeCoordinator {
           reason: "run_cancelled",
         });
       }
-      this.#appendToolResult(context, call, "cancelled", "not_attempted: run cancelled");
+      await this.#appendToolResult(context, call, "cancelled", "not_attempted: run cancelled");
     }
     const finished = finishRun(context.run, "cancelled");
     if (!finished.ok) return this.#fail(context, finished.code);

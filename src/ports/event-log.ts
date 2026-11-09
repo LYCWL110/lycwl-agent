@@ -23,6 +23,18 @@ export type InternalEventPayload =
       ref: AttachmentEvidence;
       reason: "attachment_missing" | "hash_mismatch" | "content_not_stored";
     }>
+  | Readonly<{
+      kind: "tool_output_spilled";
+      /** Identifier of the stored copy, used as its file name. */
+      toolCallId: string;
+      providerToolCallId: string;
+      toolName: string;
+      totalUnits: number;
+      previewUnits: number;
+      reference: string;
+      /** Whether the reference is inside the workspace and readable as-is. */
+      readable: boolean;
+    }>
   | Readonly<{ kind: "run_budget_updated"; budget: RunBudget; costUnknown: boolean }>
   | Readonly<{ kind: "sensitive_source_recorded"; source: SensitiveSource }>
   | Readonly<{
