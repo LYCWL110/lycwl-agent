@@ -16,6 +16,7 @@ import {
   renderGuidanceBlock,
 } from "../adapters/windows/guidance-loader.ts";
 import { createSkillLoader } from "../adapters/windows/skill-loader.ts";
+import { createSyntaxChecker, defaultTscEntry } from "../adapters/windows/syntax-checker.ts";
 import type { RuntimeCoordinator } from "../application/coordinator/runtime-coordinator.ts";
 import { deriveTaskReport } from "../application/task-report/derive-task-report.ts";
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
@@ -38,6 +39,7 @@ import { startMcpServers } from "./mcp-startup.ts";
 import { createWorkspaceTools } from "./read-only-tools.ts";
 import { assembleRuntime, type RuntimeAssemblyFailure } from "./runtime-assembly.ts";
 import { readMcpDeclarations } from "./terminal-approval.ts";
+import { undoSessionChanges } from "./undo.ts";
 
 /**
  * Choose and build the runtime for a launch.
@@ -497,6 +499,25 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
           sessionDirectory: path.join(sessionRoot, "sessions", sessionId),
           workspaceRoot: options.workspaceRoot,
         }),
+        syntaxChecker: createSyntaxChecker({
+          tscEntry: defaultTscEntry(process.cwd()),
+          // The same C09 filter every other child process gets.
+          environment: formatterEnvironment(),
+        }),
+        workspaceRoot: options.workspaceRoot,
+        revertChanges: async ({ runId, workspaceRoot }) => {
+          const undone = await undoSessionChanges({
+            store: createSnapshotStore({
+              sessionDirectory: path.join(sessionRoot, "sessions", sessionId),
+              workspaceRoot,
+            }),
+            workspaceRoot,
+            runIds: [runId],
+          });
+          return undone.ok
+            ? { ok: true as const, files: undone.files }
+            : { ok: false as const, code: undone.code };
+        },
         formatter: createFormatterRunner({
           workspaceRoot: options.workspaceRoot,
           // The same C09 filter every other child process gets: a formatter has no

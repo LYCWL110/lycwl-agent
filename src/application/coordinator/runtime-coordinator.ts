@@ -14,6 +14,7 @@ import { exceedsSpillThreshold, spillToolOutput } from "../../domain/evidence/to
 import type { RunModelBinding } from "../../domain/model-request/run-binding.ts";
 import { bindAttempt } from "../../domain/model-request/run-binding.ts";
 import { addUsage } from "../../domain/model-request/token-usage.ts";
+import { describeSyntaxFailure } from "../../domain/mutation/syntax-check.ts";
 import { emptyTodoList, replaceTodoList, type TodoList } from "../../domain/planning/todo.ts";
 import {
   type AnswerFailure,
@@ -55,6 +56,7 @@ import type {
 import type { SensitiveSource } from "../../ports/sensitive-context.ts";
 import type { SnapshotStore } from "../../ports/snapshot-store.ts";
 import type { SpillStore } from "../../ports/spill-store.ts";
+import type { ChangeReverter, SyntaxChecker } from "../../ports/syntax-checker.ts";
 import type { ToolExecutionRequest, ToolExecutor } from "../../ports/tool-executor.ts";
 import {
   assertProtectedValue,
@@ -154,6 +156,15 @@ export type CoordinatorDependencies = Readonly<{
    * written files exactly as the tool produced them.
    */
   formatter?: FormatterRunner;
+  /**
+   * Post-edit syntax verification. Absent leaves every edit unverified, which is the
+   * pre-existing behaviour.
+   */
+  syntaxChecker?: SyntaxChecker;
+  /** Workspace root, needed to revert an edit through the snapshot store. */
+  workspaceRoot?: string;
+  /** Reverts a Run's file changes; supplied by the composition root. */
+  revertChanges?: ChangeReverter;
   /** Resolve a workspace-relative path to an absolute one, for the formatter. */
   resolveWorkspacePath?: (relativePath: string) => string;
   /**
@@ -1981,11 +1992,20 @@ export class RuntimeCoordinator {
     if (outcome.kind === "unknown") {
       return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
     }
-    await this.#appendToolResult(context, call, outcome.status, outcome.text);
+    // A successful single-file edit is verified before its result is recorded, so a
+    // broken edit is reverted and the model is told the file is unchanged. The check
+    // runs before the formatter: formatting a file that does not compile would
+    // rewrite it on top of a failed edit.
+    const verified =
+      outcome.status === "succeeded"
+        ? await this.#verifyEditedFile(context, call, outcome.text)
+        : { status: outcome.status, text: outcome.text };
+
+    await this.#appendToolResult(context, call, verified.status, verified.text);
     // A successful file change is followed by the project's own formatter, when it
     // has one. This runs after the result is recorded so a formatting failure is
     // reported as its own fact rather than turning the write into a failure.
-    if (outcome.status === "succeeded") await this.#formatTouchedFiles(context, call);
+    if (verified.status === "succeeded") await this.#formatTouchedFiles(context, call);
     context.stopSiblings =
       outcome.status !== "succeeded" &&
       this.#deps.tools.getDefinition(call.toolName)?.sideEffectClass === "filesystem_mutation";
@@ -2277,6 +2297,83 @@ export class RuntimeCoordinator {
       status,
       text: preview ?? delivery.text,
     });
+  }
+
+  /**
+   * Verify that a single-file edit still compiles, and revert it when it does not.
+   *
+   * This is the check SWE-agent's ablation credits with part of its result: without
+   * it, a syntax error survives into the next turn and costs a round trip at best.
+   *
+   * Scope is one file. A batch patch is not checked: ten sequential tsc runs cost
+   * about three seconds, and ten parallel ones peak near 350 MB, neither of which is
+   * acceptable for a check that should be free.
+   *
+   * A checker that cannot run is reported as skipped, never as a pass: claiming a
+   * file compiles when nothing checked it would be a false verification.
+   */
+  async #verifyEditedFile(
+    context: MutableRunContext,
+    call: ProviderToolCall,
+    originalText: string | null,
+  ): Promise<Readonly<{ status: "succeeded" | "failed"; text: string | null }>> {
+    const checker = this.#deps.syntaxChecker;
+    // Returning the original text matters: the verifier replaces the tool result, so
+    // a null here would silently discard what the tool actually reported.
+    const keep = { status: "succeeded" as const, text: originalText };
+    if (checker === undefined) return keep;
+
+    // Only a single-path edit is checked. A batch has no single target to verify,
+    // and checking every target is the expensive case this deliberately avoids.
+    const targets = snapshotTargets(call.arguments);
+    if (targets.length !== 1) return keep;
+    const relativePath = targets[0];
+    if (relativePath === undefined) return keep;
+
+    const absolutePath = this.#deps.resolveWorkspacePath?.(relativePath);
+    if (absolutePath === undefined) return keep;
+
+    const checked = await checker.check(absolutePath);
+    if (checked.kind !== "failed") {
+      if (checked.kind === "skipped") {
+        await this.#record(context, "syntax_check_skipped", {
+          kind: "syntax_check_skipped",
+          toolCallId: call.providerToolCallId,
+          path: relativePath,
+          reason: checked.reason,
+        });
+      }
+      return keep;
+    }
+
+    // Revert from the snapshot taken before dispatch. Without one there is nothing
+    // to restore, so the edit stands and the failure is reported without a rollback
+    // claim.
+    let reverted = false;
+    const revert = this.#deps.revertChanges;
+    if (revert !== undefined && this.#deps.workspaceRoot !== undefined) {
+      const undone = await revert({
+        runId: context.runId,
+        workspaceRoot: this.#deps.workspaceRoot,
+      });
+      reverted = undone.ok;
+    }
+
+    await this.#record(context, "syntax_check_failed", {
+      kind: "syntax_check_failed",
+      toolCallId: call.providerToolCallId,
+      path: relativePath,
+      line: checked.line,
+      message: checked.message,
+      reverted,
+    });
+
+    return {
+      status: "failed",
+      text:
+        describeSyntaxFailure(relativePath, checked) +
+        (reverted ? "" : "\nThe revert could not be completed; inspect the file before retrying."),
+    };
   }
 
   /**

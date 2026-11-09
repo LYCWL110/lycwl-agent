@@ -24,6 +24,21 @@ export type InternalEventPayload =
       reason: "attachment_missing" | "hash_mismatch" | "content_not_stored";
     }>
   | Readonly<{
+      kind: "syntax_check_failed";
+      toolCallId: string;
+      path: string;
+      line: number | null;
+      message: string;
+      /** Whether the edit was reverted; false means the file still holds the edit. */
+      reverted: boolean;
+    }>
+  | Readonly<{
+      kind: "syntax_check_skipped";
+      toolCallId: string;
+      path: string;
+      reason: "not_supported" | "too_large" | "checker_unavailable";
+    }>
+  | Readonly<{
       kind: "tool_output_formatted";
       /** Provider tool call id of the mutation whose file was formatted. */
       toolCallId: string;

@@ -271,6 +271,20 @@ const payloadChecks = {
     ref: attachmentRef,
     reason: oneOf("attachment_missing", "hash_mismatch", "content_not_stored"),
   }),
+  syntax_check_failed: object({
+    kind: text,
+    toolCallId: id,
+    path: text,
+    line: nullable(integer),
+    message: text,
+    reverted: (value) => typeof value === "boolean",
+  }),
+  syntax_check_skipped: object({
+    kind: text,
+    toolCallId: id,
+    path: text,
+    reason: oneOf("not_supported", "too_large", "checker_unavailable"),
+  }),
   tool_output_formatted: object({
     kind: text,
     toolCallId: id,
