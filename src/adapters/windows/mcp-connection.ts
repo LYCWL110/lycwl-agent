@@ -9,11 +9,12 @@ import { MCP_LIMITS } from "../../domain/mcp/mcp-server.ts";
  * JSON-RPC 2.0 over a child process's stdin/stdout, with newline-delimited frames.
  * Only stdio is supported: no HTTP, SSE or OAuth.
  *
- * Honest limitation: this spawns with `child_process`, not through the G02 Job Object
- * supervisor, so a Harness crash does not guarantee the server's process tree is
- * terminated. The same gap already exists for LSP and is recorded rather than hidden.
- * Closing the connection kills the process, and a bounded grace period precedes the
- * kill.
+ * Lifetime is tied to the pipes rather than to a Job Object. That is not the intended
+ * end state, but measurement showed it is sufficient: when the Harness exits, the
+ * child's stdin and stdout handles close, so a server reading stdin sees EOF and one
+ * writing stdout sees EPIPE, and Node exits when its handles are gone. Normal close
+ * additionally kills the process after a bounded grace period. See ADR-0073 for the
+ * measured scenarios and for the cases a Job Object would still cover.
  */
 
 export type McpFrame =

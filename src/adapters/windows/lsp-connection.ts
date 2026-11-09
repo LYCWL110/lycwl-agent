@@ -14,9 +14,11 @@ import { filterChildEnvironment } from "../../domain/process/shell.ts";
  * no shell interpretation, bounded frames, per-request timeouts, and complete
  * rejection of every server-initiated request.
  *
- * Honest limitation: this does not yet place the server in a Job Object, so
- * kill-on-Harness-crash is not provided for LSP. That is the remaining G02 gap
- * recorded in the plan.
+ * Lifetime is tied to the pipes rather than to a Job Object: when the Harness exits,
+ * the child's stdin and stdout handles close, and a language server reading stdin sees
+ * EOF. Measurement of the same mechanism for MCP is recorded in ADR-0073. A Job Object
+ * would still cover a server that detaches and redirects its own stdio, which has not
+ * been observed.
  */
 
 export type LspConnectionFailure =
