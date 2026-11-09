@@ -88,9 +88,10 @@ export async function connectMcpServer(
   const spawnProcess = options.spawnProcess ?? spawn;
   const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 
+  const launch = resolveLaunch(options.command, options.args);
   let child: ChildProcessWithoutNullStreams;
   try {
-    child = spawnProcess(options.command, [...options.args], {
+    child = spawnProcess(launch.command, [...launch.args], {
       cwd: options.cwd,
       // The caller passes the final filtered environment. Nothing is merged here, so
       // an inherited variable cannot slip back in.
@@ -329,6 +330,44 @@ export async function connectMcpServer(
   };
 
   return { ok: true, connection };
+}
+
+/**
+ * Resolve how to launch a declared command.
+ *
+ * On Windows, `npx`, `npm` and most MCP servers are `.cmd` batch files. Node
+ * refuses to spawn a batch file directly (EINVAL, since the fix for
+ * CVE-2024-27980), so the only correct route is `cmd.exe /c`. Without this every
+ * `npx`-based server fails to start, which is most of them.
+ *
+ * The command is passed as a separate argument rather than concatenated into one
+ * string, so the quoting `cmd.exe` applies cannot be influenced by the command or
+ * its arguments.
+ *
+ * On other platforms the command is used as declared.
+ */
+export function resolveLaunch(
+  command: string,
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+  comspec?: string | null,
+): Readonly<{ command: string; args: readonly string[] }> {
+  if (platform !== "win32") return { command, args };
+  // An absolute path to an .exe needs no shell. Anything ending in .cmd or .bat,
+  // and any bare name that resolves through PATH to one, does.
+  const lower = command.toLowerCase();
+  const needsShell =
+    lower.endsWith(".cmd") ||
+    lower.endsWith(".bat") ||
+    // A bare name is resolved by cmd.exe's own lookup, which finds the .cmd shim.
+    (!lower.endsWith(".exe") && !lower.includes("\\") && !lower.includes("/"));
+  if (!needsShell) return { command, args };
+  // undefined means "look it up"; null means "there is none". A default parameter
+  // would collapse the two and make the fallback untestable.
+  const resolved = comspec === undefined ? process.env["ComSpec"] : comspec;
+  const shell =
+    resolved === undefined || resolved === null || resolved.length === 0 ? "cmd.exe" : resolved;
+  return { command: shell, args: ["/c", command, ...args] };
 }
 
 /**
