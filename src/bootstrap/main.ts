@@ -278,6 +278,44 @@ async function startSession(): Promise<void> {
           ? { ok: true as const, files: undone.files }
           : { ok: false as const, code: undone.code };
       },
+      initDraft: async () => {
+        const { createProjectInit } = await import("../adapters/windows/project-init.ts");
+        const scanned = await createProjectInit({ workspaceRoot: process.cwd() }).scan();
+        if (!scanned.ok) return { ok: false as const, code: scanned.code };
+        if (scanned.alreadyExists) return { ok: true as const, alreadyExists: true as const };
+        return {
+          ok: true as const,
+          alreadyExists: false as const,
+          preview: {
+            path: path.join(process.cwd(), "AGENTS.md"),
+            bytes: Buffer.byteLength(scanned.draft, "utf8"),
+            detected: scanned.facts.languages,
+            head: scanned.draft.split("\n").slice(0, 12).join("\n"),
+          },
+        };
+      },
+      initWrite: async () => {
+        const { createProjectInit } = await import("../adapters/windows/project-init.ts");
+        const scanned = await createProjectInit({ workspaceRoot: process.cwd() }).scan();
+        if (!scanned.ok) return { ok: false as const, code: scanned.code };
+        if (scanned.alreadyExists) return { ok: false as const, code: "already_exists" };
+        try {
+          // `wx` fails when the file appeared between the scan and the write, which is
+          // a conflict rather than a write error.
+          await writeFile(path.join(process.cwd(), "AGENTS.md"), scanned.draft, {
+            encoding: "utf8",
+            flag: "wx",
+          });
+          return { ok: true as const };
+        } catch (error) {
+          const code =
+            typeof error === "object" && error !== null && "code" in error ? error.code : null;
+          return {
+            ok: false as const,
+            code: code === "EEXIST" ? "already_exists" : "write_failed",
+          };
+        }
+      },
       sessionCatalog: {
         list: async () => {
           const listed = await createSessionCatalog({ dataDirectory }).list();
@@ -340,9 +378,7 @@ async function startSession(): Promise<void> {
           : "read-only",
       onConfigRequest: openConfig,
       sessionId,
-      onInitRequest: () => {
-        void runProjectInit();
-      },
+
       onSessionRequest: (requestedId) => {
         sessionId = requestedId ?? crypto.randomUUID();
         process.stderr.write(`${requestedId === null ? "new" : "resuming"} session ${sessionId}\n`);
@@ -376,38 +412,4 @@ async function describeConfiguration(
 function parseSettings(text: string): unknown {
   const parsed = parseJsonc(text);
   return parsed.ok ? toPlainValue(parsed.value) : {};
-}
-
-/**
- * Draft an AGENTS.md for the workspace.
- *
- * The scan never overwrites: an existing file is reported and left alone. Writing a
- * new one goes through the ordinary write adapter, so the same approval and path
- * policy apply as any other file creation.
- */
-async function runProjectInit(): Promise<void> {
-  const { createProjectInit } = await import("../adapters/windows/project-init.ts");
-  const init = createProjectInit({ workspaceRoot: process.cwd() });
-  const scanned = await init.scan();
-  if (!scanned.ok) {
-    process.stderr.write(
-      `init failed: ${scanned.code}${scanned.detail === undefined ? "" : ` (${scanned.detail})`}\n`,
-    );
-    return;
-  }
-  if (scanned.alreadyExists) {
-    process.stderr.write("AGENTS.md already exists; not overwriting\n");
-    return;
-  }
-
-  const target = path.join(process.cwd(), "AGENTS.md");
-  try {
-    await writeFile(target, scanned.draft, "utf8");
-  } catch {
-    process.stderr.write("could not write AGENTS.md\n");
-    return;
-  }
-  process.stderr.write(
-    `wrote AGENTS.md (${scanned.facts.languages.join(", ") || "unknown stack"}; review and edit it)\n`,
-  );
 }

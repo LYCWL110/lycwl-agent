@@ -28,7 +28,7 @@ export type WaitingKind = "approval" | "question" | "configuration" | "other";
 export type RunActivity = "thinking" | "working";
 
 export type TuiViewState = Readonly<{
-  localPanel?: "help" | "session" | "credential" | "skills" | "mcp" | "sessions" | null;
+  localPanel?: "help" | "session" | "credential" | "skills" | "mcp" | "sessions" | "init" | null;
   /** Workspace Skill catalog, when discovery ran and succeeded. */
   skillCatalog?:
     | readonly Readonly<{
@@ -83,6 +83,18 @@ export type TuiViewState = Readonly<{
   pendingApprovalPreview: readonly string[] | null;
   /** Why the last question answer was rejected; null when there is no error. */
   answerError: string | null;
+  /**
+   * The AGENTS.md draft awaiting confirmation.
+   *
+   * The draft is shown before it is written: it is generated project content the
+   * user did not write, and every other file mutation in this Harness is previewed.
+   */
+  initPreview?: Readonly<{
+    path: string;
+    bytes: number;
+    detected: readonly string[];
+    head: string;
+  }> | null;
   /** Context window occupancy, or null when nothing is known yet. */
   meter: Readonly<{
     used: number;

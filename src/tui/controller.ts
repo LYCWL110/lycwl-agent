@@ -58,6 +58,23 @@ export type TuiSessionDeps = Readonly<{
     | Readonly<{ ok: false; code: string }>
   >;
   /**
+   * Scan the workspace and produce an AGENTS.md draft without writing it.
+   *
+   * Absent means the command is refused: a Run must not claim to have drafted a file
+   * it cannot scan.
+   */
+  initDraft?: () => Promise<
+    | Readonly<{
+        ok: true;
+        alreadyExists: false;
+        preview: NonNullable<TuiViewState["initPreview"]>;
+      }>
+    | Readonly<{ ok: true; alreadyExists: true }>
+    | Readonly<{ ok: false; code: string }>
+  >;
+  /** Write the confirmed draft. */
+  initWrite?: () => Promise<Readonly<{ ok: true }> | Readonly<{ ok: false; code: string }>>;
+  /**
    * Revert the files this Session changed.
    *
    * The caller owns the disk work: the controller has no file system access and
@@ -101,6 +118,7 @@ export type TuiController = Readonly<{
   lastResult: () => CoordinatorResult | null;
   takeNavigationRequest: () => TuiNavigationRequest | null;
   closePanel: () => void;
+  confirmInit: () => Promise<void>;
   addMcpServer: (entry: McpPanelEntry) => Promise<void>;
   removeMcpServer: (serverId: string) => Promise<void>;
   renameSession: (sessionId: string, title: string | null) => Promise<void>;
@@ -140,7 +158,15 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   /** Why the last answer was rejected, shown in the question panel. */
   let answerError: string | null = null;
   let navigation: TuiNavigationRequest | null = null;
-  let localPanel: "help" | "session" | "credential" | "skills" | "mcp" | "sessions" | null = null;
+  let localPanel:
+    | "help"
+    | "session"
+    | "credential"
+    | "skills"
+    | "mcp"
+    | "sessions"
+    | "init"
+    | null = null;
   /** Loaded once per panel open, so the view never performs I/O. */
   let skillCatalog: readonly SkillCatalogEntry[] | null = null;
   let skillCatalogError: string | null = null;
@@ -151,6 +177,8 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   let sessionListError: string | null = null;
   let sessionListBusy = false;
   let undoBusy = false;
+  let initPreview: NonNullable<TuiViewState["initPreview"]> | null = null;
+  let initBusy = false;
   let commandNotice: string | null = null;
   let checkingSession = false;
   let closing: Promise<void> | null = null;
@@ -342,6 +370,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       ...derived,
       meter: meterFor(derived.transcript),
       usage,
+      initPreview,
       localPanel,
       skillCatalog,
       skillCatalogError,
@@ -526,9 +555,28 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       return;
     }
     if (intent.kind === "project_init") {
-      // The caller owns the scan and the write, because both need the workspace
-      // adapter and the approval path.
-      navigation = { kind: "init" };
+      // Scan first and show the draft. Writing without a preview was the one file
+      // mutation that bypassed approval; the panel is where that is corrected.
+      const scan = deps.initDraft;
+      if (scan === undefined) {
+        commandNotice = "AGENTS.md drafting is unavailable in this build.";
+        return;
+      }
+      try {
+        const drafted = await scan();
+        if (!drafted.ok) {
+          commandNotice = `init failed: ${drafted.code}`;
+          return;
+        }
+        if (drafted.alreadyExists) {
+          commandNotice = "AGENTS.md already exists; not overwriting.";
+          return;
+        }
+        initPreview = drafted.preview;
+        localPanel = "init";
+      } catch {
+        commandNotice = "init failed: scan unavailable";
+      }
       return;
     }
     localPanel = null;
@@ -668,7 +716,31 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     },
     closePanel: () => {
       localPanel = null;
+      initPreview = null;
       commandNotice = null;
+    },
+    confirmInit: async () => {
+      if (initBusy) return;
+      const write = deps.initWrite;
+      if (write === undefined) {
+        commandNotice = "AGENTS.md writing is unavailable in this build.";
+        return;
+      }
+      initBusy = true;
+      try {
+        const written = await write();
+        if (written.ok) {
+          localPanel = null;
+          initPreview = null;
+          commandNotice = "AGENTS.md created; review and edit it.";
+        } else {
+          commandNotice = `init failed: ${written.code}`;
+        }
+      } catch {
+        commandNotice = "init failed: write unavailable";
+      } finally {
+        initBusy = false;
+      }
     },
     addMcpServer: (entry) => changeMcp({ add: entry }),
     removeMcpServer: (serverId) => changeMcp({ remove: serverId }),

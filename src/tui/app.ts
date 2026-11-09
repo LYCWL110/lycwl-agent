@@ -5,6 +5,7 @@ import { ActivityIndicator } from "./activity-indicator.ts";
 import { Brand, clipText, colorProps, useViewport, type Viewport, wrapText } from "./chrome.ts";
 import { CommandMenu } from "./command-menu.ts";
 import { CredentialScreen } from "./credential-screen.ts";
+import { InitPanel } from "./init-panel.ts";
 import { LocalPanel } from "./local-panel.ts";
 import { McpPanel } from "./mcp-panel.ts";
 import { type Capabilities, colorFor, detectCapabilities } from "./palette.ts";
@@ -62,6 +63,9 @@ export type AppProps = Readonly<{
     entry: Readonly<{ serverId: string; command: string; args: readonly string[] }>,
   ) => void;
   onMcpRemove?: (serverId: string) => void;
+  /** AGENTS.md draft confirmation. */
+  onInitConfirm?: () => void;
+  initBusy?: boolean;
   /** Session list actions; the caller owns the disk operations. */
   onSessionResume?: (sessionId: string) => void;
   onSessionRename?: (sessionId: string, title: string | null) => void;
@@ -293,6 +297,16 @@ export function App(props: AppProps): ReactElement {
       onSave: props.onCorrectCredential ?? (async () => false),
       onClose: () => props.onClosePanel?.(),
     });
+  if (view.localPanel === "init" && view.initPreview != null)
+    return h(InitPanel, {
+      viewport,
+      capabilities,
+      preview: view.initPreview,
+      busy: props.initBusy === true,
+      notice: view.commandNotice ?? null,
+      onConfirm: () => props.onInitConfirm?.(),
+      onCancel: () => props.onClosePanel?.(),
+    });
   if (view.localPanel === "sessions")
     return h(SessionList, {
       viewport,
@@ -318,7 +332,8 @@ export function App(props: AppProps): ReactElement {
       onRemove: (serverId) => props.onMcpRemove?.(serverId),
       onClose: () => props.onClosePanel?.(),
     });
-  if (view.localPanel != null)
+  // "init" is rendered above by its own panel; the rest fall through to LocalPanel.
+  if (view.localPanel != null && view.localPanel !== "init")
     return h(LocalPanel, {
       key: view.localPanel,
       kind: view.localPanel,

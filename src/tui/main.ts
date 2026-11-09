@@ -93,6 +93,9 @@ export function startTui(
       onMcpRemove: (serverId) => {
         void controller.removeMcpServer(serverId).then(refresh);
       },
+      onInitConfirm: () => {
+        void controller.confirmInit().then(refresh);
+      },
       onSessionResume: (sessionId) => {
         // Resuming replaces the whole Session, so it leaves the TUI the same way
         // /session does rather than mutating the live one.
