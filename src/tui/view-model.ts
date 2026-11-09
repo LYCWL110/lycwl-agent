@@ -82,6 +82,16 @@ export type TuiViewState = Readonly<{
   pendingApprovalPreview: readonly string[] | null;
   /** Why the last question answer was rejected; null when there is no error. */
   answerError: string | null;
+  /**
+   * Token usage for the last finished Run. Absent when the provider reported none,
+   * which is shown as unknown rather than as zero.
+   */
+  usage?: Readonly<{
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens?: number;
+    reasoningTokens?: number;
+  }> | null;
   pendingQuestion: PendingQuestionView | null;
   /** Composer text is local draft state, never an accepted command. */
   draft: string;

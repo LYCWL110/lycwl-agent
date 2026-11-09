@@ -98,6 +98,14 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   let runStatus: TuiViewState["runStatus"] = "idle";
   let safeCode: string | null = null;
   let lastResult: CoordinatorResult | null = null;
+  /**
+   * Usage of the last finished Run.
+   *
+   * Kept separately from the view derivation because it comes from the result, not
+   * from the event log: a Run that reported no usage has no figure at all, and the
+   * view must not derive one.
+   */
+  let usage: NonNullable<TuiViewState["usage"]> | null = null;
   let draft = "";
   let commandCounter = 0;
   let events: readonly InternalEvent[] = deps.initialEvents ?? [];
@@ -135,6 +143,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     lastResult = result;
     runStatus = result.status;
     safeCode = result.safeCode;
+    usage = result.usage ?? null;
     rememberEvents(result.events);
     todo = deriveTodo(todo, result.events);
   }
@@ -301,6 +310,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
         answerError,
         draft,
       }),
+      usage,
       localPanel,
       skillCatalog,
       skillCatalogError,

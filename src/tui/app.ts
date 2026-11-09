@@ -605,9 +605,9 @@ function Composer(props: {
 }
 
 /**
- * Footer: mode on the left, model and status on the right.
+ * Footer: mode on the left, model, tokens and status on the right.
  *
- * Clip the mode and model independently so they cannot collide on narrow terminals.
+ * Clip each segment independently so they cannot collide on narrow terminals.
  */
 function Footer(props: {
   view: TuiViewState;
@@ -634,11 +634,34 @@ function Footer(props: {
       Text,
       colorProps(colorFor("dim", capabilities)),
       clipText(
-        modelLabel === undefined
-          ? (view.safeCode ?? "")
-          : `${modelLabel}${view.safeCode === null ? "" : ` · ${view.safeCode}`}`,
+        [modelLabel ?? null, tokenSegment(view.usage), view.safeCode]
+          .filter((part): part is string => part !== null && part !== undefined && part !== "")
+          .join(" · "),
         Math.max(1, Math.floor(props.width / 2) - 1),
       ),
     ),
   );
+}
+
+/**
+ * Token counts for the last finished Run.
+ *
+ * Absent means the provider reported nothing, which is shown as nothing rather
+ * than as a zero count. `cached` is a subset of the input count, shown because it
+ * explains a large prompt with a small effective cost.
+ */
+function tokenSegment(usage: TuiViewState["usage"]): string | null {
+  if (usage === null || usage === undefined) return null;
+  const total = usage.inputTokens + usage.outputTokens;
+  if (total === 0) return null;
+  const cached =
+    usage.cachedInputTokens === undefined ? "" : ` (${compact(usage.cachedInputTokens)} cached)`;
+  return `${compact(total)} tok${cached}`;
+}
+
+/** Thousands as `1.2k`, so a footer segment stays short. */
+function compact(value: number): string {
+  if (value < 1_000) return String(value);
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(1).replace(/\.0$/u, "")}k`;
+  return `${(value / 1_000_000).toFixed(1).replace(/\.0$/u, "")}M`;
 }

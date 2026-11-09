@@ -7,7 +7,6 @@ export const RUN_BUDGET_LIMITS = Object.freeze({
   auxiliaryAttemptsPerCompaction: 2,
   elapsedActiveMs: 30 * 60 * 1000,
   testFixCycles: 3,
-  knownPriceSpendingUsd: 5,
   siblingToolConcurrency: 1,
 } as const);
 
@@ -34,7 +33,6 @@ export type BudgetFailure =
   | "compaction_limit"
   | "elapsed_limit"
   | "test_fix_limit"
-  | "spending_limit"
   | "invalid_delta";
 
 export type BudgetResult =
@@ -75,15 +73,4 @@ export function addTestFixCycle(budget: RunBudget): BudgetResult {
     return { ok: false, code: "test_fix_limit" };
   }
   return { ok: true, value: { ...budget, testFixCycles: budget.testFixCycles + 1 } };
-}
-
-export function addKnownSpending(budget: RunBudget, amountUsd: number): BudgetResult {
-  if (!validDelta(amountUsd)) {
-    return { ok: false, code: "invalid_delta" };
-  }
-  const next = budget.knownSpendingUsd + amountUsd;
-  if (next >= RUN_BUDGET_LIMITS.knownPriceSpendingUsd) {
-    return { ok: false, code: "spending_limit" };
-  }
-  return { ok: true, value: { ...budget, knownSpendingUsd: next } };
 }

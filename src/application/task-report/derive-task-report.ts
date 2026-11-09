@@ -29,6 +29,15 @@ export function deriveTaskReport(
   let wait: ReportSnapshot["wait"] = null;
   let knownUsd = 0;
   let attempts = 0;
+  /**
+   * Requests whose token cost is unknown.
+   *
+   * Counted from the responses themselves, not from a blanket flag: a request whose
+   * provider reported usage has a known token count, and only the ones that did not
+   * are unknown. The previous rule marked every request unknown because no usage was
+   * ever captured.
+   */
+  let unpricedAttempts = 0;
   let costUnknown = false;
   const approved = new Set<string>();
   const background = new Map<string, string>();
@@ -82,6 +91,10 @@ export function deriveTaskReport(
         break;
       case "model_request_started":
         attempts++;
+        break;
+      case "model_response_validated":
+        // No usage on a validated response means the provider did not report one.
+        if (fact.usage === undefined) unpricedAttempts++;
         break;
       case "run_budget_updated":
         knownUsd = fact.budget.knownSpendingUsd;
@@ -158,7 +171,14 @@ export function deriveTaskReport(
     backgroundTasks: [...background].map(([taskId, state]) => ({ taskId, state })),
     wait,
     nextUserActions: wait === null ? [] : [wait.requiredAction],
-    usage: { knownUsd, unknownChargeCount: costUnknown ? attempts : 0 },
+    usage: {
+      knownUsd,
+      // Counted from the responses: a request that reported tokens is not an unknown
+      // charge even though no price table exists yet. The flag is retained for the
+      // case where the run ended before any response settled the question.
+      unknownChargeCount:
+        unpricedAttempts > 0 ? unpricedAttempts : costUnknown && attempts > 0 ? attempts : 0,
+    },
   });
 }
 

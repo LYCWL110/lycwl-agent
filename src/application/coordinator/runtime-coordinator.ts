@@ -1016,6 +1016,8 @@ export class RuntimeCoordinator {
         // rather than silently counted as zero.
         if (completion.usage !== undefined) {
           context.usage = addUsage(context.usage, completion.usage);
+          // The provider priced this request, so it is no longer an unknown charge.
+          context.costUnknown = false;
         }
 
         // Section 8: the assistant turn belongs in the history. Without it the
@@ -1274,6 +1276,9 @@ export class RuntimeCoordinator {
               return { ok: false as const, safeCode: bound.code };
             }
           }
+          // A request is only a candidate for an unknown charge until its response
+          // arrives. Marking it unknown unconditionally made every Run report every
+          // attempt as unpriced even when the provider reported usage.
           context.costUnknown = true;
           await this.#record(context, "model_request_started", {
             kind: "model_request_started",
