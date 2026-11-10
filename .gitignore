@@ -13,8 +13,12 @@ node_modules/
 .pnpm-store/
 coverage/
 biome-cache/
-dist/
 release/
+
+# dist/ is committed on purpose: a git dependency does not install
+# devDependencies, so `prepare` cannot run tsc, and `npm install -g github:...`
+# would otherwise install a package with no runnable entry. tools/check-dist-fresh.mjs
+# fails the build when the output is older than the source.
 
 # Local runtime data.
 .tmp/

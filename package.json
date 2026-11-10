@@ -1,26 +1,47 @@
 {
   "name": "lycwl-agent",
   "version": "0.1.0",
+  "description": "Local coding agent harness for Windows: permission-controlled file, shell, LSP and MCP tools in a terminal UI.",
+  "license": "MIT",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@10.20.0",
+  "author": "lycwl",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lycwl/lycwl-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lycwl/lycwl-agent/issues"
+  },
+  "homepage": "https://github.com/lycwl/lycwl-agent#readme",
+  "keywords": [
+    "agent",
+    "cli",
+    "tui",
+    "mcp",
+    "coding-agent",
+    "windows",
+    "llm"
+  ],
   "engines": {
     "node": ">=24.0.0 <25"
   },
+  "packageManager": "pnpm@10.20.0",
   "bin": {
     "lycwl": "./dist/bootstrap/main.js"
   },
   "files": [
     "dist/",
     "README.md",
+    "LICENSE",
     "lycwl.cmd"
   ],
   "scripts": {
     "start": "node src/bootstrap/main.ts",
     "build": "tsc -p tsconfig.build.json",
     "start:built": "node dist/bootstrap/main.js",
-    "test": "node --test tests/**/*.test.ts",
-    "test:unit": "node --test tests/unit/**/*.test.ts",
+    "test": "node tools/run-tests.mjs",
+    "test:unit": "node tools/run-tests.mjs --no-process",
     "test:contract": "node --test tests/contract/**/*.test.ts",
     "test:architecture": "node --test tests/contract/architecture.test.ts",
     "test:tui": "vitest run tests/unit/tui-render.test.ts tests/unit/setup-screen-render.test.ts tests/unit/mcp-panel.test.ts tests/unit/session-list.test.ts tests/unit/init-panel.test.ts",
@@ -28,8 +49,11 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "check:tests-present": "node tools/require-tests.mjs",
-    "verify": "pnpm run lint && pnpm run typecheck && pnpm run check:tests-present && pnpm run test:architecture && pnpm run test && pnpm run test:tui",
-    "prepublishOnly": "pnpm run build && node -e \"require('node:fs').accessSync('dist/bootstrap/main.js')\" && pnpm run verify"
+    "verify": "pnpm run lint && pnpm run typecheck && pnpm run check:tests-present && pnpm run check:dist-fresh && pnpm run test:architecture && pnpm run test && pnpm run test:tui",
+    "prepublishOnly": "pnpm run build && node -e \"require('node:fs').accessSync('dist/bootstrap/main.js')\" && pnpm run verify",
+    "check:dist-fresh": "node tools/check-dist-fresh.mjs",
+    "test:process": "node --test tests/integration/process-supervisor.test.ts tests/integration/guarded-process-pipes.test.ts",
+    "test:default": "node --test tests/unit/**/*.test.ts tests/integration/**/*.test.ts tests/contract/**/*.test.ts tests/recovery/**/*.test.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.4",
