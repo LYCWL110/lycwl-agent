@@ -108,7 +108,7 @@ describe("production Shell evidence and reports", () => {
       )?.payload;
       assert.ok(execution?.kind === "tool_execution_finished");
       assert.equal(execution.status, "succeeded");
-      assert.ok(execution.text?.includes("[truncated: model budget]"));
+      assert.ok(execution.text?.includes("[partial: cut to fit the token budget]"));
       assert.equal(execution.evidence?.rawComplete, true);
       const attachment = execution.evidence.attachments[0];
       assert.ok(attachment);

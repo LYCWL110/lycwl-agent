@@ -173,7 +173,7 @@ describe("shell execution", () => {
 
     assert.equal(result.status, "succeeded");
     if (result.status !== "succeeded") return;
-    assert.match(result.text ?? "", /\[truncated: model budget\]/);
+    assert.match(result.text ?? "", /\[partial: cut to fit the token budget\]/);
     assert.equal((result.text ?? "").length < long.length, true);
   });
 

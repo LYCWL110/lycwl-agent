@@ -282,6 +282,6 @@ async function executeFetch(
 function boundFetchText(body: string): Readonly<{ text: string }> {
   if (body.length <= WEB_LIMITS.maxFetchModelUnits) return { text: body };
   return {
-    text: `${body.slice(0, WEB_LIMITS.maxFetchModelUnits)}\n[truncated: model budget]`,
+    text: `${body.slice(0, WEB_LIMITS.maxFetchModelUnits)}\n[partial: cut to fit the token budget]`,
   };
 }

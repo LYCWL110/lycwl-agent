@@ -352,5 +352,5 @@ export function formatLocations(kind: string, locations: readonly LspLocation[])
 
 export function boundLspText(text: string): string {
   if (text.length <= LSP_LIMITS.maxModelUnits) return text;
-  return `${text.slice(0, LSP_LIMITS.maxModelUnits)}\n[truncated: model budget]`;
+  return `${text.slice(0, LSP_LIMITS.maxModelUnits)}\n[partial: cut to fit the token budget]`;
 }

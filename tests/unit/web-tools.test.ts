@@ -214,7 +214,7 @@ describe("web_fetch execution", () => {
     });
 
     assert.equal(result.status, "succeeded");
-    assert.match(result.text ?? "", /\[truncated: model budget\]/);
+    assert.match(result.text ?? "", /\[partial: cut to fit the token budget\]/);
   });
 
   it("marks a near-local target in the result header", async () => {

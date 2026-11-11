@@ -353,7 +353,11 @@ const payloadChecks = {
         attemptNo: positive,
         toolCallCount: integer,
         text: nullable(text),
-    }, { toolCalls: array(call), usage: tokenUsage }),
+    }, {
+        completeness: object({ outcome: oneOf("complete", "partial", "unconfirmed") }, { reason: text, continuation: text }),
+        toolCalls: array(call),
+        usage: tokenUsage,
+    }),
     tool_call_received: object({
         kind: text,
         ...toolLink,
@@ -425,7 +429,11 @@ const payloadChecks = {
         status: oneOf("succeeded", "failed", "cancelled", "outcome_unknown"),
         safeCode: nullable(text),
         text: nullable(text),
-    }, { toolName: id, evidence: toolEvidence }),
+    }, {
+        toolName: id,
+        evidence: toolEvidence,
+        completeness: object({ outcome: oneOf("complete", "partial", "unconfirmed") }, { reason: text, continuation: text }),
+    }),
     tool_execution_denied: object({ kind: text, ...toolLink }),
 };
 const envelope = object({

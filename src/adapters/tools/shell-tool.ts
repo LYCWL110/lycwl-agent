@@ -196,5 +196,7 @@ function truncateForModel(stdout: string, stderr: string): string {
     stderr.length === 0 ? "(empty)" : stderr,
   ].join("\n");
   if (body.length <= SHELL_MODEL_CAP_UNITS) return body;
-  return `${body.slice(0, SHELL_MODEL_CAP_UNITS)}\n[truncated: model budget]`;
+  // The marker stays for a reader of the text alone; the structured field carries
+  // the same fact for anything that inspects the event.
+  return `${body.slice(0, SHELL_MODEL_CAP_UNITS)}\n[partial: cut to fit the token budget]`;
 }

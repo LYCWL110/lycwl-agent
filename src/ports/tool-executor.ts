@@ -1,5 +1,6 @@
 import type { ToolEvidence } from "../domain/evidence/tool-evidence.ts";
 import type { ToolExecutionSemantics } from "../domain/tool-invocation/execution-semantics.ts";
+import type { ResultCompleteness } from "../domain/tool-invocation/result-completeness.ts";
 import type { BackgroundObserver } from "./background-task.ts";
 
 export type ToolSideEffectClass =
@@ -44,6 +45,14 @@ export type ToolExecutionRequest = Readonly<{
 
 export type ToolExecutionResult = Readonly<{
   evidence?: ToolEvidence;
+  /**
+   * Whether the result is complete, partial or unconfirmed.
+   *
+   * Absent means complete, which is the common case and keeps existing tools
+   * unchanged. A tool that truncates, pages or spills declares it here instead of
+   * leaving a marker in the text for the model to notice.
+   */
+  completeness?: ResultCompleteness;
   /** Early capture protection; preserves execution status and withholds payload. */
   deliveryBlocked?: "owned_key_detected" | "guard_failure";
   /** Trusted adapter provenance, not model-supplied sensitivity labels. */

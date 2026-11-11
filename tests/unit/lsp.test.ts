@@ -110,7 +110,7 @@ describe("LSP message and result bounds", () => {
   it("bounds model-facing text", () => {
     assert.equal(boundLspText("short"), "short");
     const long = "x".repeat(LSP_LIMITS.maxModelUnits + 10);
-    assert.match(boundLspText(long), /\[truncated: model budget\]/);
+    assert.match(boundLspText(long), /\[partial: cut to fit the token budget\]/);
   });
 });
 

@@ -12,6 +12,7 @@ import { addCompaction, addModelRound, createRunBudget, RUN_BUDGET_LIMITS, } fro
 import { finishRun, resumeRun, startRun, waitRun } from "../../domain/run/run-state.js";
 import { describeIssues, validateValue } from "../../domain/tool-invocation/argument-validation.js";
 import { resolveUncertainty } from "../../domain/tool-invocation/execution-semantics.js";
+import { spilledResult, unconfirmed, } from "../../domain/tool-invocation/result-completeness.js";
 import { assertProtectedValue, guardToolResultText, ProtectedDeliveryError, } from "../../services/security/guarded-delivery.js";
 import { deriveTaskReport } from "../task-report/derive-task-report.js";
 import { estimateArtifactTokens, parseCompactionArtifact, prepareCompaction, validateArtifact, } from "./compaction-service.js";
@@ -1445,11 +1446,19 @@ export class RuntimeCoordinator {
                 if (type === "tool_execution_finished") {
                     const fact = payload;
                     const spilled = await this.#spillToolText(context, call, fact.text);
-                    if (spilled !== fact.text && spilled !== null)
+                    const wasSpilled = spilled !== fact.text && spilled !== null;
+                    if (wasSpilled)
                         context.spilledPreviews.set(call.providerToolCallId, spilled);
+                    // Completeness is recorded on the event, not only in the text: a report
+                    // or a replay needs the fact, and a marker in prose can be paraphrased
+                    // away by a later summary.
+                    const completeness = wasSpilled
+                        ? spilledResult("the stored copy")
+                        : unconfirmedIfUnknown(fact.status);
                     await this.#record(context, type, {
                         ...fact,
                         text: spilled,
+                        ...(completeness === undefined ? {} : { completeness }),
                     });
                     return;
                 }
@@ -2381,4 +2390,13 @@ function patchTargets(patch) {
             found.push(target);
     }
     return found;
+}
+/**
+ * An uncertain execution is unconfirmed rather than partial.
+ *
+ * "Partial" would claim knowledge of a result that arrived; "unconfirmed" says the
+ * effect could not be established, which is the actual fact.
+ */
+function unconfirmedIfUnknown(status) {
+    return status === "outcome_unknown" ? unconfirmed() : undefined;
 }

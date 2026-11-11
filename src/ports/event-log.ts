@@ -317,6 +317,17 @@ export type InternalEventPayload =
       status: "succeeded" | "failed" | "cancelled" | "outcome_unknown";
       safeCode: string | null;
       text: string | null;
+      /**
+       * Whether the recorded result is complete.
+       *
+       * Absent on older records and on complete results, so a replay treats a
+       * missing value as complete rather than as unknown.
+       */
+      completeness?: Readonly<{
+        outcome: "complete" | "partial" | "unconfirmed";
+        reason?: string;
+        continuation?: string;
+      }>;
       /** Name of the tool, so a replay can rebuild the result without a lookup. */
       toolName?: string;
       evidence?: ToolEvidence;

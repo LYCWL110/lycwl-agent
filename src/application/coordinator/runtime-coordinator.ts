@@ -45,6 +45,11 @@ import { finishRun, type Run, resumeRun, startRun, waitRun } from "../../domain/
 import type { OwnedKeyRegistry } from "../../domain/security/owned-key-guard.ts";
 import { describeIssues, validateValue } from "../../domain/tool-invocation/argument-validation.ts";
 import { resolveUncertainty } from "../../domain/tool-invocation/execution-semantics.ts";
+import {
+  type ResultCompleteness,
+  spilledResult,
+  unconfirmed,
+} from "../../domain/tool-invocation/result-completeness.ts";
 import type { ApprovalGate } from "../../ports/approval-gate.ts";
 import type { FormatterRunner } from "../../ports/formatter.ts";
 import type { IdentifierFactory } from "../../ports/identity.ts";
@@ -2016,11 +2021,19 @@ export class RuntimeCoordinator {
               { kind: "tool_execution_finished" }
             >;
             const spilled = await this.#spillToolText(context, call, fact.text);
-            if (spilled !== fact.text && spilled !== null)
-              context.spilledPreviews.set(call.providerToolCallId, spilled);
+            const wasSpilled = spilled !== fact.text && spilled !== null;
+            if (wasSpilled) context.spilledPreviews.set(call.providerToolCallId, spilled);
+
+            // Completeness is recorded on the event, not only in the text: a report
+            // or a replay needs the fact, and a marker in prose can be paraphrased
+            // away by a later summary.
+            const completeness = wasSpilled
+              ? spilledResult("the stored copy")
+              : unconfirmedIfUnknown(fact.status);
             await this.#record(context, type, {
               ...fact,
               text: spilled,
+              ...(completeness === undefined ? {} : { completeness }),
             } as InternalEvent["payload"]);
             return;
           }
@@ -3045,4 +3058,14 @@ function patchTargets(patch: string): readonly string[] {
     if (target !== undefined && target.length > 0) found.push(target);
   }
   return found;
+}
+
+/**
+ * An uncertain execution is unconfirmed rather than partial.
+ *
+ * "Partial" would claim knowledge of a result that arrived; "unconfirmed" says the
+ * effect could not be established, which is the actual fact.
+ */
+function unconfirmedIfUnknown(status: string): ResultCompleteness | undefined {
+  return status === "outcome_unknown" ? unconfirmed() : undefined;
 }
