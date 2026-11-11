@@ -65,6 +65,12 @@ export const SHELL_DEFINITION: ToolDefinition = {
   name: "shell",
   version: "1",
   sideEffectClass: "process_execution",
+  // A command can do anything, including things that must not happen twice.
+  semantics: { idempotent: false, retry: "never" },
+  // No verification is possible: the Harness cannot enumerate the paths a command
+  // wrote or the services it called, so it cannot check them.
+  uncertaintyGuidance:
+    "The command may have run. Check the affected files or services yourself before retrying; re-running it could repeat its effects.",
   requiresApproval: true,
   concurrencySafe: false,
 };

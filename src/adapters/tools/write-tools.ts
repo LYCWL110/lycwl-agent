@@ -40,6 +40,7 @@ export const CREATE_FILE_DEFINITION: ToolDefinition = {
   name: "create_file",
   version: "1",
   sideEffectClass: "filesystem_mutation",
+  semantics: { idempotent: true, retry: "conditional" },
   requiresApproval: true,
   concurrencySafe: false,
 };
@@ -48,6 +49,7 @@ export const EDIT_FILE_DEFINITION: ToolDefinition = {
   name: "edit_file",
   version: "1",
   sideEffectClass: "filesystem_mutation",
+  semantics: { idempotent: true, retry: "conditional" },
   requiresApproval: true,
   concurrencySafe: false,
 };

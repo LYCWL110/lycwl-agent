@@ -24,6 +24,12 @@ export type InternalEventPayload =
       reason: "attachment_missing" | "hash_mismatch" | "content_not_stored";
     }>
   | Readonly<{
+      kind: "tool_outcome_verified";
+      toolCallId: string;
+      /** What the verification established, or that it could not settle the question. */
+      verdict: "applied" | "not_applied" | "unresolved";
+    }>
+  | Readonly<{
       kind: "syntax_check_failed";
       toolCallId: string;
       path: string;

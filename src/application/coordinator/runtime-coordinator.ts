@@ -43,6 +43,7 @@ import {
 } from "../../domain/run/run-budget.ts";
 import { finishRun, type Run, resumeRun, startRun, waitRun } from "../../domain/run/run-state.ts";
 import type { OwnedKeyRegistry } from "../../domain/security/owned-key-guard.ts";
+import { resolveUncertainty } from "../../domain/tool-invocation/execution-semantics.ts";
 import type { ApprovalGate } from "../../ports/approval-gate.ts";
 import type { FormatterRunner } from "../../ports/formatter.ts";
 import type { IdentifierFactory } from "../../ports/identity.ts";
@@ -1976,8 +1977,11 @@ export class RuntimeCoordinator {
       context.deliveryBlockReason = outcome.deliveryBlockReason ?? "owned_key_detected";
     }
 
-    if (outcome.kind === "unknown")
-      await this.#appendToolResult(context, call, "outcome_unknown", outcome.safeCode);
+    if (outcome.kind === "unknown") {
+      await this.#recordUnknownOutcome(context, call, outcome.safeCode);
+      if (context.cancelRequested) return { kind: "stop", result: await this.#cancel(context) };
+      return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
+    }
     if (context.cancelRequested && outcome.kind !== "continue")
       return { kind: "stop", result: await this.#cancel(context) };
     if (outcome.kind === "waiting") {
@@ -1987,9 +1991,6 @@ export class RuntimeCoordinator {
       return this.#awaitQuestion(context, outcome);
     }
     if (outcome.kind === "invalid") {
-      return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
-    }
-    if (outcome.kind === "unknown") {
       return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
     }
     // A successful single-file edit is verified before its result is recorded, so a
@@ -2124,8 +2125,9 @@ export class RuntimeCoordinator {
       context.deliveryBlockReason = outcome.deliveryBlockReason ?? "owned_key_detected";
     }
 
-    if (outcome.kind === "unknown")
-      await this.#appendToolResult(context, pending.call, "outcome_unknown", outcome.safeCode);
+    if (outcome.kind === "unknown") {
+      await this.#recordUnknownOutcome(context, pending.call, outcome.safeCode);
+    }
     if (context.cancelRequested && outcome.kind !== "continue")
       return { kind: "stop", result: await this.#cancel(context) };
     if (outcome.kind === "waiting") return this.#awaitApproval(context, outcome);
@@ -2297,6 +2299,50 @@ export class RuntimeCoordinator {
       status,
       text: preview ?? delivery.text,
     });
+  }
+
+  /**
+   * Record an uncertain outcome, checking what actually happened first.
+   *
+   * A timeout does not prove failure: the operation may have run and its result may
+   * have been lost. The executor is asked to inspect its own effect, and the answer
+   * is recorded as a fact rather than used to rewrite the outcome. Reporting
+   * `applied` would claim a state nobody observed; reporting `not_applied` would
+   * invite a retry that duplicates the effect.
+   */
+  async #recordUnknownOutcome(
+    context: MutableRunContext,
+    call: ProviderToolCall,
+    safeCode: string,
+  ): Promise<void> {
+    const definition = this.#deps.tools.getDefinition(call.toolName);
+    let verdict: "applied" | "not_applied" | "inconclusive" | null = null;
+    try {
+      verdict =
+        (await this.#deps.tools.verifyOutcome?.({
+          toolCallId: call.providerToolCallId,
+          toolName: call.toolName,
+          arguments: call.arguments,
+        })) ?? null;
+    } catch {
+      // A verifier that throws proves nothing about the operation.
+      verdict = "inconclusive";
+    }
+
+    const resolution = resolveUncertainty(verdict, definition?.uncertaintyGuidance);
+    const suffix =
+      resolution.kind === "applied"
+        ? " (verified: the effect is present)"
+        : resolution.kind === "not_applied"
+          ? " (verified: the effect is absent)"
+          : ` (${resolution.guidance})`;
+
+    await this.#record(context, "tool_outcome_verified", {
+      kind: "tool_outcome_verified",
+      toolCallId: call.providerToolCallId,
+      verdict: resolution.kind,
+    });
+    await this.#appendToolResult(context, call, "outcome_unknown", `${safeCode}${suffix}`);
   }
 
   /**

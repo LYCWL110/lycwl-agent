@@ -1,4 +1,5 @@
 import type { ToolEvidence } from "../domain/evidence/tool-evidence.ts";
+import type { ToolExecutionSemantics } from "../domain/tool-invocation/execution-semantics.ts";
 import type { BackgroundObserver } from "./background-task.ts";
 
 export type ToolSideEffectClass =
@@ -13,6 +14,21 @@ export type ToolDefinition = Readonly<{
   sideEffectClass: ToolSideEffectClass;
   requiresApproval: boolean;
   concurrencySafe: boolean;
+  /**
+   * Whether the operation may be retried, and how an uncertain outcome is resolved.
+   *
+   * Absent falls back to `defaultSemantics(sideEffectClass)`, which is conservative:
+   * a class whose operations are sometimes repeatable is treated as not repeatable.
+   * A tool that knows better declares it here.
+   */
+  semantics?: ToolExecutionSemantics;
+  /**
+   * What to tell the user when an uncertain outcome cannot be resolved.
+   *
+   * Absent falls back to a generic instruction. The check itself is a method on
+   * the executor, because only the adapter knows how to inspect its own effect.
+   */
+  uncertaintyGuidance?: string;
 }>;
 
 export type ToolExecutionRequest = Readonly<{
@@ -62,6 +78,18 @@ export interface ToolExecutor {
   preview?(request: ToolExecutionRequest): Promise<string | null>;
   requiresApproval?(request: ToolExecutionRequest): Promise<boolean>;
   revalidateApproval?(request: ToolExecutionRequest): Promise<boolean>;
+  /**
+   * Establish what happened after an outcome became unknown.
+   *
+   * It must not re-run the operation: a verifier that repeats the call is the
+   * mistake this exists to prevent. It performs a read-only inspection and returns
+   * `applied`, `not_applied`, or `inconclusive`.
+   *
+   * Absent means the outcome stays unknown, which is a legitimate answer.
+   */
+  verifyOutcome?(
+    request: ToolExecutionRequest,
+  ): Promise<import("../domain/tool-invocation/execution-semantics.ts").VerificationVerdict | null>;
   discardApproval?(toolCallId: string): void;
   cancelAll?(): Promise<void>;
   observeBackground?(observer: BackgroundObserver): () => void;

@@ -10,6 +10,7 @@ import { consumeRunInput, emptyRunInputQueue, queueRunInput, } from "../../domai
 import { checkIdenticalCall, } from "../../domain/run/no-progress.js";
 import { addCompaction, addModelRound, createRunBudget, RUN_BUDGET_LIMITS, } from "../../domain/run/run-budget.js";
 import { finishRun, resumeRun, startRun, waitRun } from "../../domain/run/run-state.js";
+import { resolveUncertainty } from "../../domain/tool-invocation/execution-semantics.js";
 import { assertProtectedValue, guardToolResultText, ProtectedDeliveryError, } from "../../services/security/guarded-delivery.js";
 import { deriveTaskReport } from "../task-report/derive-task-report.js";
 import { estimateArtifactTokens, parseCompactionArtifact, prepareCompaction, validateArtifact, } from "./compaction-service.js";
@@ -1418,8 +1419,12 @@ export class RuntimeCoordinator {
             context.deliveryBlocked = true;
             context.deliveryBlockReason = outcome.deliveryBlockReason ?? "owned_key_detected";
         }
-        if (outcome.kind === "unknown")
-            await this.#appendToolResult(context, call, "outcome_unknown", outcome.safeCode);
+        if (outcome.kind === "unknown") {
+            await this.#recordUnknownOutcome(context, call, outcome.safeCode);
+            if (context.cancelRequested)
+                return { kind: "stop", result: await this.#cancel(context) };
+            return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
+        }
         if (context.cancelRequested && outcome.kind !== "continue")
             return { kind: "stop", result: await this.#cancel(context) };
         if (outcome.kind === "waiting") {
@@ -1429,9 +1434,6 @@ export class RuntimeCoordinator {
             return this.#awaitQuestion(context, outcome);
         }
         if (outcome.kind === "invalid") {
-            return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
-        }
-        if (outcome.kind === "unknown") {
             return { kind: "stop", result: await this.#fail(context, outcome.safeCode) };
         }
         // A successful single-file edit is verified before its result is recorded, so a
@@ -1546,8 +1548,9 @@ export class RuntimeCoordinator {
             context.deliveryBlocked = true;
             context.deliveryBlockReason = outcome.deliveryBlockReason ?? "owned_key_detected";
         }
-        if (outcome.kind === "unknown")
-            await this.#appendToolResult(context, pending.call, "outcome_unknown", outcome.safeCode);
+        if (outcome.kind === "unknown") {
+            await this.#recordUnknownOutcome(context, pending.call, outcome.safeCode);
+        }
         if (context.cancelRequested && outcome.kind !== "continue")
             return { kind: "stop", result: await this.#cancel(context) };
         if (outcome.kind === "waiting")
@@ -1693,6 +1696,43 @@ export class RuntimeCoordinator {
             status,
             text: preview ?? delivery.text,
         });
+    }
+    /**
+     * Record an uncertain outcome, checking what actually happened first.
+     *
+     * A timeout does not prove failure: the operation may have run and its result may
+     * have been lost. The executor is asked to inspect its own effect, and the answer
+     * is recorded as a fact rather than used to rewrite the outcome. Reporting
+     * `applied` would claim a state nobody observed; reporting `not_applied` would
+     * invite a retry that duplicates the effect.
+     */
+    async #recordUnknownOutcome(context, call, safeCode) {
+        const definition = this.#deps.tools.getDefinition(call.toolName);
+        let verdict = null;
+        try {
+            verdict =
+                (await this.#deps.tools.verifyOutcome?.({
+                    toolCallId: call.providerToolCallId,
+                    toolName: call.toolName,
+                    arguments: call.arguments,
+                })) ?? null;
+        }
+        catch {
+            // A verifier that throws proves nothing about the operation.
+            verdict = "inconclusive";
+        }
+        const resolution = resolveUncertainty(verdict, definition?.uncertaintyGuidance);
+        const suffix = resolution.kind === "applied"
+            ? " (verified: the effect is present)"
+            : resolution.kind === "not_applied"
+                ? " (verified: the effect is absent)"
+                : ` (${resolution.guidance})`;
+        await this.#record(context, "tool_outcome_verified", {
+            kind: "tool_outcome_verified",
+            toolCallId: call.providerToolCallId,
+            verdict: resolution.kind,
+        });
+        await this.#appendToolResult(context, call, "outcome_unknown", `${safeCode}${suffix}`);
     }
     /**
      * Verify that a single-file edit still compiles, and revert it when it does not.

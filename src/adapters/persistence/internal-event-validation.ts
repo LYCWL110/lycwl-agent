@@ -271,6 +271,11 @@ const payloadChecks = {
     ref: attachmentRef,
     reason: oneOf("attachment_missing", "hash_mismatch", "content_not_stored"),
   }),
+  tool_outcome_verified: object({
+    kind: text,
+    toolCallId: id,
+    verdict: oneOf("applied", "not_applied", "unresolved"),
+  }),
   syntax_check_failed: object({
     kind: text,
     toolCallId: id,

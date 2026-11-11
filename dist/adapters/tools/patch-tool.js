@@ -4,6 +4,7 @@ export const APPLY_PATCH_DEFINITION = {
     name: "apply_patch",
     version: "1",
     sideEffectClass: "filesystem_mutation",
+    semantics: { idempotent: true, retry: "conditional" },
     requiresApproval: true,
     concurrencySafe: false,
 };

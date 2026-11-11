@@ -29,6 +29,9 @@ export const DELETE_PATH_DEFINITION: ToolDefinition = {
   name: "delete_path",
   version: "1",
   sideEffectClass: "filesystem_mutation",
+  // A delete or rename that already happened leaves the same state on a repeat, so
+  // the operation is idempotent in effect even though the second call fails.
+  semantics: { idempotent: true, retry: "conditional" },
   requiresApproval: true,
   concurrencySafe: false,
 };
@@ -37,13 +40,15 @@ export const RENAME_PATH_DEFINITION: ToolDefinition = {
   name: "rename_path",
   version: "1",
   sideEffectClass: "filesystem_mutation",
+  // A delete or rename that already happened leaves the same state on a repeat, so
+  // the operation is idempotent in effect even though the second call fails.
+  semantics: { idempotent: true, retry: "conditional" },
   requiresApproval: true,
   concurrencySafe: false,
 };
 
-const DEFINITIONS: readonly ToolDefinition[] = [DELETE_PATH_DEFINITION, RENAME_PATH_DEFINITION];
-
 export function createMutationTools(dependencies: MutationToolDependencies): ToolExecutor {
+  const definitions: readonly ToolDefinition[] = [DELETE_PATH_DEFINITION, RENAME_PATH_DEFINITION];
   const prepared = new Map<string, string>();
   async function factsFor(request: ToolExecutionRequest) {
     if (request.toolName === DELETE_PATH_DEFINITION.name) {
@@ -63,7 +68,7 @@ export function createMutationTools(dependencies: MutationToolDependencies): Too
   }
   return {
     getDefinition(toolName: string): ToolDefinition | null {
-      return DEFINITIONS.find((definition) => definition.name === toolName) ?? null;
+      return definitions.find((definition) => definition.name === toolName) ?? null;
     },
 
     async preview(request: ToolExecutionRequest): Promise<string | null> {
@@ -100,6 +105,49 @@ export function createMutationTools(dependencies: MutationToolDependencies): Too
     async revalidateApproval(request) {
       return prepared.get(request.toolCallId) === (await factsFor(request));
     },
+    /**
+     * Establish what happened after an uncertain delete or rename.
+     *
+     * It asks the preflight inspector whether the target still exists. That is a
+     * read-only check on the same facts the operation was planned against, and it
+     * cannot repeat the effect.
+     *
+     * A rename is checked from both ends: the source should be gone and the
+     * destination present. If only one holds, the answer is inconclusive rather
+     * than a guess about which half succeeded.
+     */
+    async verifyOutcome(request: ToolExecutionRequest) {
+      try {
+        if (request.toolName === DELETE_PATH_DEFINITION.name) {
+          const paths = readPaths(request.arguments);
+          if (!paths.ok) return null;
+          const facts = await dependencies.inspectDeleteTargets(paths.value);
+          // Every target absent means the delete happened. Any target still present
+          // means it did not. A mixed result is inconclusive.
+          const present = facts.filter((fact) => fact.exists).length;
+          if (present === 0) return "applied" as const;
+          if (present === facts.length) return "not_applied" as const;
+          return "inconclusive" as const;
+        }
+        if (request.toolName === RENAME_PATH_DEFINITION.name) {
+          const pair = readPair(request.arguments);
+          if (!pair.ok) return null;
+          const facts = await dependencies.inspectRename(pair.value.from, pair.value.to);
+          // A rename is confirmed only when both ends agree; anything else leaves
+          // the question open rather than guessing which half completed.
+          const sourceGone = !facts.sourceExists;
+          const destinationPresent = facts.targetExists;
+          if (sourceGone && destinationPresent) return "applied" as const;
+          if (!sourceGone && !destinationPresent) return "not_applied" as const;
+          return "inconclusive" as const;
+        }
+        return null;
+      } catch {
+        // A failed check is inconclusive, never a verdict.
+        return "inconclusive" as const;
+      }
+    },
+
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
       const saved = prepared.get(request.toolCallId);
       prepared.delete(request.toolCallId);
