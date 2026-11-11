@@ -29,6 +29,7 @@ import {
 import { filterChildEnvironment } from "../domain/process/shell.ts";
 import type { OwnedKeyRegistry } from "../domain/security/owned-key-guard.ts";
 import { availableTools, COORDINATOR_TOOL_NAMES } from "../domain/tool-catalog/tool-catalog.ts";
+import { checkSchemaSupport } from "../domain/tool-invocation/argument-validation.ts";
 import type { ApprovalGate } from "../ports/approval-gate.ts";
 import type { InternalEvent } from "../ports/event-log.ts";
 import type { ProviderConversationItem } from "../ports/model-provider.ts";
@@ -213,6 +214,27 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   const mcpCatalogBlock = useDiscovery
     ? `[mcp-catalog]\nConnected MCP servers. Their tools are not listed here; use \`${DISCOVER_TOOLS_NAME}\` with a query to get a tool's schema before calling it.\n${renderServerCatalog(discoverable)}`
     : "";
+
+  // Every catalog schema must be one the validator understands. A keyword it does
+  // not implement would mean the constraint is advertised but never applied, so
+  // this fails at startup rather than accepting arguments it never checked.
+  for (const entry of catalog) {
+    const support = checkSchemaSupport(entry.inputSchema);
+    if (!support.ok) {
+      return {
+        kind: "demo",
+        coordinator: createDemoRuntime(options.workspaceRoot, options.sessionId).coordinator,
+        reason: "no_configuration",
+        detail: `tool schema for ${entry.name} uses unsupported keyword ${support.keyword}`,
+      };
+    }
+  }
+  const argumentSchemas = new Map(
+    catalog.map((entry) => [
+      entry.name,
+      entry.inputSchema as unknown as Readonly<Record<string, unknown>>,
+    ]),
+  );
 
   const assembly = await assembleRuntime({
     settings: options.settings,
@@ -491,6 +513,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
               }
             : {}),
         suspendOnApproval: true,
+        argumentSchemas,
         spillStore: createSpillStore({
           sessionDirectory: path.join(sessionRoot, "sessions", sessionId),
           workspaceRoot: options.workspaceRoot,

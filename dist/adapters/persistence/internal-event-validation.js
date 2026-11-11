@@ -195,6 +195,12 @@ const payloadChecks = {
         ref: attachmentRef,
         reason: oneOf("attachment_missing", "hash_mismatch", "content_not_stored"),
     }),
+    tool_arguments_rejected: object({
+        kind: text,
+        providerToolCallId: id,
+        toolName: id,
+        issueCount: integer,
+    }),
     tool_outcome_verified: object({
         kind: text,
         toolCallId: id,

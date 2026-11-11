@@ -10,6 +10,7 @@ import { consumeRunInput, emptyRunInputQueue, queueRunInput, } from "../../domai
 import { checkIdenticalCall, } from "../../domain/run/no-progress.js";
 import { addCompaction, addModelRound, createRunBudget, RUN_BUDGET_LIMITS, } from "../../domain/run/run-budget.js";
 import { finishRun, resumeRun, startRun, waitRun } from "../../domain/run/run-state.js";
+import { describeIssues, validateValue } from "../../domain/tool-invocation/argument-validation.js";
 import { resolveUncertainty } from "../../domain/tool-invocation/execution-semantics.js";
 import { assertProtectedValue, guardToolResultText, ProtectedDeliveryError, } from "../../services/security/guarded-delivery.js";
 import { deriveTaskReport } from "../task-report/derive-task-report.js";
@@ -1335,6 +1336,40 @@ export class RuntimeCoordinator {
         });
         return { kind: "stop", result: await this.#fail(context, "context_compaction_invalid") };
     }
+    /**
+     * Reject a call whose arguments do not match the tool's advertised schema.
+     *
+     * The catalog already sends every built-in tool's JSON Schema to the model. Until
+     * now that schema was advisory: each adapter re-checked arguments by hand, so the
+     * advertised contract and the enforced one could disagree.
+     *
+     * MCP tools are skipped: their schema comes from the server and is forwarded
+     * verbatim, so validating it here would mean trusting a third party's schema to
+     * describe its own arguments correctly. The server validates its own input.
+     *
+     * Returns null when the call may proceed.
+     */
+    async #rejectInvalidArguments(context, call) {
+        const definition = this.#deps.tools.getDefinition(call.toolName);
+        if (definition === null)
+            return null;
+        const schema = this.#deps.argumentSchemas?.get(call.toolName);
+        if (schema === undefined)
+            return null;
+        const validated = validateValue(schema, call.arguments);
+        if (validated.ok)
+            return null;
+        const detail = describeIssues(validated.issues);
+        await this.#record(context, "tool_arguments_rejected", {
+            kind: "tool_arguments_rejected",
+            providerToolCallId: call.providerToolCallId,
+            toolName: call.toolName,
+            issueCount: validated.issues.length,
+        });
+        await this.#appendToolResult(context, call, "failed", `invalid_arguments: the call does not match the tool schema.\n${detail}\nNothing was executed.`);
+        context.stopSiblings = true;
+        return { kind: "continue" };
+    }
     async #executeCall(context, call) {
         if (context.run.state !== "active") {
             return { kind: "stop", result: await this.#fail(context, "run_not_active") };
@@ -1342,6 +1377,13 @@ export class RuntimeCoordinator {
         if (context.cancelRequested) {
             return { kind: "stop", result: await this.#cancel(context) };
         }
+        // Validate against the advertised schema before anything else. A call whose
+        // arguments do not match the contract must not reach the approval prompt, the
+        // no-progress tracker or the executor: the model was given the schema, so a
+        // mismatch is a model error to report rather than an operation to attempt.
+        const rejected = await this.#rejectInvalidArguments(context, call);
+        if (rejected !== null)
+            return rejected;
         // No-progress check happens before dispatch: a blocked call is never executed,
         // so this cannot replay a side effect or exempt any budget.
         const progress = this.#checkProgress(context, call);

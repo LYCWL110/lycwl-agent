@@ -43,6 +43,7 @@ import {
 } from "../../domain/run/run-budget.ts";
 import { finishRun, type Run, resumeRun, startRun, waitRun } from "../../domain/run/run-state.ts";
 import type { OwnedKeyRegistry } from "../../domain/security/owned-key-guard.ts";
+import { describeIssues, validateValue } from "../../domain/tool-invocation/argument-validation.ts";
 import { resolveUncertainty } from "../../domain/tool-invocation/execution-semantics.ts";
 import type { ApprovalGate } from "../../ports/approval-gate.ts";
 import type { FormatterRunner } from "../../ports/formatter.ts";
@@ -162,6 +163,14 @@ export type CoordinatorDependencies = Readonly<{
    * pre-existing behaviour.
    */
   syntaxChecker?: SyntaxChecker;
+  /**
+   * Advertised argument schema per built-in tool.
+   *
+   * The same object the catalog sends to the model, so the enforced contract and the
+   * advertised one cannot drift. Absent skips validation entirely, which is the
+   * pre-existing behaviour.
+   */
+  argumentSchemas?: ReadonlyMap<string, Readonly<Record<string, unknown>>>;
   /** Workspace root, needed to revert an edit through the snapshot store. */
   workspaceRoot?: string;
   /** Reverts a Run's file changes; supplied by the composition root. */
@@ -1878,6 +1887,48 @@ export class RuntimeCoordinator {
     return { kind: "stop", result: await this.#fail(context, "context_compaction_invalid") };
   }
 
+  /**
+   * Reject a call whose arguments do not match the tool's advertised schema.
+   *
+   * The catalog already sends every built-in tool's JSON Schema to the model. Until
+   * now that schema was advisory: each adapter re-checked arguments by hand, so the
+   * advertised contract and the enforced one could disagree.
+   *
+   * MCP tools are skipped: their schema comes from the server and is forwarded
+   * verbatim, so validating it here would mean trusting a third party's schema to
+   * describe its own arguments correctly. The server validates its own input.
+   *
+   * Returns null when the call may proceed.
+   */
+  async #rejectInvalidArguments(
+    context: MutableRunContext,
+    call: Parameters<typeof executeToolCall>[1],
+  ): Promise<Readonly<{ kind: "continue" }> | null> {
+    const definition = this.#deps.tools.getDefinition(call.toolName);
+    if (definition === null) return null;
+    const schema = this.#deps.argumentSchemas?.get(call.toolName);
+    if (schema === undefined) return null;
+
+    const validated = validateValue(schema, call.arguments);
+    if (validated.ok) return null;
+
+    const detail = describeIssues(validated.issues);
+    await this.#record(context, "tool_arguments_rejected", {
+      kind: "tool_arguments_rejected",
+      providerToolCallId: call.providerToolCallId,
+      toolName: call.toolName,
+      issueCount: validated.issues.length,
+    });
+    await this.#appendToolResult(
+      context,
+      call,
+      "failed",
+      `invalid_arguments: the call does not match the tool schema.\n${detail}\nNothing was executed.`,
+    );
+    context.stopSiblings = true;
+    return { kind: "continue" };
+  }
+
   async #executeCall(
     context: MutableRunContext,
     call: Parameters<typeof executeToolCall>[1],
@@ -1890,6 +1941,13 @@ export class RuntimeCoordinator {
     if (context.cancelRequested) {
       return { kind: "stop", result: await this.#cancel(context) };
     }
+
+    // Validate against the advertised schema before anything else. A call whose
+    // arguments do not match the contract must not reach the approval prompt, the
+    // no-progress tracker or the executor: the model was given the schema, so a
+    // mismatch is a model error to report rather than an operation to attempt.
+    const rejected = await this.#rejectInvalidArguments(context, call);
+    if (rejected !== null) return rejected;
 
     // No-progress check happens before dispatch: a blocked call is never executed,
     // so this cannot replay a side effect or exempt any budget.
