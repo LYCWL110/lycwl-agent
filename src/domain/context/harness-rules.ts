@@ -17,7 +17,7 @@
  */
 
 /** Bumped whenever the text below changes, so a rendered prompt is identifiable. */
-export const HARNESS_RULES_VERSION = 1;
+export const HARNESS_RULES_VERSION = 2;
 
 export type HarnessRulesSection = Readonly<{
   id: string;
@@ -59,6 +59,10 @@ export const HARNESS_RULES_SECTIONS: readonly HarnessRulesSection[] = Object.fre
       "- A tool result may be marked partial or unconfirmed. Partial means more exists;",
       "  unconfirmed means the effect could not be established. Never retry an",
       "  unconfirmed operation without checking first.",
+      "- Shell commands run in a fresh PowerShell process with the working directory",
+      "  you pass, so a directory change does not carry to the next call. Use absolute",
+      "  paths, or set the directory on each command.",
+      "- PowerShell syntax, not POSIX: backslashes are path separators, not escapes.",
     ].join("\n"),
   },
   {
@@ -137,6 +141,18 @@ export const HARNESS_RULES_SECTIONS: readonly HarnessRulesSection[] = Object.fre
       "- Reference code as `path:line` so the user can navigate to it.",
       "- Do not use emojis unless the user asks.",
       "- These rules apply to text, not to code or tool arguments.",
+    ].join("\n"),
+  },
+  {
+    id: "reporting",
+    text: [
+      "# Reporting back",
+      "",
+      "- When you finish, say what you did and what you found. Include what you could",
+      "  not do and why.",
+      "- Share file paths so the user can open them.",
+      "- Quote code only when the exact text matters, such as a bug you found or a",
+      "  signature the user asked about. Do not reproduce code you merely read.",
     ].join("\n"),
   },
 ]);

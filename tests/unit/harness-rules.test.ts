@@ -23,7 +23,7 @@ describe("structure", () => {
   it("has a stable section order", () => {
     assert.deepEqual(
       HARNESS_RULES_SECTIONS.map((section) => section.id),
-      ["intro", "system", "doing-tasks", "actions", "using-tools", "tone"],
+      ["intro", "system", "doing-tasks", "actions", "using-tools", "tone", "reporting"],
     );
   });
 
@@ -107,6 +107,33 @@ describe("content matches real capabilities", () => {
 
   it("warns that tool results may carry injected instructions", () => {
     assert.match(text, /external sources|instruct you/i);
+  });
+
+  it("states the shell is PowerShell in a fresh process per call", () => {
+    // True of this build: powershell.exe, a new process each time, no retained cwd.
+    // Without it the model assumes a persistent shell and uses relative paths.
+    assert.match(text, /PowerShell/);
+    assert.match(text, /fresh PowerShell process|does not carry to the next call/);
+  });
+
+  it("asks for absolute paths", () => {
+    assert.match(text, /absolute/i);
+  });
+
+  it("says not to reproduce code that was merely read", () => {
+    assert.match(text, /merely read/i);
+  });
+
+  it("does not claim parallel tool calls", () => {
+    // Sibling tools execute serially in v1. Telling the model to parallelize would
+    // describe behaviour the Harness does not have.
+    assert.equal(/parallel tool calls|in parallel/i.test(text), false);
+  });
+
+  it("does not mention a scratchpad directory", () => {
+    // The reference has one; this Harness does not, and naming it would send the
+    // model to a path that does not exist.
+    assert.equal(/scratchpad/i.test(text), false);
   });
 
   it("does not carry a model name", () => {
