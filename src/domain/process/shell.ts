@@ -53,6 +53,8 @@ export const FIXED_FILTERED_NAMES: readonly string[] = Object.freeze([
   "TWINE_PASSWORD",
 ]);
 
+import { annotateCommandRisk, formatRiskLines, isSingleStatement } from "./shell-risk.ts";
+
 export const SHELL_LIMITS = Object.freeze({
   minTimeoutMs: 1_000,
   defaultTimeoutMs: 120_000,
@@ -212,6 +214,10 @@ export function validateShellRequest(
 }
 
 export type ShellPreview = Readonly<{
+  /** Constructs in the command whose effect is easy to miss when scanning. */
+  risks?: readonly import("./shell-risk.ts").RiskFinding[];
+  /** False when the command contains a separator outside quotes. */
+  singleStatement?: boolean;
   command: string;
   cwd: string;
   timeoutMs: number;
@@ -228,6 +234,8 @@ export function renderShellPreview(
   filter: EnvironmentFilterResult,
 ): ShellPreview {
   return {
+    risks: annotateCommandRisk(request.command),
+    singleStatement: isSingleStatement(request.command),
     command: request.command,
     cwd: request.cwd,
     timeoutMs: request.timeoutMs,
@@ -237,6 +245,7 @@ export function renderShellPreview(
 }
 
 export function formatShellPreview(preview: ShellPreview): string {
+  const riskLines = formatRiskLines(preview.risks ?? []);
   return [
     "shell",
     `command=${preview.command}`,
@@ -244,6 +253,10 @@ export function formatShellPreview(preview: ShellPreview): string {
     `timeoutMs=${preview.timeoutMs}`,
     `envGrants=${preview.grantedVariableNames.length === 0 ? "(none)" : preview.grantedVariableNames.join(",")}`,
     `filteredEnv=${preview.filteredVariableCount} name(s) removed`,
+    ...(preview.singleStatement === false
+      ? ["statements=more than one; each part runs, not only the first"]
+      : []),
+    ...riskLines,
     "effect=runs an external program with the current Windows user's permissions",
     "sandbox=none; environment filtering is not OS isolation",
   ].join("\n");

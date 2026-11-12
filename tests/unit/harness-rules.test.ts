@@ -163,6 +163,13 @@ describe("content matches real capabilities", () => {
     assert.match(text, /100 words/);
   });
 
+  it("says that compacted tool results are not durable", () => {
+    // Compaction summarises earlier tool results away. Without this rule the model
+    // assumes a result it read is still available later.
+    assert.match(text, /summarised away/);
+    assert.match(text, /write down anything from a tool result/);
+  });
+
   it("does not carry a model name", () => {
     // The model is configured per Run; a name baked into the prompt would be wrong
     // for every other provider.

@@ -52,6 +52,7 @@ export const FIXED_FILTERED_NAMES = Object.freeze([
     "NPM_TOKEN",
     "TWINE_PASSWORD",
 ]);
+import { annotateCommandRisk, formatRiskLines, isSingleStatement } from "./shell-risk.js";
 export const SHELL_LIMITS = Object.freeze({
     minTimeoutMs: 1_000,
     defaultTimeoutMs: 120_000,
@@ -162,6 +163,8 @@ export function validateShellRequest(args, options) {
  */
 export function renderShellPreview(request, filter) {
     return {
+        risks: annotateCommandRisk(request.command),
+        singleStatement: isSingleStatement(request.command),
         command: request.command,
         cwd: request.cwd,
         timeoutMs: request.timeoutMs,
@@ -170,6 +173,7 @@ export function renderShellPreview(request, filter) {
     };
 }
 export function formatShellPreview(preview) {
+    const riskLines = formatRiskLines(preview.risks ?? []);
     return [
         "shell",
         `command=${preview.command}`,
@@ -177,6 +181,10 @@ export function formatShellPreview(preview) {
         `timeoutMs=${preview.timeoutMs}`,
         `envGrants=${preview.grantedVariableNames.length === 0 ? "(none)" : preview.grantedVariableNames.join(",")}`,
         `filteredEnv=${preview.filteredVariableCount} name(s) removed`,
+        ...(preview.singleStatement === false
+            ? ["statements=more than one; each part runs, not only the first"]
+            : []),
+        ...riskLines,
         "effect=runs an external program with the current Windows user's permissions",
         "sandbox=none; environment filtering is not OS isolation",
     ].join("\n");
