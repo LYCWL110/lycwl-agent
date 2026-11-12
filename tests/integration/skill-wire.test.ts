@@ -112,8 +112,13 @@ describe("skill catalog reaches the model", () => {
       assert.match(text, /project-skill-catalog/);
       assert.match(text, /review code for null checks/);
       assert.match(text, /untrusted project material/);
-      // Never a system prompt.
-      assert.equal(bodies[0]?.["system"], undefined);
+      // Never a system prompt. The system field carries the fixed Harness rules, so
+      // the assertion is that the catalog is absent from it.
+      const systemField = bodies[0]?.["system"];
+      assert.equal(
+        typeof systemField === "string" && systemField.includes("project-skill-catalog"),
+        false,
+      );
     } finally {
       await closeRuntimeSelections();
       await rm(workspace, { recursive: true, force: true });

@@ -181,8 +181,13 @@ describe("subdirectory guidance reaches the model", () => {
       const secondText = secondMessages.map(messageText).join("\n");
       assert.match(secondText, /api rule: use UTC/, "nested guidance must be injected");
 
-      // It is still untrusted material, not a system prompt.
-      assert.equal(bodies[1]?.["system"], undefined);
+      // It is still untrusted material, not a system prompt. The system field holds
+      // the fixed Harness rules, so the assertion is that the guidance is absent.
+      const systemField = bodies[1]?.["system"];
+      assert.equal(
+        typeof systemField === "string" && systemField.includes("api rule: use UTC"),
+        false,
+      );
       const guidanceTurns = secondMessages.filter((m) =>
         messageText(m).includes("[project-guidance]"),
       );

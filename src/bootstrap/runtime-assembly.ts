@@ -66,6 +66,13 @@ export type AssembleOptions = Readonly<{
    * catalog stays the single owner of descriptions and parameter shapes.
    */
   toolDefinitions: readonly AnthropicToolDefinition[];
+  /**
+   * Trusted Harness rules for the system prompt.
+   *
+   * Passed in rather than imported here, so the composition root stays the only
+   * place that decides what reaches the model with application authority.
+   */
+  system?: string;
   /** Injected for tests. */
   post?: ConstructorParameters<typeof AnthropicProvider>[0]["post"];
   /** Trust a specific CA; used only by tests against a local self-signed server. */
@@ -244,6 +251,8 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
       ? new OpenAiResponsesProvider({
           resolveApiKey,
           model: config.model,
+          // The Responses protocol calls it `instructions`, not `system`.
+          ...(options.system === undefined ? {} : { instructions: options.system }),
           baseUrl: config.baseUrl,
           maxOutputTokens: outputTokens,
           ...(config.reasoningEffort === undefined
@@ -257,6 +266,7 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
         ? new OpenAiChatProvider({
             resolveApiKey,
             model: config.model,
+            ...(options.system === undefined ? {} : { system: options.system }),
             baseUrl: config.baseUrl,
             maxTokens: outputTokens,
             ...(config.reasoningEffort === undefined
@@ -269,6 +279,7 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
         : new AnthropicProvider({
             resolveApiKey,
             model: config.model,
+            ...(options.system === undefined ? {} : { system: options.system }),
             endpoint: protocolEndpoint(config.baseUrl, config.protocol),
             maxTokens: outputTokens,
             ...(config.reasoningEffort === undefined

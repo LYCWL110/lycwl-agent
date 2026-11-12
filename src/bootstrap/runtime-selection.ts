@@ -21,6 +21,7 @@ import type { RuntimeCoordinator } from "../application/coordinator/runtime-coor
 import { deriveTaskReport } from "../application/task-report/derive-task-report.ts";
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.ts";
+import { renderHarnessRules } from "../domain/context/harness-rules.ts";
 import {
   type DiscoverableTool,
   renderServerCatalog,
@@ -240,6 +241,9 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     settings: options.settings,
     dataDirectory: options.dataDirectory,
     toolDefinitions,
+    // The fixed Harness rules are the only text with application authority. Project
+    // material arrives separately as a sourced user turn.
+    system: renderHarnessRules(),
     ...(options.post === undefined ? {} : { post: options.post }),
     ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
   });

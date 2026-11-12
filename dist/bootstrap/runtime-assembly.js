@@ -172,6 +172,8 @@ export async function assembleRuntime(options) {
         ? new OpenAiResponsesProvider({
             resolveApiKey,
             model: config.model,
+            // The Responses protocol calls it `instructions`, not `system`.
+            ...(options.system === undefined ? {} : { instructions: options.system }),
             baseUrl: config.baseUrl,
             maxOutputTokens: outputTokens,
             ...(config.reasoningEffort === undefined
@@ -185,6 +187,7 @@ export async function assembleRuntime(options) {
             ? new OpenAiChatProvider({
                 resolveApiKey,
                 model: config.model,
+                ...(options.system === undefined ? {} : { system: options.system }),
                 baseUrl: config.baseUrl,
                 maxTokens: outputTokens,
                 ...(config.reasoningEffort === undefined
@@ -197,6 +200,7 @@ export async function assembleRuntime(options) {
             : new AnthropicProvider({
                 resolveApiKey,
                 model: config.model,
+                ...(options.system === undefined ? {} : { system: options.system }),
                 endpoint: protocolEndpoint(config.baseUrl, config.protocol),
                 maxTokens: outputTokens,
                 ...(config.reasoningEffort === undefined

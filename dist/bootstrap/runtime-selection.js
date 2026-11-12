@@ -10,6 +10,7 @@ import { createSkillLoader } from "../adapters/windows/skill-loader.js";
 import { createSyntaxChecker, defaultTscEntry } from "../adapters/windows/syntax-checker.js";
 import { deriveTaskReport } from "../application/task-report/derive-task-report.js";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.js";
+import { renderHarnessRules } from "../domain/context/harness-rules.js";
 import { renderServerCatalog, shouldDiscover, } from "../domain/mcp/tool-discovery.js";
 import { filterChildEnvironment } from "../domain/process/shell.js";
 import { availableTools, COORDINATOR_TOOL_NAMES } from "../domain/tool-catalog/tool-catalog.js";
@@ -128,6 +129,9 @@ export async function selectRuntime(options) {
         settings: options.settings,
         dataDirectory: options.dataDirectory,
         toolDefinitions,
+        // The fixed Harness rules are the only text with application authority. Project
+        // material arrives separately as a sourced user turn.
+        system: renderHarnessRules(),
         ...(options.post === undefined ? {} : { post: options.post }),
         ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
     });
