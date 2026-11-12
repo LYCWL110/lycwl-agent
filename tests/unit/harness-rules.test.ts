@@ -136,6 +136,33 @@ describe("content matches real capabilities", () => {
     assert.equal(/scratchpad/i.test(text), false);
   });
 
+  it("covers code-quality rules", () => {
+    // These are the rules most likely to prevent an unwanted diff.
+    assert.match(text, /Default to writing no comments/);
+    assert.match(text, /Do not explain what the code does/);
+    assert.match(text, /Do not delete an existing comment/);
+    assert.match(text, /backwards-compatibility shims/);
+  });
+
+  it("covers collaboration rules", () => {
+    assert.match(text, /vague, read it against the code/);
+    assert.match(text, /user decides whether a task is too large/);
+    assert.match(text, /rests on a misconception/);
+  });
+
+  it("adapts the tag rule to this Harness's markers", () => {
+    // The reference has <system-reminder>; this Harness uses provenance markers, so
+    // the rule names those instead of a tag that never appears.
+    assert.match(text, /\[project-guidance\]/);
+    assert.equal(/system-reminder/.test(text), false);
+  });
+
+  it("gives numeric length anchors", () => {
+    // A number is easier to act on than "be concise".
+    assert.match(text, /25 words/);
+    assert.match(text, /100 words/);
+  });
+
   it("does not carry a model name", () => {
     // The model is configured per Run; a name baked into the prompt would be wrong
     // for every other provider.
