@@ -13,6 +13,7 @@
  *   produce an "unsupported field" report and never become authority;
  * - no silent truncation when a limit is exceeded.
  */
+import { escapeProvenanceMarkers } from "./provenance-marker.js";
 export const SKILLS_LIMITS = Object.freeze({
     maxSkills: 64,
     maxFileBytes: 64 * 1024,
@@ -187,7 +188,9 @@ export function renderSkillCatalog(catalog) {
         `skills=${catalog.skills.length}`,
     ];
     for (const skill of catalog.skills) {
-        lines.push(`- ${skill.skillId}: ${JSON.stringify(skill.description)}`);
+        // A description is untrusted metadata. JSON.stringify escapes quotes but not a
+        // provenance marker, so a description could otherwise impersonate a block.
+        lines.push(`- ${skill.skillId}: ${escapeProvenanceMarkers(JSON.stringify(skill.description))}`);
     }
     return lines.join("\n");
 }

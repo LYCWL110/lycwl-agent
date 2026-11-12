@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { checkGuidanceBudget, discoverProjectGuidance, PROJECT_GUIDANCE_LIMITS, } from "../../domain/context/project-guidance.js";
+import { escapeProvenanceMarkers } from "../../domain/context/provenance-marker.js";
 import { resolveWorkspacePath } from "../../services/permission/workspace-path.js";
 import { createWindowsFileReader } from "./windows-directory-reader.js";
 export function createGuidanceLoader(options) {
@@ -109,7 +110,9 @@ export function renderGuidanceBlock(blocks) {
     ];
     for (const block of blocks) {
         lines.push(`--- ${block.path} (${block.sha256.slice(0, 12)}, ${block.bytes} bytes) ---`);
-        lines.push(block.text.trimEnd());
+        // Project text cannot be allowed to reproduce a provenance marker: it would
+        // close this block and open a convincing fake one.
+        lines.push(escapeProvenanceMarkers(block.text.trimEnd()));
     }
     return lines.join("\n");
 }

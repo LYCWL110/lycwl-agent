@@ -5,6 +5,7 @@ import {
   type GuidanceCandidate,
   PROJECT_GUIDANCE_LIMITS,
 } from "../../domain/context/project-guidance.ts";
+import { escapeProvenanceMarkers } from "../../domain/context/provenance-marker.ts";
 import { resolveWorkspacePath } from "../../services/permission/workspace-path.ts";
 import { createWindowsFileReader } from "./windows-directory-reader.ts";
 
@@ -174,7 +175,9 @@ export function renderGuidanceBlock(blocks: readonly GuidanceBlock[]): string {
   ];
   for (const block of blocks) {
     lines.push(`--- ${block.path} (${block.sha256.slice(0, 12)}, ${block.bytes} bytes) ---`);
-    lines.push(block.text.trimEnd());
+    // Project text cannot be allowed to reproduce a provenance marker: it would
+    // close this block and open a convincing fake one.
+    lines.push(escapeProvenanceMarkers(block.text.trimEnd()));
   }
   return lines.join("\n");
 }
