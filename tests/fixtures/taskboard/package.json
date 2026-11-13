@@ -1,0 +1,20 @@
+{
+  "name": "taskboard-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Frozen evaluation fixtures for V1 representative tasks E01-E06. Test input, not application code.",
+  "scripts": {
+    "test": "node --test \"**/verify.test.ts\"",
+    "test:e01": "node --test e01/verify.test.ts",
+    "test:e02": "node --test e02/verify.test.ts",
+    "test:e03": "node --test e03/verify.test.ts",
+    "test:e04": "node --test e04/verify.test.ts",
+    "test:e05": "node --test apps/board/verify.test.ts",
+    "test:e06": "node --test e06/verify.test.ts",
+    "test:public": "node --test \"**/*.public.test.ts\""
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

@@ -30,6 +30,15 @@ const HEAVY = new Set([
   "integration/guarded-process-pipes.test.ts",
 ]);
 
+/**
+ * Fixtures are test input, not tests of this project.
+ *
+ * Their verifiers assert behaviour the fixtures deliberately do not have yet, so
+ * running them here would fail for the right reason and the wrong place. They are
+ * driven by the evaluation runner, one sample at a time.
+ */
+const EXCLUDED_PREFIXES = ["fixtures/"];
+
 const skipProcess = process.argv.includes("--no-process");
 
 async function collect(directory, prefix = "") {
@@ -63,7 +72,9 @@ function run(files) {
   });
 }
 
-const all = (await collect(TESTS)).sort();
+const all = (await collect(TESTS))
+  .filter((file) => !EXCLUDED_PREFIXES.some((prefix) => file.startsWith(prefix)))
+  .sort();
 const light = all.filter((file) => !HEAVY.has(file));
 const heavy = all.filter((file) => HEAVY.has(file));
 
