@@ -1,12 +1,29 @@
-import koffi from "koffi";
+import koffi, {} from "koffi";
 /**
  * Minimal Win32 surface used by the process supervisor.
  *
  * Only the calls below are bound, with explicit signatures. Job Object
  * configuration is applied before any process is assigned, and kill-on-job-close
  * means a Harness crash cannot leave the tree running.
+ *
+ * `koffi.load` is guarded by the platform, so importing this module on Linux
+ * never opens `kernel32.dll`. Every binding is still a value, so call sites and
+ * types are unchanged; using one off-win32 fails closed instead of dereferencing
+ * a library that was never loaded.
  */
-const kernel32 = koffi.load("kernel32.dll");
+const kernel32 = process.platform === "win32" ? koffi.load("kernel32.dll") : null;
+/**
+ * Stand-in for a bound entry point when the platform has no `kernel32`.
+ *
+ * koffi types a binding as a callable carrying `async` and `info` metadata, so
+ * the shape is asserted once here rather than reconstructed at every call site.
+ */
+const unavailable = (() => {
+    throw new Error(`Win32 bindings are unavailable on ${process.platform}`);
+});
+function bind(signature) {
+    return kernel32 === null ? unavailable : kernel32.func(signature);
+}
 export const CREATE_SUSPENDED = 0x0000_0004;
 export const CREATE_NO_WINDOW = 0x0800_0000;
 export const CREATE_UNICODE_ENVIRONMENT = 0x0000_0400;
@@ -19,25 +36,25 @@ export const WAIT_OBJECT_0 = 0;
 export const WAIT_TIMEOUT = 258;
 export const INFINITE = 0xffff_ffff;
 export const STILL_ACTIVE = 259;
-export const CreateJobObjectW = kernel32.func("void* __stdcall CreateJobObjectW(void* lpJobAttributes, const char16_t* lpName)");
-export const SetInformationJobObject = kernel32.func("bool __stdcall SetInformationJobObject(void* hJob, int JobObjectInfoClass, void* lpJobObjectInfo, uint32_t cbJobObjectInfoLength)");
-export const AssignProcessToJobObject = kernel32.func("bool __stdcall AssignProcessToJobObject(void* hJob, void* hProcess)");
-export const TerminateJobObject = kernel32.func("bool __stdcall TerminateJobObject(void* hJob, uint32_t uExitCode)");
-export const CreateProcessW = kernel32.func("bool __stdcall CreateProcessW(const char16_t* lpApplicationName, char16_t* lpCommandLine, void* lpProcessAttributes, void* lpThreadAttributes, bool bInheritHandles, uint32_t dwCreationFlags, void* lpEnvironment, const char16_t* lpCurrentDirectory, void* lpStartupInfo, void* lpProcessInformation)");
-export const ResumeThread = kernel32.func("uint32_t __stdcall ResumeThread(void* hThread)");
-export const TerminateProcess = kernel32.func("bool __stdcall TerminateProcess(void* hProcess, uint32_t exitCode)");
-export const WaitForSingleObject = kernel32.func("uint32_t __stdcall WaitForSingleObject(void* hHandle, uint32_t dwMilliseconds)");
-export const GetExitCodeProcess = kernel32.func("bool __stdcall GetExitCodeProcess(void* hProcess, _Out_ uint32_t* lpExitCode)");
-export const CloseHandle = kernel32.func("bool __stdcall CloseHandle(void* hObject)");
-export const CreateFileW = kernel32.func("void* __stdcall CreateFileW(const char16_t* lpFileName, uint32_t dwDesiredAccess, uint32_t dwShareMode, void* lpSecurityAttributes, uint32_t dwCreationDisposition, uint32_t dwFlagsAndAttributes, void* hTemplateFile)");
-export const GetLastError = kernel32.func("uint32_t __stdcall GetLastError()");
-export const CreatePipe = kernel32.func("bool __stdcall CreatePipe(void* hReadPipe, void* hWritePipe, void* lpPipeAttributes, uint32_t nSize)");
-export const SetHandleInformation = kernel32.func("bool __stdcall SetHandleInformation(void* hObject, uint32_t dwMask, uint32_t dwFlags)");
-export const PeekNamedPipe = kernel32.func("bool __stdcall PeekNamedPipe(void* hNamedPipe, void* lpBuffer, uint32_t nBufferSize, void* lpBytesRead, void* lpTotalBytesAvail, void* lpBytesLeftThisMessage)");
-export const ReadFile = kernel32.func("bool __stdcall ReadFile(void* hFile, void* lpBuffer, uint32_t nNumberOfBytesToRead, void* lpNumberOfBytesRead, void* lpOverlapped)");
-export const InitializeProcThreadAttributeList = kernel32.func("bool __stdcall InitializeProcThreadAttributeList(void* lpAttributeList, uint32_t dwAttributeCount, uint32_t dwFlags, void* lpSize)");
-export const UpdateProcThreadAttribute = kernel32.func("bool __stdcall UpdateProcThreadAttribute(void* lpAttributeList, uint32_t dwFlags, uintptr_t Attribute, void* lpValue, size_t cbSize, void* lpPreviousValue, void* lpReturnSize)");
-export const DeleteProcThreadAttributeList = kernel32.func("void __stdcall DeleteProcThreadAttributeList(void* lpAttributeList)");
+export const CreateJobObjectW = bind("void* __stdcall CreateJobObjectW(void* lpJobAttributes, const char16_t* lpName)");
+export const SetInformationJobObject = bind("bool __stdcall SetInformationJobObject(void* hJob, int JobObjectInfoClass, void* lpJobObjectInfo, uint32_t cbJobObjectInfoLength)");
+export const AssignProcessToJobObject = bind("bool __stdcall AssignProcessToJobObject(void* hJob, void* hProcess)");
+export const TerminateJobObject = bind("bool __stdcall TerminateJobObject(void* hJob, uint32_t uExitCode)");
+export const CreateProcessW = bind("bool __stdcall CreateProcessW(const char16_t* lpApplicationName, char16_t* lpCommandLine, void* lpProcessAttributes, void* lpThreadAttributes, bool bInheritHandles, uint32_t dwCreationFlags, void* lpEnvironment, const char16_t* lpCurrentDirectory, void* lpStartupInfo, void* lpProcessInformation)");
+export const ResumeThread = bind("uint32_t __stdcall ResumeThread(void* hThread)");
+export const TerminateProcess = bind("bool __stdcall TerminateProcess(void* hProcess, uint32_t exitCode)");
+export const WaitForSingleObject = bind("uint32_t __stdcall WaitForSingleObject(void* hHandle, uint32_t dwMilliseconds)");
+export const GetExitCodeProcess = bind("bool __stdcall GetExitCodeProcess(void* hProcess, _Out_ uint32_t* lpExitCode)");
+export const CloseHandle = bind("bool __stdcall CloseHandle(void* hObject)");
+export const CreateFileW = bind("void* __stdcall CreateFileW(const char16_t* lpFileName, uint32_t dwDesiredAccess, uint32_t dwShareMode, void* lpSecurityAttributes, uint32_t dwCreationDisposition, uint32_t dwFlagsAndAttributes, void* hTemplateFile)");
+export const GetLastError = bind("uint32_t __stdcall GetLastError()");
+export const CreatePipe = bind("bool __stdcall CreatePipe(void* hReadPipe, void* hWritePipe, void* lpPipeAttributes, uint32_t nSize)");
+export const SetHandleInformation = bind("bool __stdcall SetHandleInformation(void* hObject, uint32_t dwMask, uint32_t dwFlags)");
+export const PeekNamedPipe = bind("bool __stdcall PeekNamedPipe(void* hNamedPipe, void* lpBuffer, uint32_t nBufferSize, void* lpBytesRead, void* lpTotalBytesAvail, void* lpBytesLeftThisMessage)");
+export const ReadFile = bind("bool __stdcall ReadFile(void* hFile, void* lpBuffer, uint32_t nNumberOfBytesToRead, void* lpNumberOfBytesRead, void* lpOverlapped)");
+export const InitializeProcThreadAttributeList = bind("bool __stdcall InitializeProcThreadAttributeList(void* lpAttributeList, uint32_t dwAttributeCount, uint32_t dwFlags, void* lpSize)");
+export const UpdateProcThreadAttribute = bind("bool __stdcall UpdateProcThreadAttribute(void* lpAttributeList, uint32_t dwFlags, uintptr_t Attribute, void* lpValue, size_t cbSize, void* lpPreviousValue, void* lpReturnSize)");
+export const DeleteProcThreadAttributeList = bind("void __stdcall DeleteProcThreadAttributeList(void* lpAttributeList)");
 export function writePointer(buffer, offset, value) {
     koffi.encode(buffer, offset, "void*", value);
 }

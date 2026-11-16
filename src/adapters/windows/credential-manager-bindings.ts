@@ -1,4 +1,4 @@
-import koffi from "koffi";
+import koffi, { type LibraryHandle } from "koffi";
 
 /**
  * Minimal Windows Credential Manager surface (G03).
@@ -9,13 +9,26 @@ import koffi from "koffi";
  * Every export here is a raw binding; the adapter decides policy. Reading a real
  * credential remains gated by G03 and must not be treated as validated merely
  * because the binding compiles.
+ *
+ * The libraries are loaded only on win32, so importing this module elsewhere
+ * never opens `advapi32.dll` or `kernel32.dll`.
  */
 
-const advapi32 = koffi.load("advapi32.dll");
+const isWindows = process.platform === "win32";
+const advapi32 = isWindows ? koffi.load("advapi32.dll") : null;
 // `GetLastError` lives in kernel32, not advapi32. Loading it from the wrong
 // module throws at import time, which would make the whole adapter unusable
 // instead of merely failing closed.
-const kernel32 = koffi.load("kernel32.dll");
+const kernel32 = isWindows ? koffi.load("kernel32.dll") : null;
+
+/** Fails closed on platforms without the Windows DLLs; see koffi-bindings.ts. */
+const unavailable = (() => {
+  throw new Error(`Windows credential bindings are unavailable on ${process.platform}`);
+}) as unknown as ReturnType<LibraryHandle["func"]>;
+
+function bind(library: LibraryHandle | null, signature: string): ReturnType<LibraryHandle["func"]> {
+  return library === null ? unavailable : library.func(signature);
+}
 
 export const CRED_TYPE_GENERIC = 1;
 export const CRED_PERSIST_LOCAL_MACHINE = 2;
@@ -46,17 +59,20 @@ export const CredentialW = koffi.struct("CREDENTIALW", {
   UserName: "void *",
 });
 
-export const CredReadW = advapi32.func(
+export const CredReadW = bind(
+  advapi32,
   "bool __stdcall CredReadW(const char16_t* TargetName, uint32_t Type, uint32_t Flags, _Out_ void** Credential)",
 );
-export const CredWriteW = advapi32.func(
+export const CredWriteW = bind(
+  advapi32,
   "bool __stdcall CredWriteW(void* Credential, uint32_t Flags)",
 );
-export const CredDeleteW = advapi32.func(
+export const CredDeleteW = bind(
+  advapi32,
   "bool __stdcall CredDeleteW(const char16_t* TargetName, uint32_t Type, uint32_t Flags)",
 );
-export const CredFree = advapi32.func("void __stdcall CredFree(void* Buffer)");
-export const GetLastError = kernel32.func("uint32_t __stdcall GetLastError()");
+export const CredFree = bind(advapi32, "void __stdcall CredFree(void* Buffer)");
+export const GetLastError = bind(kernel32, "uint32_t __stdcall GetLastError()");
 
 /**
  * Decode the UTF-16 credential blob. `CredentialBlob` points at raw bytes of
