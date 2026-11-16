@@ -8,12 +8,12 @@
   "author": "lycwl",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lycwl/lycwl-agent.git"
+    "url": "git+https://github.com/LYCWL110/lycwl-agent.git"
   },
   "bugs": {
-    "url": "https://github.com/lycwl/lycwl-agent/issues"
+    "url": "https://github.com/LYCWL110/lycwl-agent/issues"
   },
-  "homepage": "https://github.com/lycwl/lycwl-agent#readme",
+  "homepage": "https://github.com/LYCWL110/lycwl-agent#readme",
   "keywords": [
     "agent",
     "cli",

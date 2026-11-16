@@ -15,7 +15,8 @@ import { createSyntaxChecker, defaultTscEntry } from "../../src/adapters/windows
  * exercised here rather than mocked.
  */
 
-const TSC = defaultTscEntry("D:/lycwl-agent");
+const REPO_ROOT = path.join(import.meta.dirname, "..", "..");
+const TSC = defaultTscEntry(REPO_ROOT);
 
 /** process.env with its undefined values removed, which is what the checker takes. */
 const HOST_ENV: Readonly<Record<string, string>> = Object.fromEntries(
