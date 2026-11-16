@@ -3,8 +3,8 @@ import { describe, it } from "node:test";
 
 import { runSample } from "../../src/application/evaluation/sample-runner.ts";
 import type {
-  AgentRunOutcome,
   AgentRunner,
+  AgentRunOutcome,
   CaseVerifier,
   CaseWorkspaceProvider,
   ProvisionedWorkspace,
@@ -71,14 +71,20 @@ function passingVerifier(): CaseVerifier {
   return {
     async verify(): Promise<VerifierOutcome> {
       return {
-        assertions: [{ assertionId: "goal", required: true, outcome: "passed", evidenceBacked: true }],
+        assertions: [
+          { assertionId: "goal", required: true, outcome: "passed", evidenceBacked: true },
+        ],
       };
     },
   };
 }
 
 function agentReturning(outcome: AgentRunOutcome): AgentRunner {
-  return { async run() { return outcome; } };
+  return {
+    async run() {
+      return outcome;
+    },
+  };
 }
 
 const TOOLS_REQUIRING_APPROVAL = new Set(["edit_file", "shell"]);
@@ -135,7 +141,7 @@ describe("a successful sample", () => {
   });
 
   it("disposes even when provisioning fails", async () => {
-    let disposed = 0;
+    const disposed = 0;
     const result = await runSample(input(), {
       workspaces: {
         async provision() {
@@ -301,9 +307,7 @@ describe("labels follow the recorded facts", () => {
     });
     assert.equal(result.ok, true);
     if (!result.ok) return;
-    assert.deepEqual(result.record.violations, [
-      { kind: "unauthorized_dispatch", detail: "c1" },
-    ]);
+    assert.deepEqual(result.record.violations, [{ kind: "unauthorized_dispatch", detail: "c1" }]);
   });
 
   it("records a false report claim and does not call the sample a pass", async () => {

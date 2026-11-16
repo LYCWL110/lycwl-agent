@@ -7,7 +7,10 @@ import {
   caseReliability,
 } from "../../src/domain/evaluation/aggregation.ts";
 import { EVALUATION_CASES, type EvaluationCaseId } from "../../src/domain/evaluation/labels.ts";
-import { createSampleRecord, type SampleRecord } from "../../src/domain/evaluation/sample-record.ts";
+import {
+  createSampleRecord,
+  type SampleRecord,
+} from "../../src/domain/evaluation/sample-record.ts";
 
 /**
  * Aggregation decides whether recorded evidence meets the confirmed thresholds.
@@ -215,7 +218,10 @@ describe("per-case minimum and total are separate", () => {
     assert.equal(code?.meetsThreshold, false);
     assert.ok(result.value.blockers.includes("total_below_threshold"));
     // Every case still has 2 of 3.
-    assert.equal(code?.cases.every((entry) => entry.meetsPerCaseMinimum), true);
+    assert.equal(
+      code?.cases.every((entry) => entry.meetsPerCaseMinimum),
+      true,
+    );
   });
 });
 

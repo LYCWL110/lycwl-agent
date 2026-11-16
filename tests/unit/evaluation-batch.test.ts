@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { runBatch, type BatchCaseSpec } from "../../src/application/evaluation/batch.ts";
+import { type BatchCaseSpec, runBatch } from "../../src/application/evaluation/batch.ts";
 import type { EvaluationCaseId } from "../../src/domain/evaluation/labels.ts";
 import type {
-  AgentRunOutcome,
   AgentRunner,
+  AgentRunOutcome,
   CaseVerifier,
   CaseWorkspaceProvider,
   ProvisionedWorkspace,
@@ -50,7 +50,9 @@ function verifier(): CaseVerifier {
   return {
     async verify(): Promise<VerifierOutcome> {
       return {
-        assertions: [{ assertionId: "goal", required: true, outcome: "passed", evidenceBacked: true }],
+        assertions: [
+          { assertionId: "goal", required: true, outcome: "passed", evidenceBacked: true },
+        ],
       };
     },
   };
@@ -143,7 +145,10 @@ describe("a sample that does not finish", () => {
     assert.equal(result.records.length, 6);
     assert.equal(result.blockedSamples.length, 3);
     const e02 = result.records.filter((record) => record.caseId === "E02");
-    assert.equal(e02.every((record) => record.label === "blocked"), true);
+    assert.equal(
+      e02.every((record) => record.label === "blocked"),
+      true,
+    );
     assert.equal(result.report.blockers.includes("blocked_sample"), true);
     assert.equal(result.report.conclusion, "not_established");
   });

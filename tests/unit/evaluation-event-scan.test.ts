@@ -155,7 +155,12 @@ describe("duplicate side effects", () => {
       scanEvaluationEvents(events, { mutatingTools: MUTATING }).violations.filter(
         (violation) => violation.kind === "duplicate_side_effect",
       ),
-      [{ kind: "duplicate_side_effect", detail: 'edit_file:{"content":"x","path":"a.ts"} ran 2 times' }],
+      [
+        {
+          kind: "duplicate_side_effect",
+          detail: 'edit_file:{"content":"x","path":"a.ts"} ran 2 times',
+        },
+      ],
     );
   });
 
@@ -168,10 +173,7 @@ describe("duplicate side effects", () => {
     ];
     // Two reads of the same file are a legitimate repeat. `read_file` is not in the
     // mutating set, so nothing is reported.
-    assert.deepEqual(
-      scanEvaluationEvents(events, { mutatingTools: MUTATING }).violations,
-      [],
-    );
+    assert.deepEqual(scanEvaluationEvents(events, { mutatingTools: MUTATING }).violations, []);
   });
 
   it("does not flag a repeated read even when the name is not in the mutating set", () => {

@@ -4,7 +4,10 @@ import { describe, it } from "node:test";
 import { aggregateEvaluation } from "../../src/domain/evaluation/aggregation.ts";
 import { renderEvidencePackage } from "../../src/domain/evaluation/evidence-package.ts";
 import { EVALUATION_CASES, type EvaluationCaseId } from "../../src/domain/evaluation/labels.ts";
-import { createSampleRecord, type SampleRecord } from "../../src/domain/evaluation/sample-record.ts";
+import {
+  createSampleRecord,
+  type SampleRecord,
+} from "../../src/domain/evaluation/sample-record.ts";
 
 /**
  * The evidence package is the artifact a reviewer reads.

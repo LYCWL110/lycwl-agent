@@ -68,10 +68,7 @@ describe("sample record construction", () => {
   });
 
   it("rejects an unknown case and a bad version or branch", () => {
-    assert.equal(
-      createSampleRecord(withInput({ caseId: "E99" as never })).ok,
-      false,
-    );
+    assert.equal(createSampleRecord(withInput({ caseId: "E99" as never })).ok, false);
     assert.equal(createSampleRecord(withInput({ caseVersion: 0 })).ok, false);
     assert.equal(createSampleRecord(withInput({ branch: "  " })).ok, false);
   });
@@ -111,10 +108,10 @@ describe("not_run and blocked", () => {
   });
 
   it("requires a reason for blocked and keeps it", () => {
-    assert.deepEqual(
-      createSampleRecord(withInput({ label: "blocked", assertions: [] })),
-      { ok: false, code: "blocked_without_reason" },
-    );
+    assert.deepEqual(createSampleRecord(withInput({ label: "blocked", assertions: [] })), {
+      ok: false,
+      code: "blocked_without_reason",
+    });
     const result = createSampleRecord(
       withInput({ label: "blocked", blockedReason: "budget_exhausted", assertions: [] }),
     );
@@ -137,9 +134,7 @@ describe("the label is checked against the facts", () => {
     const result = createSampleRecord(
       withInput({
         label: "pass",
-        assertions: [
-          { assertionId: "a", required: true, outcome: "failed", evidenceBacked: true },
-        ],
+        assertions: [{ assertionId: "a", required: true, outcome: "failed", evidenceBacked: true }],
       }),
     );
     assert.deepEqual(result, { ok: false, code: "label_mismatch" });
@@ -149,7 +144,9 @@ describe("the label is checked against the facts", () => {
     const result = createSampleRecord(
       withInput({
         label: "pass",
-        assertions: [{ assertionId: "a", required: true, outcome: "passed", evidenceBacked: false }],
+        assertions: [
+          { assertionId: "a", required: true, outcome: "passed", evidenceBacked: false },
+        ],
       }),
     );
     assert.deepEqual(result, { ok: false, code: "label_mismatch" });
@@ -159,7 +156,9 @@ describe("the label is checked against the facts", () => {
     const result = createSampleRecord(
       withInput({
         label: "pass",
-        assertions: [{ assertionId: "a", required: true, outcome: "not_run", evidenceBacked: false }],
+        assertions: [
+          { assertionId: "a", required: true, outcome: "not_run", evidenceBacked: false },
+        ],
       }),
     );
     assert.deepEqual(result, { ok: false, code: "label_mismatch" });
@@ -169,7 +168,9 @@ describe("the label is checked against the facts", () => {
     const result = createSampleRecord(
       withInput({
         label: "pass",
-        assertions: [{ assertionId: "a", required: false, outcome: "passed", evidenceBacked: true }],
+        assertions: [
+          { assertionId: "a", required: false, outcome: "passed", evidenceBacked: true },
+        ],
       }),
     );
     assert.deepEqual(result, { ok: false, code: "label_mismatch" });
@@ -189,9 +190,7 @@ describe("the label is checked against the facts", () => {
     const result = createSampleRecord(
       withInput({
         label: "fail",
-        assertions: [
-          { assertionId: "a", required: true, outcome: "failed", evidenceBacked: true },
-        ],
+        assertions: [{ assertionId: "a", required: true, outcome: "failed", evidenceBacked: true }],
       }),
     );
     assert.equal(result.ok, true);
@@ -204,10 +203,7 @@ describe("the label is checked against the facts", () => {
 describe("deriveLabel", () => {
   it("keeps not_run and invalid_fixture as recorded", () => {
     for (const label of ["not_run", "invalid_fixture"] as const) {
-      assert.equal(
-        deriveLabel({ label, assertions: [], reportClaims: [] }),
-        label,
-      );
+      assert.equal(deriveLabel({ label, assertions: [], reportClaims: [] }), label);
     }
   });
 
@@ -274,7 +270,9 @@ describe("usage and run identity", () => {
     const result = createSampleRecord(
       withInput({
         violations: [{ kind: "unauthorized_dispatch", detail: "toolCall-1" }],
-        misproposals: [{ kind: "overreaching_request", detail: "attempted write outside workspace" }],
+        misproposals: [
+          { kind: "overreaching_request", detail: "attempted write outside workspace" },
+        ],
       }),
     );
     assert.equal(result.ok, true);

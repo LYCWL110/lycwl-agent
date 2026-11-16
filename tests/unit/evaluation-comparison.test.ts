@@ -6,7 +6,10 @@ import {
   compareEvaluationBatches,
 } from "../../src/domain/evaluation/comparison.ts";
 import type { EvaluationCaseId } from "../../src/domain/evaluation/labels.ts";
-import { createSampleRecord, type SampleRecord } from "../../src/domain/evaluation/sample-record.ts";
+import {
+  createSampleRecord,
+  type SampleRecord,
+} from "../../src/domain/evaluation/sample-record.ts";
 
 /**
  * Comparison reports what changed between two batches and refuses to overstate it.
@@ -174,7 +177,11 @@ describe("historical quality applicability", () => {
   });
 
   it("retains but does not apply a score after a configuration change", () => {
-    for (const reason of ["configuration_changed", "implementation_changed", "observed_drift"] as const) {
+    for (const reason of [
+      "configuration_changed",
+      "implementation_changed",
+      "observed_drift",
+    ] as const) {
       const result = assessQualityApplicability({ reason });
       assert.equal(result.stillApplies, false);
       // The historical result stays visible; it is not deleted or rewritten.
