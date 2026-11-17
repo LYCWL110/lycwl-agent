@@ -24,6 +24,18 @@ importers:
       '@biomejs/biome':
         specifier: 2.3.4
         version: 2.3.4
+      '@koromix/koffi-linux-arm64':
+        specifier: 3.3.4
+        version: 3.3.4
+      '@koromix/koffi-linux-x64':
+        specifier: 3.3.4
+        version: 3.3.4
+      '@koromix/koffi-win32-arm64':
+        specifier: 3.3.4
+        version: 3.3.4
+      '@koromix/koffi-win32-x64':
+        specifier: 3.3.4
+        version: 3.3.4
       '@types/node':
         specifier: 24.10.1
         version: 24.10.1
@@ -1053,8 +1065,7 @@ snapshots:
   '@koromix/koffi-freebsd-x64@3.3.4':
     optional: true
 
-  '@koromix/koffi-linux-arm64@3.3.4':
-    optional: true
+  '@koromix/koffi-linux-arm64@3.3.4': {}
 
   '@koromix/koffi-linux-arm@3.3.4':
     optional: true
@@ -1071,8 +1082,7 @@ snapshots:
   '@koromix/koffi-linux-riscv64@3.3.4':
     optional: true
 
-  '@koromix/koffi-linux-x64@3.3.4':
-    optional: true
+  '@koromix/koffi-linux-x64@3.3.4': {}
 
   '@koromix/koffi-openbsd-arm64@3.3.4':
     optional: true
@@ -1083,14 +1093,12 @@ snapshots:
   '@koromix/koffi-openbsd-x64@3.3.4':
     optional: true
 
-  '@koromix/koffi-win32-arm64@3.3.4':
-    optional: true
+  '@koromix/koffi-win32-arm64@3.3.4': {}
 
   '@koromix/koffi-win32-ia32@3.3.4':
     optional: true
 
-  '@koromix/koffi-win32-x64@3.3.4':
-    optional: true
+  '@koromix/koffi-win32-x64@3.3.4': {}
 
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true

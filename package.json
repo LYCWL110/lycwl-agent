@@ -1,7 +1,7 @@
 {
   "name": "lycwl-agent",
   "version": "0.1.0",
-  "description": "Local coding agent harness for Windows: permission-controlled file, shell, LSP and MCP tools in a terminal UI.",
+  "description": "Local coding agent harness for Windows and Linux: permission-controlled file, shell, LSP and MCP tools in a terminal UI.",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -21,6 +21,7 @@
     "mcp",
     "coding-agent",
     "windows",
+    "linux",
     "llm"
   ],
   "engines": {
@@ -39,9 +40,11 @@
   "scripts": {
     "start": "node src/bootstrap/main.ts",
     "build": "tsc -p tsconfig.build.json",
+    "build:bun": "bun tools/bun/build.mjs",
     "start:built": "node dist/bootstrap/main.js",
     "test": "node tools/run-tests.mjs",
     "test:unit": "node tools/run-tests.mjs --no-process",
+    "test:linux": "node tools/run-tests.mjs --linux-only",
     "test:contract": "node --test tests/contract/**/*.test.ts",
     "test:architecture": "node --test tests/contract/architecture.test.ts",
     "test:tui": "vitest run tests/unit/tui-render.test.ts tests/unit/setup-screen-render.test.ts tests/unit/mcp-panel.test.ts tests/unit/session-list.test.ts tests/unit/init-panel.test.ts",
@@ -57,6 +60,10 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.4",
+    "@koromix/koffi-linux-arm64": "3.3.4",
+    "@koromix/koffi-linux-x64": "3.3.4",
+    "@koromix/koffi-win32-arm64": "3.3.4",
+    "@koromix/koffi-win32-x64": "3.3.4",
     "@types/node": "24.10.1",
     "@types/react": "19.3.0",
     "ink-testing-library": "4.0.0",
