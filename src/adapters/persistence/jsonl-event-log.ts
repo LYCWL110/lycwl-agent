@@ -10,10 +10,7 @@ import type {
   InternalEventBody,
 } from "../../ports/event-log.ts";
 import type { DigestService, IdentifierFactory } from "../../ports/identity.ts";
-import {
-  acquireExclusiveFileLease,
-  type ExclusiveFileLease,
-} from "../windows/exclusive-file-lease.ts";
+import { acquireExclusiveFileLease, type ExclusiveFileLease } from "../platform-file-lease.ts";
 import {
   applyEventToRelations,
   createRelationState,
@@ -175,7 +172,10 @@ export class JsonlEventLog implements EventLog {
     // earlier event. Rebuilding that state was the other half of the cost.
     if (!applyEventToRelations(cached.relations, event)) throw new Error("invalid_event");
     const filePath = this.#eventPath(input.sessionId);
-    await mkdir(path.dirname(filePath), { recursive: true });
+    await mkdir(path.dirname(filePath), {
+      recursive: true,
+      ...(process.platform === "linux" ? { mode: 0o700 } : {}),
+    });
     const handle = await open(filePath, "a");
     try {
       await handle.writeFile(`${JSON.stringify(event)}\n`, "utf8");

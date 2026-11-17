@@ -406,6 +406,19 @@ export const TOOL_CATALOG: readonly CatalogEntry[] = Object.freeze([
  * the model would call it and receive `tool_unavailable_in_build`, which looks like
  * a fault rather than a deliberate boundary.
  */
-export function availableTools(isAvailable: (name: string) => boolean): readonly CatalogEntry[] {
-  return TOOL_CATALOG.filter((entry) => isAvailable(entry.name));
+export function availableTools(
+  isAvailable: (name: string) => boolean,
+  platform: "win32" | "linux" = "win32",
+): readonly CatalogEntry[] {
+  return TOOL_CATALOG.filter((entry) => isAvailable(entry.name)).map((entry) =>
+    platform === "linux"
+      ? {
+          ...entry,
+          description: entry.description
+            .replaceAll("Windows PowerShell 5.1", "Bash")
+            .replaceAll("-NoProfile and -NonInteractive", "--noprofile --norc -c")
+            .replaceAll("current Windows user's", "current Linux user's"),
+        }
+      : entry,
+  );
 }

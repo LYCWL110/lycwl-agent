@@ -1,4 +1,5 @@
 import type { CatalogModel, ExplicitReasoningEffort } from "../../domain/config/model-catalog.ts";
+import { isContextWindow } from "../../domain/config/model-context.ts";
 import {
   protocolReasoningEfforts,
   type SupportedProtocol,
@@ -151,15 +152,29 @@ export function parseModelList(
   for (const entry of entries) {
     const id = modelIdOf(entry);
     if (id === null) continue;
-    const metadata = reasoningMetadataOf(entry, protocol);
+    const metadata = { ...reasoningMetadataOf(entry, protocol), ...contextMetadataOf(entry) };
     const previous = catalog.get(id);
     // Conflicting duplicate declarations must not broaden selectable parameters.
     if (previous !== undefined) {
-      if (
+      const reasoningConflict =
         JSON.stringify(previous.reasoning) !== JSON.stringify(metadata.reasoning) ||
-        previous.reasoningInvalid !== metadata.reasoningInvalid
-      )
-        catalog.set(id, { id, reasoningInvalid: true });
+        previous.reasoningInvalid !== metadata.reasoningInvalid;
+      const contextConflict =
+        previous.contextWindow !== metadata.contextWindow ||
+        previous.contextWindowInvalid !== metadata.contextWindowInvalid;
+      catalog.set(id, {
+        id,
+        ...(reasoningConflict || previous.reasoningInvalid
+          ? { reasoningInvalid: true as const }
+          : previous.reasoning === undefined
+            ? {}
+            : { reasoning: previous.reasoning }),
+        ...(contextConflict || previous.contextWindowInvalid
+          ? { contextWindowInvalid: true as const }
+          : previous.contextWindow === undefined
+            ? {}
+            : { contextWindow: previous.contextWindow }),
+      });
       continue;
     }
     catalog.set(id, { id, ...metadata });
@@ -171,7 +186,13 @@ export function parseModelList(
   return {
     ok: true,
     models,
-    ...(sorted.some((entry) => entry.reasoning !== undefined || entry.reasoningInvalid)
+    ...(sorted.some(
+      (entry) =>
+        entry.reasoning !== undefined ||
+        entry.reasoningInvalid ||
+        entry.contextWindow !== undefined ||
+        entry.contextWindowInvalid,
+    )
       ? { catalog: sorted }
       : {}),
   };
@@ -187,7 +208,33 @@ export function parseModelDetails(
     isRecord(parsed.value) && isRecord(parsed.value["data"]) ? parsed.value["data"] : parsed.value;
   const id = modelIdOf(entry);
   if (id === null) return { ok: false, code: "unexpected_shape" };
-  return { ok: true, model: { id, ...reasoningMetadataOf(entry, protocol) } };
+  return {
+    ok: true,
+    model: { id, ...reasoningMetadataOf(entry, protocol), ...contextMetadataOf(entry) },
+  };
+}
+
+function contextMetadataOf(
+  entry: unknown,
+): Pick<CatalogModel, "contextWindow" | "contextWindowInvalid"> {
+  if (!isRecord(entry)) return {};
+  const declared = ["context_length", "context_window", "contextWindow", "max_context_length"]
+    .filter((key) => key in entry)
+    .map((key) => entry[key]);
+  const limits = entry["limits"];
+  if (isRecord(limits) && "context" in limits) declared.push(limits["context"]);
+  if (declared.length === 0) {
+    for (const key of ["max_input_tokens", "input_token_limit"])
+      if (key in entry) declared.push(entry[key]);
+  }
+  if (declared.length === 0) return {};
+  const value = declared[0];
+  if (
+    !isContextWindow(value) ||
+    declared.some((candidate) => !isContextWindow(candidate) || candidate !== value)
+  )
+    return { contextWindowInvalid: true };
+  return { contextWindow: value };
 }
 
 function reasoningMetadataOf(

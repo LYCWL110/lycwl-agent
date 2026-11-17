@@ -88,7 +88,7 @@ export type DeleteValidation =
 export function validateDeleteTargets(
   requested: readonly string[],
   facts: readonly DeleteTargetFacts[],
-  options: Readonly<{ recursive?: boolean }> = {},
+  options: Readonly<{ recursive?: boolean; caseSensitive?: boolean }> = {},
 ): DeleteValidation {
   if (options.recursive === true) return { ok: false, code: "recursive_unsupported" };
   if (requested.length === 0) return { ok: false, code: "invalid_arguments" };
@@ -99,7 +99,7 @@ export function validateDeleteTargets(
   const seen = new Set<string>();
   for (const path of requested) {
     if (path.length === 0) return { ok: false, code: "invalid_arguments" };
-    const key = path.replace(/\\/g, "/").toLowerCase();
+    const key = options.caseSensitive ? path : path.replace(/\\/g, "/").toLowerCase();
     if (seen.has(key)) return { ok: false, code: "duplicate_target" };
     seen.add(key);
   }

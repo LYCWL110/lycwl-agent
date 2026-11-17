@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { lstat, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import path from "node:path";
+import { isPosixWorkspaceRoot } from "../../services/permission/posix-workspace-path.js";
 import { resolveWorkspacePath } from "../../services/permission/workspace-path.js";
 export function createWindowsWriteAdapter(options) {
     const { workspaceRoot } = options;
@@ -133,7 +134,22 @@ export function createWindowsWriteAdapter(options) {
         const tempPath = path.join(directory, `.${path.basename(target)}.${randomBytes(6).toString("hex")}.tmp`);
         let handle = null;
         try {
+            let mode;
+            if (isPosixWorkspaceRoot(workspaceRoot)) {
+                try {
+                    const info = await lstat(target);
+                    if (!info.isFile() || info.isSymbolicLink())
+                        return { ok: false, code: "invalid_path" };
+                    mode = info.mode & 0o777;
+                }
+                catch (error) {
+                    if (!isNotFound(error))
+                        throw error;
+                }
+            }
             handle = await open(tempPath, "wx");
+            if (mode !== undefined)
+                await handle.chmod(mode);
             await handle.writeFile(bytes);
             await handle.sync();
             await handle.close();
@@ -146,6 +162,8 @@ export function createWindowsWriteAdapter(options) {
             return { ok: false, code: mapWriteError(error) };
         }
         try {
+            if (isPosixWorkspaceRoot(workspaceRoot))
+                await targetPath(relativePath);
             if (!(await unchanged())) {
                 await unlink(tempPath).catch(() => undefined);
                 return { ok: false, code: "file_conflict" };

@@ -1,5 +1,9 @@
 import { Box, Text, useInput } from "ink";
 import { createElement, type ReactElement, useState } from "react";
+import {
+  type ContextWindowSource,
+  DEFAULT_CONTEXT_WINDOW,
+} from "../domain/config/model-context.ts";
 
 import {
   maskSecret,
@@ -44,6 +48,7 @@ export type SetupDraft = Readonly<{
   credentialRef: string;
   reasoningEffort?: ReasoningEffort;
   contextWindow?: string | number | null;
+  contextWindowSource?: ContextWindowSource;
   maxOutputTokens?: string | number;
 }>;
 
@@ -107,6 +112,9 @@ export function SetupScreen(props: SetupProps): ReactElement {
     credentialRef: props.initial.credentialRef ?? "provider-main",
     reasoningEffort: props.initial.reasoningEffort ?? "default",
     contextWindow: props.initial.contextWindow == null ? "" : String(props.initial.contextWindow),
+    ...(props.initial.contextWindowSource === undefined
+      ? {}
+      : { contextWindowSource: props.initial.contextWindowSource }),
     maxOutputTokens: String(props.initial.maxOutputTokens ?? 4096),
   });
   const actions = [...FIELD_ORDER, ...(props.onBrowse ? ["models"] : []), "save", "discard"];
@@ -142,6 +150,14 @@ export function SetupScreen(props: SetupProps): ReactElement {
       return {
         ...current,
         protocol,
+        ...(current.contextWindowSource === "default" ||
+        current.contextWindowSource === "upstream" ||
+        current.contextWindow === ""
+          ? {
+              contextWindow: String(DEFAULT_CONTEXT_WINDOW),
+              contextWindowSource: "default" as const,
+            }
+          : {}),
       };
     });
   }
@@ -217,7 +233,25 @@ export function SetupScreen(props: SetupProps): ReactElement {
     if (!editing || !FIELD_ORDER.includes(focus as SetupField)) return;
     const field = focus as Exclude<SetupField, "protocol" | "reasoningEffort">;
     const next = editText({ value: draft[field], cursor: cursors[field] }, input, key);
-    setDraft((current) => ({ ...current, [field]: next.value }));
+    setDraft((current) => ({
+      ...current,
+      [field]: next.value,
+      ...(field === "contextWindow" && next.value !== current.contextWindow
+        ? { contextWindowSource: next.value === "" ? ("default" as const) : ("manual" as const) }
+        : {}),
+      ...(field === "apiKey" &&
+      next.value !== current.apiKey &&
+      current.contextWindowSource === "upstream"
+        ? { contextWindow: String(DEFAULT_CONTEXT_WINDOW), contextWindowSource: "default" as const }
+        : {}),
+      ...((field === "model" || field === "baseUrl") &&
+      next.value !== current[field] &&
+      (current.contextWindowSource === "default" ||
+        current.contextWindowSource === "upstream" ||
+        current.contextWindow === "")
+        ? { contextWindow: String(DEFAULT_CONTEXT_WINDOW), contextWindowSource: "default" as const }
+        : {}),
+    }));
     setCursors((current) => ({ ...current, [field]: next.cursor }));
   });
 

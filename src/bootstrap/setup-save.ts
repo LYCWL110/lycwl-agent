@@ -3,6 +3,7 @@ import type { ConfigDocument, ConfigStore } from "../adapters/windows/config-sto
 import type { FileVault } from "../adapters/windows/file-credential-vault.ts";
 import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
 import { insertTopLevelValue, replaceTopLevelValue } from "../domain/config/jsonc-edit.ts";
+import type { ContextWindowSource } from "../domain/config/model-context.ts";
 import {
   type ProviderConfigResult,
   type ReasoningEffort,
@@ -83,6 +84,11 @@ export async function saveSetup(input: {
       input.draft.contextWindow,
       existing.ok ? existing.value.contextWindow : null,
     ),
+    contextWindowSource:
+      input.draft.contextWindowSource ??
+      (input.draft.contextWindow === undefined && existing.ok
+        ? existing.value.contextWindowSource
+        : undefined),
     reasoningEffort:
       input.draft.reasoningEffort ??
       (protocol === "anthropic_messages"
@@ -114,6 +120,9 @@ export async function saveSetup(input: {
     credentialRef: config.credentialRef,
     maxOutputTokens: config.maxOutputTokens,
     contextWindow: config.contextWindow,
+    ...(config.contextWindowSource === undefined
+      ? {}
+      : { contextWindowSource: config.contextWindowSource }),
     ...(config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
   });
   if (!withProvider.ok) {
@@ -206,6 +215,7 @@ type ProviderBlock = Readonly<{
   credentialRef: string;
   maxOutputTokens: number;
   contextWindow: number | null;
+  contextWindowSource?: ContextWindowSource;
   reasoningEffort?: ReasoningEffort;
 }>;
 
@@ -264,6 +274,9 @@ function serializeObjectLiteral(block: ProviderBlock): string {
     `"credentialRef": ${JSON.stringify(block.credentialRef)}`,
     `"maxOutputTokens": ${block.maxOutputTokens}`,
     `"contextWindow": ${JSON.stringify(block.contextWindow)}`,
+    ...(block.contextWindowSource === undefined
+      ? []
+      : [`"contextWindowSource": ${JSON.stringify(block.contextWindowSource)}`]),
     ...(block.reasoningEffort === undefined
       ? []
       : [`"reasoningEffort": ${JSON.stringify(block.reasoningEffort)}`]),

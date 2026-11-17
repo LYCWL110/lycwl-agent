@@ -8,6 +8,7 @@
  *
  * Only protocols with an implemented adapter are selectable.
  */
+import { isContextWindow } from "./model-context.js";
 export const SUPPORTED_PROTOCOLS = [
     "anthropic_messages",
     "openai_chat",
@@ -113,14 +114,14 @@ export function validateProviderConfig(input) {
         !/^[\x21-\x7e]+$/.test(input.credentialRef)) {
         return { ok: false, code: "invalid_credential_ref", field: "credentialRef" };
     }
-    // Configuration can remain incomplete, but unknown capacity blocks sending.
+    // Preserve legacy nulls in storage; the runtime supplies the product default.
     const rawWindow = input.contextWindow;
+    if (input.contextWindowSource !== undefined &&
+        !["upstream", "manual", "default"].includes(input.contextWindowSource))
+        return { ok: false, code: "invalid_context_window", field: "contextWindow" };
     let contextWindow = null;
     if (rawWindow !== undefined && rawWindow !== null) {
-        if (typeof rawWindow !== "number" ||
-            !Number.isSafeInteger(rawWindow) ||
-            rawWindow < 8_192 ||
-            rawWindow > 4_000_000) {
+        if (!isContextWindow(rawWindow)) {
             return { ok: false, code: "invalid_context_window", field: "contextWindow" };
         }
         contextWindow = rawWindow;
@@ -142,6 +143,9 @@ export function validateProviderConfig(input) {
             credentialRef: input.credentialRef,
             maxOutputTokens,
             contextWindow,
+            ...(input.contextWindowSource === undefined
+                ? {}
+                : { contextWindowSource: input.contextWindowSource }),
             ...(input.reasoningEffort === undefined
                 ? {}
                 : { reasoningEffort: input.reasoningEffort }),
@@ -170,6 +174,7 @@ export function readProviderConfig(settings) {
         credentialRef: record["credentialRef"],
         maxOutputTokens: record["maxOutputTokens"],
         contextWindow: record["contextWindow"],
+        contextWindowSource: record["contextWindowSource"],
         reasoningEffort: record["reasoningEffort"],
     });
 }

@@ -9,6 +9,8 @@
  * Only protocols with an implemented adapter are selectable.
  */
 
+import { type ContextWindowSource, isContextWindow } from "./model-context.ts";
+
 export const SUPPORTED_PROTOCOLS = [
   "anthropic_messages",
   "openai_chat",
@@ -53,10 +55,11 @@ export type ProviderConfig = Readonly<{
   /** Omitted/default leaves the model's own reasoning setting unchanged. */
   reasoningEffort?: ReasoningEffort;
   /**
-   * Verified context window, or null when the user did not supply one. A null
-   * window blocks model sends with model_context_unknown rather than guessing.
+   * Configured upstream/manual/default window. Legacy null values are resolved
+   * to the product default by runtime assembly before computing the budget.
    */
   contextWindow: number | null;
+  contextWindowSource?: ContextWindowSource;
 }>;
 
 export type ProviderConfigFailure =
@@ -110,6 +113,7 @@ export function validateProviderConfig(input: {
   credentialRef: unknown;
   maxOutputTokens?: unknown;
   contextWindow?: unknown;
+  contextWindowSource?: unknown;
   reasoningEffort?: unknown;
 }): ProviderConfigResult {
   if (typeof input.protocol !== "string" || input.protocol.length === 0) {
@@ -171,16 +175,16 @@ export function validateProviderConfig(input: {
     return { ok: false, code: "invalid_credential_ref", field: "credentialRef" };
   }
 
-  // Configuration can remain incomplete, but unknown capacity blocks sending.
+  // Preserve legacy nulls in storage; the runtime supplies the product default.
   const rawWindow = input.contextWindow;
+  if (
+    input.contextWindowSource !== undefined &&
+    !["upstream", "manual", "default"].includes(input.contextWindowSource as string)
+  )
+    return { ok: false, code: "invalid_context_window", field: "contextWindow" };
   let contextWindow: number | null = null;
   if (rawWindow !== undefined && rawWindow !== null) {
-    if (
-      typeof rawWindow !== "number" ||
-      !Number.isSafeInteger(rawWindow) ||
-      rawWindow < 8_192 ||
-      rawWindow > 4_000_000
-    ) {
+    if (!isContextWindow(rawWindow)) {
       return { ok: false, code: "invalid_context_window", field: "contextWindow" };
     }
     contextWindow = rawWindow;
@@ -207,6 +211,9 @@ export function validateProviderConfig(input: {
       credentialRef: input.credentialRef,
       maxOutputTokens,
       contextWindow,
+      ...(input.contextWindowSource === undefined
+        ? {}
+        : { contextWindowSource: input.contextWindowSource as ContextWindowSource }),
       ...(input.reasoningEffort === undefined
         ? {}
         : { reasoningEffort: input.reasoningEffort as ReasoningEffort }),
@@ -236,6 +243,7 @@ export function readProviderConfig(settings: unknown): ProviderConfigResult {
     credentialRef: record["credentialRef"],
     maxOutputTokens: record["maxOutputTokens"],
     contextWindow: record["contextWindow"],
+    contextWindowSource: record["contextWindowSource"],
     reasoningEffort: record["reasoningEffort"],
   });
 }

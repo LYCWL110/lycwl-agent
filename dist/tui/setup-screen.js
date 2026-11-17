@@ -1,5 +1,6 @@
 import { Box, Text, useInput } from "ink";
 import { createElement, useState } from "react";
+import { DEFAULT_CONTEXT_WINDOW, } from "../domain/config/model-context.js";
 import { maskSecret, protocolReasoningEfforts, SUPPORTED_PROTOCOLS, } from "../domain/config/provider-config.js";
 import { ConfigChrome, clipText, colorProps, useViewport } from "./chrome.js";
 import { colorFor, detectCapabilities, rowStyle } from "./palette.js";
@@ -50,6 +51,9 @@ export function SetupScreen(props) {
         credentialRef: props.initial.credentialRef ?? "provider-main",
         reasoningEffort: props.initial.reasoningEffort ?? "default",
         contextWindow: props.initial.contextWindow == null ? "" : String(props.initial.contextWindow),
+        ...(props.initial.contextWindowSource === undefined
+            ? {}
+            : { contextWindowSource: props.initial.contextWindowSource }),
         maxOutputTokens: String(props.initial.maxOutputTokens ?? 4096),
     });
     const actions = [...FIELD_ORDER, ...(props.onBrowse ? ["models"] : []), "save", "discard"];
@@ -83,6 +87,14 @@ export function SetupScreen(props) {
             return {
                 ...current,
                 protocol,
+                ...(current.contextWindowSource === "default" ||
+                    current.contextWindowSource === "upstream" ||
+                    current.contextWindow === ""
+                    ? {
+                        contextWindow: String(DEFAULT_CONTEXT_WINDOW),
+                        contextWindowSource: "default",
+                    }
+                    : {}),
             };
         });
     }
@@ -160,7 +172,25 @@ export function SetupScreen(props) {
             return;
         const field = focus;
         const next = editText({ value: draft[field], cursor: cursors[field] }, input, key);
-        setDraft((current) => ({ ...current, [field]: next.value }));
+        setDraft((current) => ({
+            ...current,
+            [field]: next.value,
+            ...(field === "contextWindow" && next.value !== current.contextWindow
+                ? { contextWindowSource: next.value === "" ? "default" : "manual" }
+                : {}),
+            ...(field === "apiKey" &&
+                next.value !== current.apiKey &&
+                current.contextWindowSource === "upstream"
+                ? { contextWindow: String(DEFAULT_CONTEXT_WINDOW), contextWindowSource: "default" }
+                : {}),
+            ...((field === "model" || field === "baseUrl") &&
+                next.value !== current[field] &&
+                (current.contextWindowSource === "default" ||
+                    current.contextWindowSource === "upstream" ||
+                    current.contextWindow === "")
+                ? { contextWindow: String(DEFAULT_CONTEXT_WINDOW), contextWindowSource: "default" }
+                : {}),
+        }));
         setCursors((current) => ({ ...current, [field]: next.cursor }));
     });
     return h(ConfigChrome, { capabilities, viewport, title: "Provider setup", animated: props.animated }, h(Box, { flexDirection: "column" }, ...FIELD_ORDER.map((field) => h(FieldRow, {

@@ -72,6 +72,7 @@ export function createLspConnection(
     options.inheritedEnvironment,
     {},
     {
+      platform: process.platform === "linux" ? "linux" : "win32",
       ...(options.providerCredentialNames === undefined
         ? {}
         : { providerCredentialNames: options.providerCredentialNames }),

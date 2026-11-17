@@ -5,6 +5,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export function createLspConnection(options) {
     const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     const filter = filterChildEnvironment(options.inheritedEnvironment, {}, {
+        platform: process.platform === "linux" ? "linux" : "win32",
         ...(options.providerCredentialNames === undefined
             ? {}
             : { providerCredentialNames: options.providerCredentialNames }),

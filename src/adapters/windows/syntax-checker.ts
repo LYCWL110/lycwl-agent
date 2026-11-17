@@ -86,7 +86,11 @@ export function createSyntaxChecker(options: SyntaxCheckerOptions): SyntaxChecke
             timeoutMs: SYNTAX_CHECK_LIMITS.timeoutMs,
             // Filtered here as well as at the call site, so this adapter is safe to
             // call with any environment rather than relying on its caller.
-            env: filterChildEnvironment(options.environment).environment as Record<string, string>,
+            env: filterChildEnvironment(
+              options.environment,
+              {},
+              { platform: process.platform === "linux" ? "linux" : "win32" },
+            ).environment as Record<string, string>,
           },
         );
 

@@ -1,6 +1,7 @@
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { FileSnapshotFacts } from "../../services/files/consistent-snapshot.ts";
+import { isPosixWorkspaceRoot } from "../../services/permission/posix-workspace-path.ts";
 import { decideResolvedReadPermission } from "../../services/permission/resolved-read-policy.ts";
 import { resolveWorkspacePath } from "../../services/permission/workspace-path.ts";
 import type { SearchEntry } from "../tools/search-tools.ts";
@@ -14,6 +15,7 @@ import type { SearchEntry } from "../tools/search-tools.ts";
  */
 export type DirectoryReadFailure =
   | "invalid_path"
+  | "symbolic_link"
   | "not_found"
   | "access_denied"
   | "not_a_directory"
@@ -55,6 +57,15 @@ export function createWindowsFileReader(options: Readonly<{ workspaceRoot: strin
     const supplied = resolveWorkspacePath(workspaceRoot, requested);
     if (!supplied.ok) return { ok: false, code: "invalid_path" };
     if (!supplied.value.withinWorkspace) return { ok: false, code: "invalid_path" };
+
+    if (isPosixWorkspaceRoot(workspaceRoot)) {
+      try {
+        if ((await lstat(supplied.value.absolutePath)).isSymbolicLink())
+          return { ok: false, code: "symbolic_link" };
+      } catch (error) {
+        return { ok: false, code: mapDirectoryError(error) };
+      }
+    }
 
     // Resolve reparse points first: a junction must not pull outside content in.
     let resolvedPath: string;
@@ -108,6 +119,15 @@ export function createWindowsFileReader(options: Readonly<{ workspaceRoot: strin
   ): Promise<FileReadResult> {
     const supplied = resolveWorkspacePath(workspaceRoot, relativePath);
     if (!supplied.ok) return { ok: false, code: "invalid_path" };
+
+    if (isPosixWorkspaceRoot(workspaceRoot)) {
+      try {
+        if ((await lstat(supplied.value.absolutePath)).isSymbolicLink())
+          return { ok: false, code: "symbolic_link" };
+      } catch (error) {
+        return { ok: false, code: mapFileReadError(error) };
+      }
+    }
 
     let resolvedPath: string;
     try {
@@ -201,7 +221,10 @@ export type WindowsFileReader = ReturnType<typeof createWindowsFileReader>;
 
 function toPosixRelative(workspaceRoot: string, absolutePath: string): string {
   const relative = path.relative(workspaceRoot, absolutePath);
-  return relative.replace(/\\/g, "/").replace(/\/+$/, "");
+  return (isPosixWorkspaceRoot(workspaceRoot) ? relative : relative.replace(/\\/g, "/")).replace(
+    /\/+$/,
+    "",
+  );
 }
 
 function mapDirectoryError(error: unknown): DirectoryReadFailure {

@@ -63,6 +63,7 @@ export const SHELL_LIMITS = Object.freeze({
 });
 
 export type EnvironmentFilterOptions = Readonly<{
+  platform?: "win32" | "linux";
   /** Additional credential names from the locked provider catalog. */
   providerCredentialNames?: readonly string[];
   /**
@@ -90,6 +91,28 @@ export function filterChildEnvironment(
   overrides: Readonly<Record<string, string>> = {},
   options: EnvironmentFilterOptions = {},
 ): EnvironmentFilterResult {
+  if (options.platform === "linux") {
+    const merged = { ...inherited, ...overrides };
+    const filtered = buildFilteredSet(options.providerCredentialNames ?? []);
+    const granted = new Set(options.grantedNames ?? []);
+    const environment: Record<string, string> = {};
+    const removedNames: string[] = [];
+    for (const [name, value] of Object.entries(merged)) {
+      const upper = name.toUpperCase();
+      const base = upper.startsWith("INPUT_") ? upper.slice(6) : upper;
+      const startup =
+        ["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"].includes(name) ||
+        name.startsWith("BASH_FUNC_");
+      if (startup || ((filtered.has(upper) || filtered.has(base)) && !granted.has(name)))
+        removedNames.push(name);
+      else environment[name] = value;
+    }
+    return {
+      environment,
+      removedNames: removedNames.sort(),
+      missingGrantNames: [...granted].filter((name) => !(name in environment)).sort(),
+    };
+  }
   const merged: Record<string, string> = {};
   const canonical = new Map<string, string>();
 
@@ -244,7 +267,10 @@ export function renderShellPreview(
   };
 }
 
-export function formatShellPreview(preview: ShellPreview): string {
+export function formatShellPreview(
+  preview: ShellPreview,
+  platform: "win32" | "linux" = "win32",
+): string {
   const riskLines = formatRiskLines(preview.risks ?? []);
   return [
     "shell",
@@ -257,7 +283,7 @@ export function formatShellPreview(preview: ShellPreview): string {
       ? ["statements=more than one; each part runs, not only the first"]
       : []),
     ...riskLines,
-    "effect=runs an external program with the current Windows user's permissions",
+    `effect=runs an external program with the current ${platform === "linux" ? "Linux" : "Windows"} user's permissions`,
     "sandbox=none; environment filtering is not OS isolation",
   ].join("\n");
 }

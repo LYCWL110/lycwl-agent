@@ -7,6 +7,7 @@ import {
   BROWSER_LIMITS,
   type BrowserKey,
   type BrowserState,
+  contextNotice,
   filteredModels,
   reasoningChoices,
   reasoningNotice,
@@ -19,6 +20,7 @@ export type ConfigBrowserProps = Readonly<{
   state: BrowserState;
   capabilities: Capabilities;
   endpoint?: string;
+  contextOverride?: number;
   busy?: boolean;
   animated?: boolean;
   viewport?: Viewport;
@@ -132,7 +134,7 @@ export function ConfigBrowser(props: ConfigBrowserProps): ReactElement {
                 key: column.title,
                 width: column.width,
                 flexDirection: "column",
-                minHeight: stacked ? undefined : BROWSER_LIMITS.visibleRows + 2,
+                minHeight: stacked ? undefined : BROWSER_LIMITS.visibleRows + 1,
               },
               h(
                 Text,
@@ -165,6 +167,11 @@ export function ConfigBrowser(props: ConfigBrowserProps): ReactElement {
       ),
       h(Text, colorProps(colorFor("faint", capabilities)), "─".repeat(width)),
       h(Text, colorProps(colorFor("dim", capabilities)), reasoningNotice(state)),
+      h(
+        Text,
+        colorProps(colorFor("dim", capabilities)),
+        contextNotice(state, props.contextOverride),
+      ),
       !efforts.includes(state.reasoningEffort)
         ? h(
             Text,

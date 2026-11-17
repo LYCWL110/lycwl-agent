@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { parseJsonc } from "../../domain/config/jsonc.ts";
 import { readBoundedUtf8 } from "../persistence/bounded-utf8-file.ts";
-import { acquireExclusiveFileLease } from "./exclusive-file-lease.ts";
+import { acquireExclusiveFileLease } from "../platform-file-lease.ts";
 
 /**
  * User settings persistence with a local-user configuration lock and
@@ -127,7 +127,10 @@ export function createConfigStore(options: ConfigStoreOptions) {
     const draftValidation = validateDocument(input.draft);
     if (!draftValidation.ok) return { ok: false, code: "config_invalid" };
 
-    await mkdir(options.directory, { recursive: true });
+    await mkdir(options.directory, {
+      recursive: true,
+      ...(process.platform === "linux" ? { mode: 0o700 } : {}),
+    });
     const lock = await acquireLock();
     if (!lock.ok) return { ok: false, code: lock.code };
 

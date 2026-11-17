@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
-
 import {
   canReserve,
   isChargeUncertain,
@@ -13,6 +12,7 @@ import {
   utcMonthOf,
   validateTransition,
 } from "../../domain/web/search-ledger.ts";
+import { linuxDirectories } from "../linux/directories.ts";
 
 /**
  * Durable append-only search ledger (C07).
@@ -48,6 +48,7 @@ export type SearchLedgerOptions = Readonly<{
 }>;
 
 export function defaultSearchLedgerDirectory(): string {
+  if (process.platform === "linux") return path.join(linuxDirectories().state, "search-usage");
   const localAppData = process.env["LOCALAPPDATA"];
   const base =
     localAppData === undefined || localAppData.length === 0

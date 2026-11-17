@@ -1,3 +1,5 @@
+import { isPosixWorkspaceRoot, resolvePosixWorkspacePath } from "./posix-workspace-path.ts";
+
 export type WorkspacePathFailure =
   | "empty_path"
   | "control_character"
@@ -76,6 +78,9 @@ export function resolveWorkspacePath(
     return { ok: false, code: "control_character" };
   }
 
+  if (isPosixWorkspaceRoot(workspaceRoot))
+    return resolvePosixWorkspacePath(workspaceRoot, requestedPath);
+
   const root = normalizeAbsolutePath(workspaceRoot);
   if (!root.ok) return root;
   const normalizedRoot = root.value;
@@ -108,6 +113,12 @@ export function classifySensitiveRead(
   const segments = splitPath(path.absolutePath);
   const basename = segments.at(-1) ?? "";
   const lowerBasename = basename.toLowerCase();
+
+  if (
+    isPosixWorkspaceRoot(path.absolutePath) &&
+    segments.some((segment) => [".ssh", ".aws", ".gnupg"].includes(segment))
+  )
+    return "protected_directory";
 
   if (segments.some((segment) => PROTECTED_DIRECTORIES.has(segment.toLowerCase()))) {
     return "protected_directory";

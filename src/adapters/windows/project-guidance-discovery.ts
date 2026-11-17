@@ -3,6 +3,10 @@ import {
   type GuidanceCandidate,
   type ProjectGuidanceFailure,
 } from "../../domain/context/project-guidance.ts";
+import {
+  isPosixWorkspaceRoot,
+  posixDirectoriesOnPath,
+} from "../../services/permission/posix-workspace-path.ts";
 import { resolveWorkspacePath } from "../../services/permission/workspace-path.ts";
 import { createWindowsFileReader } from "./windows-directory-reader.ts";
 
@@ -79,6 +83,8 @@ function directoriesOnPath(
   targetPath: string,
   targetIsDirectory: boolean,
 ): readonly string[] | null {
+  if (isPosixWorkspaceRoot(workspaceRoot))
+    return posixDirectoriesOnPath(workspaceRoot, targetPath, targetIsDirectory);
   const resolvedRoot = resolveWorkspacePath(workspaceRoot, workspaceRoot);
   if (!resolvedRoot.ok) return null;
   const root = resolvedRoot.value.absolutePath.replace(/\\+$/, "");

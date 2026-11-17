@@ -6,6 +6,11 @@ import type { FileVault } from "../adapters/windows/file-credential-vault.ts";
 import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
 import type { CatalogModel } from "../domain/config/model-catalog.ts";
 import {
+  DEFAULT_CONTEXT_WINDOW,
+  isContextWindow,
+  resolveModelContext,
+} from "../domain/config/model-context.ts";
+import {
   type ProviderConfig,
   readProviderConfig,
   SUPPORTED_PROTOCOLS,
@@ -29,6 +34,7 @@ import { saveSetup } from "./setup-save.ts";
 
 export type ConfigFlowOptions = Readonly<{
   initialPage?: "setup" | "model";
+  discoverContextOnSelection?: boolean;
   configStore: ConfigStore;
   vault: FileVault;
   workspaceRoot: string;
@@ -81,8 +87,13 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
   let fetchVersion = 0;
   let listPending = false;
   let detailVersion = 0;
+  let selectionVersion = 0;
   let detailTimer: ReturnType<typeof setTimeout> | null = null;
   const detailCache = new Map<string, Promise<ModelDetailsResult>>();
+  let catalogSnapshot: Readonly<{
+    scope: string;
+    models: readonly (string | CatalogModel)[];
+  }> | null = null;
   let phase: Phase = { kind: "setup" };
   let draft: SetupDraft = {
     protocol: "anthropic_messages",
@@ -90,6 +101,8 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
     model: "",
     credentialRef: "provider-main",
     apiKey: "",
+    contextWindow: DEFAULT_CONTEXT_WINDOW,
+    contextWindowSource: "default",
   };
   let baseDocument: ConfigDocument | null = null;
   let savedConfig: ProviderConfig | null = null;
@@ -106,6 +119,7 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
     closed = true;
     fetchVersion += 1;
     clearDetails();
+    catalogSnapshot = null;
     instance?.unmount();
     if (outcome === "discarded") options.onDiscard();
     settle(outcome);
@@ -129,7 +143,7 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
       },
     };
     redraw();
-    void fetchModels(value.protocol ?? "anthropic_messages");
+    void fetchModels(value.protocol ?? "anthropic_messages", true);
   }
 
   function element(): ReactElement {
@@ -159,6 +173,9 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
     }
     return createElement(ConfigBrowser, {
       state: phase.state,
+      ...(hasManualContext(draft) && isContextWindow(Number(draft.contextWindow))
+        ? { contextOverride: Number(draft.contextWindow) }
+        : {}),
       capabilities,
       animated: true,
       busy,
@@ -166,20 +183,52 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
       onState: (state: BrowserState) => {
         if (busy || phase.kind !== "browser") return;
         const changedProtocol = state.protocolIndex !== phase.state.protocolIndex;
+        const changedModel =
+          filteredModels(state)[state.modelIndex]?.id !==
+          filteredModels(phase.state)[phase.state.modelIndex]?.id;
+        if (
+          changedProtocol ||
+          changedModel ||
+          state.reasoningEffort !== phase.state.reasoningEffort
+        )
+          selectionVersion += 1;
         phase = { kind: "browser", state };
         redraw();
         if (changedProtocol)
           void fetchModels(state.protocols[state.protocolIndex] as SupportedProtocol);
-        else scheduleDetails();
+        else if (changedModel) scheduleDetails();
       },
       onEdit: () => {
         if (busy || phase.kind !== "browser") return;
+        const selectedModel = filteredModels(phase.state)[phase.state.modelIndex];
+        const changedModel =
+          selectedModel?.id !== draft.model ||
+          phase.state.protocols[phase.state.protocolIndex] !== draft.protocol;
         draft = {
           ...draft,
+          ...contextForDraft(
+            changedModel && !hasManualContext(draft)
+              ? { ...draft, contextWindowSource: "default" }
+              : draft,
+            selectedModel,
+          ),
           protocol: phase.state.protocols[phase.state.protocolIndex] as SupportedProtocol,
           model: filteredModels(phase.state)[phase.state.modelIndex]?.id ?? draft.model,
           reasoningEffort: phase.state.reasoningEffort,
         };
+        if (selectedModel !== undefined) {
+          const scope = catalogScope(draft);
+          const models = catalogSnapshot?.scope === scope ? catalogSnapshot.models : [];
+          catalogSnapshot = {
+            scope,
+            models: [
+              ...models.filter(
+                (entry) => (typeof entry === "string" ? entry : entry.id) !== selectedModel.id,
+              ),
+              selectedModel,
+            ],
+          };
+        }
         fetchVersion += 1;
         clearDetails();
         phase = { kind: "setup" };
@@ -189,8 +238,20 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
         if (phase.kind === "browser")
           void fetchModels(phase.state.protocols[phase.state.protocolIndex] as SupportedProtocol);
       },
-      onCommit: (value) => {
-        const selected =
+      onCommit: async (value) => {
+        if (busy || closed || phase.kind !== "browser") return;
+        if (listPending && options.fetchModel !== undefined) {
+          phase = {
+            kind: "browser",
+            state: {
+              ...phase.state,
+              status: { text: "Model list is loading; select again when ready", isError: false },
+            },
+          };
+          redraw();
+          return;
+        }
+        let selected =
           phase.kind === "browser"
             ? {
                 ...(value.protocol === phase.state.protocols[phase.state.protocolIndex]
@@ -218,14 +279,65 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
           }
           return;
         }
-        void persist({
-          ...draft,
-          protocol: value.protocol as SupportedProtocol,
-          model: value.model,
-          reasoningEffort:
-            value.reasoningEffort ??
-            (phase.kind === "browser" ? phase.state.reasoningEffort : "default"),
-        });
+        if (
+          options.fetchModel !== undefined &&
+          !(
+            hasManualContext(draft) &&
+            filteredModels(phase.state)[phase.state.modelIndex]?.reasoning !== undefined
+          ) &&
+          filteredModels(phase.state)[phase.state.modelIndex]?.id === value.model &&
+          phase.state.protocols[phase.state.protocolIndex] === value.protocol
+        ) {
+          const version = fetchVersion;
+          const detail = detailVersion;
+          const selection = selectionVersion;
+          if (detailTimer !== null) clearTimeout(detailTimer);
+          detailTimer = null;
+          await fetchSelectedDetails();
+          if (
+            closed ||
+            busy ||
+            version !== fetchVersion ||
+            detail !== detailVersion ||
+            selection !== selectionVersion ||
+            phase.kind !== "browser" ||
+            filteredModels(phase.state)[phase.state.modelIndex]?.id !== value.model ||
+            phase.state.protocols[phase.state.protocolIndex] !== value.protocol
+          )
+            return;
+          selected = phase.state;
+          if (
+            !reasoningChoices(selected).includes(value.reasoningEffort ?? selected.reasoningEffort)
+          ) {
+            phase = {
+              kind: "browser",
+              state: {
+                ...phase.state,
+                status: { text: "Select a listed reasoning level before saving", isError: true },
+              },
+            };
+            redraw();
+            return;
+          }
+        }
+        const changedModel = value.model !== draft.model || value.protocol !== draft.protocol;
+        void persist(
+          {
+            ...draft,
+            ...contextForDraft(
+              changedModel && !hasManualContext(draft)
+                ? { ...draft, contextWindowSource: "default" }
+                : draft,
+              filteredModels(selected)[selected.modelIndex],
+            ),
+            protocol: value.protocol as SupportedProtocol,
+            model: value.model,
+            reasoningEffort:
+              value.reasoningEffort ??
+              (phase.kind === "browser" ? phase.state.reasoningEffort : "default"),
+          },
+          true,
+        );
       },
       onCancel: () => {
         if (!busy) close("discarded");
@@ -233,7 +345,41 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
     });
   }
 
-  async function persist(value: SetupDraft): Promise<void> {
+  function hasManualContext(value: SetupDraft): boolean {
+    return (
+      value.contextWindowSource === "manual" ||
+      (value.contextWindowSource === undefined &&
+        value.contextWindow !== undefined &&
+        value.contextWindow !== null &&
+        value.contextWindow !== "")
+    );
+  }
+
+  function catalogScope(
+    value: SetupDraft,
+    protocol = value.protocol ?? "anthropic_messages",
+  ): string {
+    return JSON.stringify([
+      protocol,
+      value.baseUrl.replace(/\/+$/, ""),
+      value.credentialRef,
+      value.apiKey,
+    ]);
+  }
+
+  function contextForDraft(
+    value: SetupDraft,
+    model?: CatalogModel,
+  ): Pick<SetupDraft, "contextWindow" | "contextWindowSource"> {
+    if (hasManualContext(value))
+      return {
+        ...(value.contextWindow === undefined ? {} : { contextWindow: value.contextWindow }),
+        contextWindowSource: "manual",
+      };
+    return resolveModelContext(model);
+  }
+
+  async function persist(value: SetupDraft, metadataResolved = false): Promise<void> {
     if (busy || closed) return;
     busy = true;
     fetchVersion += 1;
@@ -243,6 +389,59 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
     saveError = null;
     redraw();
     try {
+      if (!metadataResolved) {
+        const scope = catalogScope(value);
+        const cached =
+          catalogSnapshot?.scope === scope
+            ? catalogSnapshot.models.find(
+                (entry) => typeof entry !== "string" && entry.id === value.model,
+              )
+            : undefined;
+        let model: CatalogModel | undefined = typeof cached === "object" ? cached : undefined;
+        if (
+          !hasManualContext(value) &&
+          !isContextWindow(model?.contextWindow) &&
+          (options.fetchModels !== undefined || options.fetchModel !== undefined)
+        ) {
+          const current = () => !closed;
+          const connection = await catalogConnection(
+            value.protocol ?? "anthropic_messages",
+            current,
+            () => undefined,
+          );
+          if (connection !== null && !closed) {
+            const request = { ...connection, protocol: value.protocol ?? "anthropic_messages" };
+            if (!isContextWindow(model?.contextWindow) && options.fetchModels !== undefined) {
+              try {
+                const listed = await options.fetchModels(request);
+                if (!("ok" in listed)) {
+                  const found = listed.find(
+                    (entry) => typeof entry !== "string" && entry.id === value.model,
+                  );
+                  if (typeof found === "object") model = found;
+                }
+              } catch {
+                model = undefined;
+              }
+            }
+            if (
+              !closed &&
+              !isContextWindow(model?.contextWindow) &&
+              options.fetchModel !== undefined
+            ) {
+              try {
+                const details = await options.fetchModel({ ...request, model: value.model });
+                if (details.ok && details.model.id === value.model) model = details.model;
+              } catch {
+                /* Unavailable metadata uses the explicit default below. */
+              }
+            }
+          }
+        }
+        if (closed) return;
+        value = { ...value, ...contextForDraft(value, model) };
+        draft = value;
+      }
       const result = await save({
         draft: value,
         vault: options.vault,
@@ -265,6 +464,7 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
         `protocol: ${result.config.protocol}`,
         `model: ${result.config.model}`,
         `reasoning: ${result.config.reasoningEffort ?? "default"}`,
+        `context: ${draft.contextWindow} tokens (${draft.contextWindowSource ?? "manual"})`,
         `endpoint: ${result.config.baseUrl}`,
         "configuration saved; applies to the next Run",
       ]);
@@ -323,9 +523,32 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
     return { baseUrl: route.value.baseUrl, apiKey: key.value };
   }
 
-  async function fetchModels(protocol: SupportedProtocol): Promise<void> {
+  async function fetchModels(protocol: SupportedProtocol, retainContext = false): Promise<void> {
     if (busy || closed || phase.kind !== "browser") return;
+    const retained =
+      retainContext && catalogSnapshot?.scope === catalogScope(draft, protocol)
+        ? catalogSnapshot
+        : null;
     phase = { kind: "browser", state: clearReasoningDeclarations(phase.state) };
+    if (retained !== null) {
+      phase = {
+        kind: "browser",
+        state: {
+          ...phase.state,
+          models: phase.state.models.map((model) => {
+            const previous = retained.models.find(
+              (entry) => typeof entry !== "string" && entry.id === model.id,
+            );
+            return typeof previous === "object" &&
+              previous.contextWindow !== undefined &&
+              !previous.contextWindowInvalid
+              ? { ...model, contextWindow: previous.contextWindow }
+              : model;
+          }),
+        },
+      };
+    }
+    catalogSnapshot = retained;
     clearDetails();
     const version = ++fetchVersion;
     listPending = true;
@@ -355,6 +578,26 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
         return;
       }
       phase = { kind: "browser", state: mergeFetchedModels(phase.state, result) };
+      if (retained !== null) {
+        phase = {
+          kind: "browser",
+          state: {
+            ...phase.state,
+            models: phase.state.models.map((model) => {
+              if (model.contextWindow !== undefined || model.contextWindowInvalid) return model;
+              const previous = retained.models.find(
+                (entry) => typeof entry !== "string" && entry.id === model.id,
+              );
+              return typeof previous === "object" &&
+                previous.contextWindow !== undefined &&
+                !previous.contextWindowInvalid
+                ? { ...model, contextWindow: previous.contextWindow }
+                : model;
+            }),
+          },
+        };
+      }
+      catalogSnapshot = { scope: catalogScope(draft, protocol), models: phase.state.models };
     } catch {
       if (closed || version !== fetchVersion || phase.kind !== "browser") return;
       phase = {
@@ -390,7 +633,14 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
     )
       return;
     const model = filteredModels(phase.state)[phase.state.modelIndex];
-    if (model === undefined || model.reasoning !== undefined) return;
+    if (
+      model === undefined ||
+      (model.reasoning !== undefined &&
+        (options.discoverContextOnSelection !== true ||
+          hasManualContext(draft) ||
+          model.contextWindow !== undefined))
+    )
+      return;
     // Settle keyboard navigation before issuing a lookup for the selected model.
     detailTimer = setTimeout(() => {
       detailTimer = null;
@@ -402,7 +652,12 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
     const fetchModel = options.fetchModel;
     if (phase.kind !== "browser" || fetchModel === undefined || closed || busy) return;
     const selected = filteredModels(phase.state)[phase.state.modelIndex];
-    if (selected === undefined || selected.reasoning !== undefined) return;
+    if (
+      selected === undefined ||
+      (selected.reasoning !== undefined &&
+        (selected.contextWindow !== undefined || hasManualContext(draft)))
+    )
+      return;
     const protocol = phase.state.protocols[phase.state.protocolIndex] as SupportedProtocol;
     const version = fetchVersion;
     const detail = detailVersion;
@@ -444,9 +699,33 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
       status("Model details unavailable; support unknown", true);
       return;
     }
-    const reasoning = result.model.reasoning;
-    const invalid = result.model.reasoningInvalid === true;
-    if (reasoning === undefined && !invalid) {
+    const reasoning = selected.reasoning ?? result.model.reasoning;
+    const invalid =
+      selected.reasoning !== undefined
+        ? selected.reasoningInvalid === true
+        : result.model.reasoningInvalid === true ||
+          (result.model.reasoning === undefined && selected.reasoningInvalid === true);
+    const context =
+      selected.contextWindow === undefined &&
+      (result.model.contextWindow !== undefined || result.model.contextWindowInvalid)
+        ? {
+            ...(result.model.contextWindow === undefined
+              ? {}
+              : { contextWindow: result.model.contextWindow }),
+            ...(result.model.contextWindowInvalid ? { contextWindowInvalid: true as const } : {}),
+          }
+        : {
+            ...(selected.contextWindow === undefined
+              ? {}
+              : { contextWindow: selected.contextWindow }),
+            ...(selected.contextWindowInvalid ? { contextWindowInvalid: true as const } : {}),
+          };
+    if (
+      reasoning === undefined &&
+      !invalid &&
+      context.contextWindow === undefined &&
+      !context.contextWindowInvalid
+    ) {
       status("Model details do not declare effort levels", false);
       return;
     }
@@ -459,6 +738,7 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
             ? {
                 id: entry.id,
                 source: entry.source,
+                ...context,
                 ...(reasoning === undefined ? {} : { reasoning }),
                 ...(invalid ? { reasoningInvalid: true as const } : {}),
               }
@@ -484,7 +764,11 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
         const config = readProviderConfig(parsed.ok ? toPlainValue(parsed.value) : {});
         if (config.ok) {
           savedConfig = config.value;
-          draft = { ...config.value, apiKey: "" };
+          draft = {
+            ...config.value,
+            apiKey: "",
+            ...(config.value.contextWindow === null ? resolveModelContext(undefined) : {}),
+          };
           const key = await options.vault.read({
             reference: config.value.credentialRef,
             purpose: "provider_api_key",

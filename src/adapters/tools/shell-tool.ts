@@ -45,6 +45,7 @@ export type ShellRunOutcome = Readonly<{ evidence?: ToolEvidence }> &
   );
 
 export type ShellToolDependencies = Readonly<{
+  platform?: "win32" | "linux";
   sessionMode: "read_only" | "workspace_write";
   /** Environment inherited by the child process before filtering. */
   inheritedEnvironment: Readonly<Record<string, string>>;
@@ -90,13 +91,14 @@ export function createShellTool(dependencies: ShellToolDependencies): ToolExecut
         dependencies.inheritedEnvironment,
         {},
         {
+          ...(dependencies.platform === undefined ? {} : { platform: dependencies.platform }),
           ...(dependencies.providerCredentialNames === undefined
             ? {}
             : { providerCredentialNames: dependencies.providerCredentialNames }),
           grantedNames: validated.value.environmentGrants,
         },
       );
-      return formatShellPreview(renderShellPreview(validated.value, filter));
+      return formatShellPreview(renderShellPreview(validated.value, filter), dependencies.platform);
     },
 
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
@@ -112,6 +114,7 @@ export function createShellTool(dependencies: ShellToolDependencies): ToolExecut
         dependencies.inheritedEnvironment,
         {},
         {
+          ...(dependencies.platform === undefined ? {} : { platform: dependencies.platform }),
           ...(dependencies.providerCredentialNames === undefined
             ? {}
             : { providerCredentialNames: dependencies.providerCredentialNames }),

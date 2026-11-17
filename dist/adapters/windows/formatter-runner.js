@@ -73,7 +73,7 @@ export function createFormatterRunner(options) {
                 // to call with any environment, which is what a reusable boundary needs.
                 await execute(command, args, {
                     cwd: options.workspaceRoot,
-                    env: filterChildEnvironment(options.environment).environment,
+                    env: filterChildEnvironment(options.environment, {}, { platform: process.platform === "linux" ? "linux" : "win32" }).environment,
                     timeout: FORMATTER_TIMEOUT_MS,
                 });
                 return { ok: true, formatter: selected.formatter.kind };

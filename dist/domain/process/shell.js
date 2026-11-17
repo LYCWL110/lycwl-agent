@@ -65,6 +65,28 @@ export const SHELL_LIMITS = Object.freeze({
  * runs last and a grant is the only exception.
  */
 export function filterChildEnvironment(inherited, overrides = {}, options = {}) {
+    if (options.platform === "linux") {
+        const merged = { ...inherited, ...overrides };
+        const filtered = buildFilteredSet(options.providerCredentialNames ?? []);
+        const granted = new Set(options.grantedNames ?? []);
+        const environment = {};
+        const removedNames = [];
+        for (const [name, value] of Object.entries(merged)) {
+            const upper = name.toUpperCase();
+            const base = upper.startsWith("INPUT_") ? upper.slice(6) : upper;
+            const startup = ["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"].includes(name) ||
+                name.startsWith("BASH_FUNC_");
+            if (startup || ((filtered.has(upper) || filtered.has(base)) && !granted.has(name)))
+                removedNames.push(name);
+            else
+                environment[name] = value;
+        }
+        return {
+            environment,
+            removedNames: removedNames.sort(),
+            missingGrantNames: [...granted].filter((name) => !(name in environment)).sort(),
+        };
+    }
     const merged = {};
     const canonical = new Map();
     for (const [name, value] of Object.entries(inherited)) {
@@ -172,7 +194,7 @@ export function renderShellPreview(request, filter) {
         filteredVariableCount: filter.removedNames.length,
     };
 }
-export function formatShellPreview(preview) {
+export function formatShellPreview(preview, platform = "win32") {
     const riskLines = formatRiskLines(preview.risks ?? []);
     return [
         "shell",
@@ -185,7 +207,7 @@ export function formatShellPreview(preview) {
             ? ["statements=more than one; each part runs, not only the first"]
             : []),
         ...riskLines,
-        "effect=runs an external program with the current Windows user's permissions",
+        `effect=runs an external program with the current ${platform === "linux" ? "Linux" : "Windows"} user's permissions`,
         "sandbox=none; environment filtering is not OS isolation",
     ].join("\n");
 }

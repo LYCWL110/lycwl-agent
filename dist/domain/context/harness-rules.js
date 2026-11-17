@@ -176,8 +176,13 @@ export const HARNESS_RULES_SECTIONS = Object.freeze([
     },
 ]);
 /** The complete system prompt, sections joined by a blank line. */
-export function renderHarnessRules() {
-    return HARNESS_RULES_SECTIONS.map((section) => section.text).join("\n\n");
+export function renderHarnessRules(platform = "win32") {
+    const text = HARNESS_RULES_SECTIONS.map((section) => section.text).join("\n\n");
+    return platform === "linux"
+        ? text
+            .replace("fresh PowerShell process", "fresh Bash process (--noprofile --norc)")
+            .replace("- PowerShell syntax, not POSIX: backslashes are path separators, not escapes.", "- Bash/POSIX syntax: paths use / and are case-sensitive; quote paths containing spaces.\n- Linux process groups are supervised, not sandboxed. A descendant that creates a new session can escape group cleanup.")
+        : text;
 }
 /**
  * A stable identifier for this exact text.

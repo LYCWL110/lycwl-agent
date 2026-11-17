@@ -14,7 +14,7 @@ import {
   serializeSidecar,
   validateSessionTitle,
 } from "../../domain/session/session-catalog.ts";
-import { acquireExclusiveFileLease } from "./exclusive-file-lease.ts";
+import { acquireExclusiveFileLease } from "../platform-file-lease.ts";
 
 /**
  * Session catalog on disk (S02 session list).

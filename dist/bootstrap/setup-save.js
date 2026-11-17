@@ -30,6 +30,10 @@ export async function saveSetup(input) {
         credentialRef: input.draft.credentialRef,
         maxOutputTokens: parseNumericDraft(input.draft.maxOutputTokens, existing.ok ? existing.value.maxOutputTokens : undefined),
         contextWindow: parseNumericDraft(input.draft.contextWindow, existing.ok ? existing.value.contextWindow : null),
+        contextWindowSource: input.draft.contextWindowSource ??
+            (input.draft.contextWindow === undefined && existing.ok
+                ? existing.value.contextWindowSource
+                : undefined),
         reasoningEffort: input.draft.reasoningEffort ??
             (protocol === "anthropic_messages"
                 ? "default"
@@ -59,6 +63,9 @@ export async function saveSetup(input) {
         credentialRef: config.credentialRef,
         maxOutputTokens: config.maxOutputTokens,
         contextWindow: config.contextWindow,
+        ...(config.contextWindowSource === undefined
+            ? {}
+            : { contextWindowSource: config.contextWindowSource }),
         ...(config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
     });
     if (!withProvider.ok) {
@@ -191,6 +198,9 @@ function serializeObjectLiteral(block) {
         `"credentialRef": ${JSON.stringify(block.credentialRef)}`,
         `"maxOutputTokens": ${block.maxOutputTokens}`,
         `"contextWindow": ${JSON.stringify(block.contextWindow)}`,
+        ...(block.contextWindowSource === undefined
+            ? []
+            : [`"contextWindowSource": ${JSON.stringify(block.contextWindowSource)}`]),
         ...(block.reasoningEffort === undefined
             ? []
             : [`"reasoningEffort": ${JSON.stringify(block.reasoningEffort)}`]),

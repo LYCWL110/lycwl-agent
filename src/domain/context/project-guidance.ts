@@ -1,3 +1,5 @@
+import { isPosixPath } from "../path/platform-path.ts";
+
 /**
  * Workspace project-guidance discovery (ADR-0014 / V1_BEHAVIOR_CONTRACTS
  * supplement A).
@@ -82,7 +84,12 @@ export function discoverProjectGuidance(input: {
 
   const rootKey = pathKey(root);
   const targetKey = pathKey(target);
-  if (targetKey !== rootKey && !targetKey.startsWith(`${rootKey}\\`)) {
+  const posix = isPosixPath(root);
+  const separator = posix ? "/" : "\\";
+  if (
+    targetKey !== rootKey &&
+    !targetKey.startsWith(rootKey === "/" ? "/" : `${rootKey}${separator}`)
+  ) {
     return { ok: false, code: "target_outside_workspace" };
   }
 
@@ -101,8 +108,10 @@ export function discoverProjectGuidance(input: {
   for (let depth = 0; depth <= relative.length; depth += 1) {
     const directory = joinSegments(root, relative.slice(0, depth));
     const names = input.entriesFor(directory);
-    const matches = names.filter(
-      (name) => name.toLowerCase() === PROJECT_GUIDANCE_FILENAME.toLowerCase(),
+    const matches = names.filter((name) =>
+      posix
+        ? name === PROJECT_GUIDANCE_FILENAME
+        : name.toLowerCase() === PROJECT_GUIDANCE_FILENAME.toLowerCase(),
     );
 
     // On a case-sensitive volume two distinct entries could both match; picking
@@ -160,6 +169,15 @@ export function checkGuidanceBudget(
 }
 
 function normalizeWindowsPath(value: string): string | null {
+  if (isPosixPath(value)) {
+    const segments: string[] = [];
+    for (const segment of value.split("/")) {
+      if (!segment || segment === ".") continue;
+      if (segment === "..") segments.pop();
+      else segments.push(segment);
+    }
+    return `/${segments.join("/")}`;
+  }
   if (value.length === 0) return null;
   const replaced = value.replace(/\//g, "\\");
   if (!/^[A-Za-z]:\\/.test(replaced) && !replaced.startsWith("\\\\")) return null;
@@ -167,6 +185,7 @@ function normalizeWindowsPath(value: string): string | null {
 }
 
 function splitAbsolute(value: string): readonly string[] | null {
+  if (isPosixPath(value)) return value.split("/").filter(Boolean);
   if (value.startsWith("\\\\")) {
     const parts = value
       .slice(2)
@@ -183,10 +202,18 @@ function splitAbsolute(value: string): readonly string[] | null {
 }
 
 function pathKey(value: string): string {
+  if (isPosixPath(value)) return value;
   return value.replace(/\//g, "\\").toLowerCase();
 }
 
 function relativeSegments(root: string, target: string): readonly string[] | null {
+  if (isPosixPath(root)) {
+    if (target === root) return [];
+    const prefix = root === "/" ? "/" : `${root}/`;
+    return target.startsWith(prefix)
+      ? target.slice(prefix.length).split("/").filter(Boolean)
+      : null;
+  }
   const rootKey = pathKey(root);
   const targetKey = pathKey(target);
   if (targetKey === rootKey) return [];
@@ -198,6 +225,7 @@ function relativeSegments(root: string, target: string): readonly string[] | nul
 }
 
 function parentOf(value: string): string {
+  if (isPosixPath(value)) return value.slice(0, value.lastIndexOf("/")) || "/";
   const index = value.lastIndexOf("\\");
   if (index <= 0) return value;
   // Keep the drive root form `C:\` intact.
@@ -206,6 +234,8 @@ function parentOf(value: string): string {
 }
 
 function joinSegments(base: string, segments: readonly string[]): string {
+  if (isPosixPath(base))
+    return segments.length ? `${base === "/" ? "" : base}/${segments.join("/")}` : base;
   if (segments.length === 0) return base;
   const separator = base.endsWith("\\") ? "" : "\\";
   return `${base}${separator}${segments.join("\\")}`;

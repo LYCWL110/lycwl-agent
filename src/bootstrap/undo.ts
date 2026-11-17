@@ -1,7 +1,8 @@
-import { rm, writeFile } from "node:fs/promises";
+import { lstat, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-
+import { createLinuxWriteAdapter } from "../adapters/linux/filesystem.ts";
 import type { SnapshotStore } from "../ports/snapshot-store.ts";
+import { resolveWorkspacePath } from "../services/permission/workspace-path.ts";
 
 /**
  * Revert the files a Session changed.
@@ -36,6 +37,8 @@ export async function undoSessionChanges(options: UndoOptions): Promise<UndoResu
   const resolvedRoot = path.resolve(options.workspaceRoot);
   const reverted = new Set<string>();
   const skipped: string[] = [];
+  const linuxWriter =
+    process.platform === "linux" ? createLinuxWriteAdapter({ workspaceRoot: resolvedRoot }) : null;
 
   for (const runId of options.runIds) {
     const entries = await options.store.list(runId);
@@ -48,6 +51,23 @@ export async function undoSessionChanges(options: UndoOptions): Promise<UndoResu
       if (absolute !== resolvedRoot && !absolute.startsWith(`${resolvedRoot}${path.sep}`)) {
         skipped.push(entry.path);
         continue;
+      }
+
+      if (linuxWriter !== null) {
+        try {
+          const parent = await realpath(path.dirname(absolute));
+          const checked = resolveWorkspacePath(resolvedRoot, parent);
+          if (!checked.ok || !checked.value.withinWorkspace) throw new Error("invalid_path");
+          const target = await lstat(absolute).catch((error) => {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+            throw error;
+          });
+          if (target !== null && (!target.isFile() || target.isSymbolicLink()))
+            throw new Error("invalid_path");
+        } catch {
+          skipped.push(entry.path);
+          continue;
+        }
       }
 
       if (entry.bytes === null) {
@@ -64,7 +84,12 @@ export async function undoSessionChanges(options: UndoOptions): Promise<UndoResu
         continue;
       }
       try {
-        await writeFile(absolute, bytes);
+        if (linuxWriter === null) await writeFile(absolute, bytes);
+        else {
+          const expected = await linuxWriter.inspectTarget(entry.path);
+          const restored = await linuxWriter.writeBytes(entry.path, bytes, expected);
+          if (!restored.ok) throw new Error(restored.code);
+        }
         reverted.add(entry.path);
       } catch {
         skipped.push(entry.path);

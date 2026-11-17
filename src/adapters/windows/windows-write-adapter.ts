@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { lstat, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import type { FileSnapshotFacts } from "../../services/files/consistent-snapshot.ts";
+import { isPosixWorkspaceRoot } from "../../services/permission/posix-workspace-path.ts";
 import { resolveWorkspacePath } from "../../services/permission/workspace-path.ts";
 import type { PatchTargetSnapshot } from "../tools/patch-tool.ts";
 import type { WriteTargetFacts } from "../tools/write-tools.ts";
@@ -160,7 +161,18 @@ export function createWindowsWriteAdapter(options: Readonly<{ workspaceRoot: str
 
     let handle: Awaited<ReturnType<typeof open>> | null = null;
     try {
+      let mode: number | undefined;
+      if (isPosixWorkspaceRoot(workspaceRoot)) {
+        try {
+          const info = await lstat(target);
+          if (!info.isFile() || info.isSymbolicLink()) return { ok: false, code: "invalid_path" };
+          mode = info.mode & 0o777;
+        } catch (error) {
+          if (!isNotFound(error)) throw error;
+        }
+      }
       handle = await open(tempPath, "wx");
+      if (mode !== undefined) await handle.chmod(mode);
       await handle.writeFile(bytes);
       await handle.sync();
       await handle.close();
@@ -172,6 +184,7 @@ export function createWindowsWriteAdapter(options: Readonly<{ workspaceRoot: str
     }
 
     try {
+      if (isPosixWorkspaceRoot(workspaceRoot)) await targetPath(relativePath);
       if (!(await unchanged())) {
         await unlink(tempPath).catch(() => undefined);
         return { ok: false, code: "file_conflict" };

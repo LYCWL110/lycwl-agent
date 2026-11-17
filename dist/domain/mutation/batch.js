@@ -52,7 +52,7 @@ export function validateDeleteTargets(requested, facts, options = {}) {
     for (const path of requested) {
         if (path.length === 0)
             return { ok: false, code: "invalid_arguments" };
-        const key = path.replace(/\\/g, "/").toLowerCase();
+        const key = options.caseSensitive ? path : path.replace(/\\/g, "/").toLowerCase();
         if (seen.has(key))
             return { ok: false, code: "duplicate_target" };
         seen.add(key);

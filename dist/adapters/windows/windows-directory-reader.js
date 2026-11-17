@@ -1,5 +1,6 @@
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
+import { isPosixWorkspaceRoot } from "../../services/permission/posix-workspace-path.js";
 import { decideResolvedReadPermission } from "../../services/permission/resolved-read-policy.js";
 import { resolveWorkspacePath } from "../../services/permission/workspace-path.js";
 const MAX_READ_BYTES = 5 * 1024 * 1024;
@@ -13,6 +14,15 @@ export function createWindowsFileReader(options) {
             return { ok: false, code: "invalid_path" };
         if (!supplied.value.withinWorkspace)
             return { ok: false, code: "invalid_path" };
+        if (isPosixWorkspaceRoot(workspaceRoot)) {
+            try {
+                if ((await lstat(supplied.value.absolutePath)).isSymbolicLink())
+                    return { ok: false, code: "symbolic_link" };
+            }
+            catch (error) {
+                return { ok: false, code: mapDirectoryError(error) };
+            }
+        }
         // Resolve reparse points first: a junction must not pull outside content in.
         let resolvedPath;
         try {
@@ -63,6 +73,15 @@ export function createWindowsFileReader(options) {
         const supplied = resolveWorkspacePath(workspaceRoot, relativePath);
         if (!supplied.ok)
             return { ok: false, code: "invalid_path" };
+        if (isPosixWorkspaceRoot(workspaceRoot)) {
+            try {
+                if ((await lstat(supplied.value.absolutePath)).isSymbolicLink())
+                    return { ok: false, code: "symbolic_link" };
+            }
+            catch (error) {
+                return { ok: false, code: mapFileReadError(error) };
+            }
+        }
         let resolvedPath;
         try {
             resolvedPath = await realpath(supplied.value.absolutePath);
@@ -153,7 +172,7 @@ export function createWindowsFileReader(options) {
 }
 function toPosixRelative(workspaceRoot, absolutePath) {
     const relative = path.relative(workspaceRoot, absolutePath);
-    return relative.replace(/\\/g, "/").replace(/\/+$/, "");
+    return (isPosixWorkspaceRoot(workspaceRoot) ? relative : relative.replace(/\\/g, "/")).replace(/\/+$/, "");
 }
 function mapDirectoryError(error) {
     if (typeof error !== "object" || error === null)

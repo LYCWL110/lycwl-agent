@@ -1,6 +1,6 @@
 # lycwl
 
-Windows terminal coding agent. Requires Node.js 24 and the project dependencies.
+Windows and Linux terminal coding agent. Requires Node.js 24 and the project dependencies.
 
 Each launch starts a new conversation in a separate terminal screen. Exit with
 Esc to restore the original terminal content. Messages within that launch retain
@@ -21,6 +21,63 @@ Start from the repository in PowerShell:
 ```powershell
 .\lycwl.cmd
 ```
+
+On Linux, use Node.js 24 and register `lycwl` once from this checkout:
+
+```sh
+pnpm install
+pnpm build
+npm link --offline --ignore-scripts --no-audit --no-fund
+```
+
+Then run `lycwl` from the project you want to work on. Put options after the
+command, using the same syntax as Windows:
+
+```sh
+lycwl
+lycwl --write
+lycwl --shell
+lycwl --skills
+lycwl --resume <session-id>
+lycwl --setup
+lycwl --help
+lycwl --version
+```
+
+The npm global executable directory (`$(npm prefix -g)/bin`) must be on `PATH`.
+If registration fails with `EACCES` because the global prefix is a system directory,
+use a user-owned prefix instead of running the registration with `sudo`:
+
+```sh
+npm config set prefix "$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
+npm link --offline --ignore-scripts --no-audit --no-fund
+```
+
+Add the `export PATH` line to your shell startup file (for example `~/.bashrc`
+for interactive Bash) so it also applies in new terminals.
+The registration links to this checkout; run `pnpm build` after source changes
+and keep the checkout in place. No shell alias or separate Linux command is needed.
+
+Linux uses Bash for approved commands. Configuration and credentials live under
+`$XDG_CONFIG_HOME/lycwl-agent` (default `~/.config/lycwl-agent`); session data
+uses `$XDG_STATE_HOME/lycwl-agent` (default `~/.local/state/lycwl-agent`). Image
+paste uses `wl-paste` on Wayland or `xclip` on X11 when available.
+Oversized clipboard images are refused on Linux; automatic image resizing remains
+Windows-only. No clipboard program is installed automatically.
+
+Build or run the Linux-specific tests from this checkout:
+
+```sh
+pnpm build
+lycwl --help
+pnpm test:linux
+pnpm test
+```
+
+`pnpm test` selects shared tests plus independent Linux suites on Linux, and keeps
+the original Windows suites on Windows. Windows test files, commands and import
+paths are unchanged; Windows-specific legacy suites are excluded on Linux.
 
 Register the existing package entry point once to use `lycwl` from any project:
 
@@ -44,10 +101,20 @@ lycwl --resume <session-id>
 The current directory is the session workspace. `--write` enables file changes
 with approval; `--shell` also enables shell commands with approval.
 Provider settings are configured in the TUI.
-Set `Context tokens` to the model's documented window (or a smaller safety
-limit) and `Output tokens` to an accepted output limit in `/config`. Unknown
-context capacity blocks model requests instead of guessing or dropping history.
-The entered capacity is user-supplied, not an upstream compatibility test.
+The model browser reads context capacity from the model list, then queries the
+selected model's details when capacity is missing. If neither supplies a valid
+length, the default is **272,000 tokens** (272k, not 272 × 1024). A valid manual
+`Context tokens` value remains an explicit override. Set `Output tokens` to an
+accepted output limit in `/config`.
+
+Context displays distinguish upstream declarations, manual overrides and the
+unverified default. Upstream fields such as `context_length`, `context_window`,
+`max_context_length`, `limits.context` and input-token limits are recognized;
+output-token limits are not used as context capacity. Switching connections or
+models invalidates automatic metadata. Missing metadata in an old configuration
+also uses the 272k default at runtime. The default is a local budget, not proof
+that an upstream model accepts that many tokens; choose a smaller manual value
+when the provider documents a smaller window.
 
 Messages submitted during model activity appear immediately as `queued`.
 They become `ready` when added to task context, `sending` with the next main
@@ -60,7 +127,11 @@ recorded arguments and output, then use the wheel or PgUp/PgDn to scroll.
 Click again or press Ctrl+T to collapse. Expansion never approves or reruns a tool;
 approval previews stay separate and complete.
 
-Shell commands use Windows PowerShell 5.1 with `-NoProfile -NonInteractive`.
+On Windows, Shell commands use PowerShell 5.1 with `-NoProfile -NonInteractive`.
+Linux uses `/bin/bash --noprofile --norc -c` with a filtered environment and
+case-sensitive POSIX paths. Linux command process groups have an IPC-disconnect
+watchdog so ordinary descendants are terminated if the Harness crashes. This is
+not a sandbox: a program that creates an independent session can escape cleanup.
 Relative working directories resolve against the selected workspace. Cancelling
 a Run requests termination of its supervised commands and background tasks;
 effects already performed are not rolled back.
@@ -103,7 +174,8 @@ cannot change routes while a Run waits. Sensitive history may require separate
 request-specific redisclosure consent after account/key changes.
 
 Session history is checked for sequence/hash-chain corruption before restoration
-and append. A live Session holds exclusive Windows ownership; another launch
+and append. A live Session holds exclusive ownership (Win32 handle on Windows,
+`flock` on Linux); another launch
 cannot resume that ID until cleanup finishes. These checks detect corruption,
 not deliberate same-user history rewriting.
 
@@ -114,11 +186,10 @@ npm.cmd run build
 npm.cmd run start:built -- --help
 ```
 
-`dist/` is a local build, not the reviewed portable Windows release. Full raw
+`dist/` is a local build, not a reviewed portable release. Full raw
 evidence/report persistence, complete Provider/tool coverage and release
-acceptance remain work in progress. Local tests and architecture documents are
-excluded from Git under the current repository policy, so a fresh clone does
-not reproduce the full local verification suite.
+acceptance remain work in progress. Tests and ADRs are tracked. Linux verification
+does not replace running the unchanged Windows suite on a real Windows host.
 
 OpenAI Chat, Responses and Anthropic Messages expose a Reasoning selector in the form and a
 Reasoning column to the right of Model in the model browser. Use Right or Tab

@@ -2,7 +2,7 @@ import { mkdir, open, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { parseJsonc } from "../../domain/config/jsonc.js";
 import { isSessionId } from "../../domain/identity/session-id.js";
-import { acquireExclusiveFileLease, } from "../windows/exclusive-file-lease.js";
+import { acquireExclusiveFileLease } from "../platform-file-lease.js";
 import { applyEventToRelations, createRelationState, hasValidInternalEventRelations, } from "./internal-event-relations.js";
 import { isInternalEvent } from "./internal-event-validation.js";
 export class JsonlEventLog {
@@ -138,7 +138,10 @@ export class JsonlEventLog {
         if (!applyEventToRelations(cached.relations, event))
             throw new Error("invalid_event");
         const filePath = this.#eventPath(input.sessionId);
-        await mkdir(path.dirname(filePath), { recursive: true });
+        await mkdir(path.dirname(filePath), {
+            recursive: true,
+            ...(process.platform === "linux" ? { mode: 0o700 } : {}),
+        });
         const handle = await open(filePath, "a");
         try {
             await handle.writeFile(`${JSON.stringify(event)}\n`, "utf8");

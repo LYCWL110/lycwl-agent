@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { canSnapshot, SNAPSHOT_LIMITS, } from "../../domain/persistence/snapshot.js";
+import { isPosixWorkspaceRoot } from "../../services/permission/posix-workspace-path.js";
 export function createSnapshotStore(options) {
     const nowUtc = options.nowUtc ?? (() => new Date().toISOString());
     const root = path.join(options.sessionDirectory, "snapshots");
@@ -29,7 +30,7 @@ export function createSnapshotStore(options) {
     }
     return {
         async capture(input) {
-            const segment = safeRelativePath(input.relativePath);
+            const segment = safeRelativePath(input.relativePath, isPosixWorkspaceRoot(options.workspaceRoot));
             if (segment === null)
                 return { ok: false, code: "capture_failed" };
             const index = await readIndex(input.runId);
@@ -119,10 +120,10 @@ const EMPTY_DIGEST = createHash("sha256").update(new Uint8Array()).digest("hex")
  * Rejects anything that could escape the workspace, because a snapshot writes into
  * the workspace on revert: a `..` segment would turn undo into an arbitrary write.
  */
-function safeRelativePath(value) {
+function safeRelativePath(value, posix = false) {
     if (value.length === 0 || value.length > 1_024)
         return null;
-    const normalized = value.replace(/\\/gu, "/");
+    const normalized = posix ? value : value.replace(/\\/gu, "/");
     if (normalized.startsWith("/"))
         return null;
     const segments = normalized.split("/");

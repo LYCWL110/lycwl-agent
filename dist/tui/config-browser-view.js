@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { createElement as h } from "react";
 import { ConfigChrome, clipText, colorProps, useViewport } from "./chrome.js";
-import { applyKey, BROWSER_LIMITS, filteredModels, reasoningChoices, reasoningNotice, visibleWindow, } from "./config-browser.js";
+import { applyKey, BROWSER_LIMITS, contextNotice, filteredModels, reasoningChoices, reasoningNotice, visibleWindow, } from "./config-browser.js";
 import { colorFor, rowStyle } from "./palette.js";
 import { TextInput } from "./text-input.js";
 /** Shared Miyu chrome, independent column focus and a separate selection marker. */
@@ -90,7 +90,7 @@ export function ConfigBrowser(props) {
         key: column.title,
         width: column.width,
         flexDirection: "column",
-        minHeight: stacked ? undefined : BROWSER_LIMITS.visibleRows + 2,
+        minHeight: stacked ? undefined : BROWSER_LIMITS.visibleRows + 1,
     }, h(Text, {
         bold: true,
         ...colorProps(colorFor(column.focused ? "secondary" : "dim", capabilities)),
@@ -107,7 +107,7 @@ export function ConfigBrowser(props) {
         });
     }), column.values.length === 0
         ? h(Text, colorProps(colorFor("dim", capabilities)), "(no models)")
-        : null))), h(Text, colorProps(colorFor("faint", capabilities)), "─".repeat(width)), h(Text, colorProps(colorFor("dim", capabilities)), reasoningNotice(state)), !efforts.includes(state.reasoningEffort)
+        : null))), h(Text, colorProps(colorFor("faint", capabilities)), "─".repeat(width)), h(Text, colorProps(colorFor("dim", capabilities)), reasoningNotice(state)), h(Text, colorProps(colorFor("dim", capabilities)), contextNotice(state, props.contextOverride)), !efforts.includes(state.reasoningEffort)
         ? h(Text, colorProps(colorFor("tertiary", capabilities)), `Current ${state.reasoningEffort}: select a listed level`)
         : null, state.modelInput !== null
         ? h(Box, null, h(Text, colorProps(colorFor("primary", capabilities)), "Model id: "), h(TextInput, {

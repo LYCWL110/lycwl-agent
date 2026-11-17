@@ -2,7 +2,7 @@ import { open, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { isSessionId } from "../../domain/identity/session-id.js";
 import { assertSessionId, compareSessionsNewestFirst, firstInputFromHead, lastActivityFromTail, readSidecarTitle, SESSION_TITLE_LIMITS, serializeSidecar, validateSessionTitle, } from "../../domain/session/session-catalog.js";
-import { acquireExclusiveFileLease } from "./exclusive-file-lease.js";
+import { acquireExclusiveFileLease } from "../platform-file-lease.js";
 const SESSIONS_ROOT = path.join("sessions", "sessions");
 const EVENTS_FILENAME = "events.jsonl";
 const SIDECAR_FILENAME = "session.json";

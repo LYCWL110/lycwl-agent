@@ -27,12 +27,13 @@ export function createShellTool(dependencies) {
             if (!validated.ok)
                 return `shell: ${validated.code}`;
             const filter = filterChildEnvironment(dependencies.inheritedEnvironment, {}, {
+                ...(dependencies.platform === undefined ? {} : { platform: dependencies.platform }),
                 ...(dependencies.providerCredentialNames === undefined
                     ? {}
                     : { providerCredentialNames: dependencies.providerCredentialNames }),
                 grantedNames: validated.value.environmentGrants,
             });
-            return formatShellPreview(renderShellPreview(validated.value, filter));
+            return formatShellPreview(renderShellPreview(validated.value, filter), dependencies.platform);
         },
         async execute(request) {
             const validated = validateShellRequest(request.arguments, {
@@ -43,6 +44,7 @@ export function createShellTool(dependencies) {
             }
             const shellRequest = validated.value;
             const filter = filterChildEnvironment(dependencies.inheritedEnvironment, {}, {
+                ...(dependencies.platform === undefined ? {} : { platform: dependencies.platform }),
                 ...(dependencies.providerCredentialNames === undefined
                     ? {}
                     : { providerCredentialNames: dependencies.providerCredentialNames }),

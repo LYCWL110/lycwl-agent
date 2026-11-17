@@ -9,6 +9,7 @@ import { createGuidanceLoader, renderGuidanceBlock, } from "../adapters/windows/
 import { createSkillLoader } from "../adapters/windows/skill-loader.js";
 import { createSyntaxChecker, defaultTscEntry } from "../adapters/windows/syntax-checker.js";
 import { deriveTaskReport } from "../application/task-report/derive-task-report.js";
+import { DEFAULT_CONTEXT_WINDOW } from "../domain/config/model-context.js";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.js";
 import { renderHarnessRules } from "../domain/context/harness-rules.js";
 import { renderServerCatalog, shouldDiscover, } from "../domain/mcp/tool-discovery.js";
@@ -18,6 +19,7 @@ import { checkSchemaSupport } from "../domain/tool-invocation/argument-validatio
 import { assertProtectedValue } from "../services/security/guarded-delivery.js";
 import { createDemoRuntime } from "./demo-runtime.js";
 import { startMcpServers } from "./mcp-startup.js";
+import { hostPlatform } from "./platform.js";
 import { createWorkspaceTools } from "./read-only-tools.js";
 import { assembleRuntime } from "./runtime-assembly.js";
 import { readMcpDeclarations } from "./terminal-approval.js";
@@ -80,7 +82,7 @@ export async function selectRuntime(options) {
     // flags, so the model never sees a schema for something that would fail at call
     // time with tool_unavailable_in_build. `ask_user` is answered by the coordinator
     // rather than a tool executor, so it has no definition and is always available.
-    const catalog = availableTools((name) => name === COORDINATOR_TOOL_NAMES.ask_user || tools.getDefinition(name) !== null);
+    const catalog = availableTools((name) => name === COORDINATOR_TOOL_NAMES.ask_user || tools.getDefinition(name) !== null, hostPlatform);
     const mcpDefinitions = mcpStarted !== null && mcpStarted.ok ? mcpToolDefinitions(mcpStarted.connections) : [];
     const toolDefinitions = [
         ...catalog.map((entry) => ({
@@ -131,7 +133,7 @@ export async function selectRuntime(options) {
         toolDefinitions,
         // The fixed Harness rules are the only text with application authority. Project
         // material arrives separately as a sourced user turn.
-        system: renderHarnessRules(),
+        system: renderHarnessRules(hostPlatform),
         ...(options.post === undefined ? {} : { post: options.post }),
         ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
     });
@@ -169,7 +171,7 @@ export async function selectRuntime(options) {
     };
     // Durable Session log. Without it every launch starts with no history, which
     // makes the product unusable for anything spanning more than one sitting.
-    const sessionRoot = path.join(options.dataDirectory, "sessions");
+    const sessionRoot = path.join(options.stateDirectory ?? options.dataDirectory, "sessions");
     const eventLog = new JsonlEventLog(sessionRoot, ids, digests);
     const checkpoints = new JsonlCheckpointStore(sessionRoot, digests);
     const sessionId = options.sessionId ?? ids.create();
@@ -307,9 +309,15 @@ export async function selectRuntime(options) {
                 restoredEvents.push(await eventLog.append(input));
             }
         }
-        // Unknown capacity is distinct from a known window that cannot fit the prompt.
+        const effectiveConfig = assembly.config.contextWindow === null
+            ? {
+                ...assembly.config,
+                contextWindow: DEFAULT_CONTEXT_WINDOW,
+                contextWindowSource: "default",
+            }
+            : assembly.config;
         const computed = computeContextBudget({
-            window: assembly.config.contextWindow,
+            window: effectiveConfig.contextWindow,
             modelMaxOutput: assembly.config.maxOutputTokens,
             userMaxOutput: assembly.config.maxOutputTokens,
             // The fixed part is the guidance block plus the tool schemas; both are sent
@@ -320,11 +328,16 @@ export async function selectRuntime(options) {
         const budgetWarning = computed.ok ? null : `model requests blocked (${computed.code})`;
         return {
             kind: "real",
-            config: assembly.config,
+            config: effectiveConfig,
             enableWrites,
             warnings: [
                 ...assembly.warnings,
                 ...mcpWarnings,
+                ...(effectiveConfig.contextWindowSource === "default"
+                    ? [
+                        `context window defaults to ${DEFAULT_CONTEXT_WINDOW} tokens; upstream capacity is unverified`,
+                    ]
+                    : []),
                 ...(budgetWarning === null ? [] : [budgetWarning]),
                 ...(evidenceMissing
                     ? ["stored evidence is incomplete or unavailable; verification remains blocked"]
@@ -423,7 +436,7 @@ export async function selectRuntime(options) {
                 sessionId,
                 ...(prior.conversation.length === 0 ? {} : { priorConversation: prior.conversation }),
                 ...(contextBlock === "" ? {} : { projectContext: contextBlock }),
-                // Unknown capacity blocks sends; there is no guessed window or silent trim.
+                // The configured/default capacity has already been resolved above.
                 ...(contextBudget === null ? {} : { contextBudget }),
                 // Scoped refresh: when the Run touches a new path, gap the loader up to that
                 // directory so a subdirectory AGENTS.md is injected too.
@@ -655,7 +668,7 @@ function formatterEnvironment() {
         if (value !== undefined)
             inherited[name] = value;
     }
-    return filterChildEnvironment(inherited).environment;
+    return filterChildEnvironment(inherited, {}, { platform: hostPlatform }).environment;
 }
 /** Flatten connected MCP tools into the shape discovery matches against. */
 function discoverableTools(started) {

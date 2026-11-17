@@ -23,6 +23,7 @@ export type BackgroundStartOutcome =
   | Readonly<{ kind: "unknown"; safeCode: string }>;
 
 export type BackgroundToolDependencies = Readonly<{
+  platform?: "win32" | "linux";
   sessionMode: "read_only" | "workspace_write";
   inheritedEnvironment: Readonly<Record<string, string>>;
   providerCredentialNames?: readonly string[];
@@ -217,6 +218,7 @@ async function executeStart(
     dependencies.inheritedEnvironment,
     {},
     {
+      ...(dependencies.platform === undefined ? {} : { platform: dependencies.platform }),
       ...(dependencies.providerCredentialNames === undefined
         ? {}
         : { providerCredentialNames: dependencies.providerCredentialNames }),

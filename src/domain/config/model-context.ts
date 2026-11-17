@@ -1,0 +1,18 @@
+export const DEFAULT_CONTEXT_WINDOW = 272_000;
+export type ContextWindowSource = "upstream" | "manual" | "default";
+
+export function isContextWindow(value: unknown): value is number {
+  return (
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 8_192 && value <= 4_000_000
+  );
+}
+
+export function resolveModelContext(
+  model: Readonly<{ contextWindow?: number; contextWindowInvalid?: true }> | undefined,
+  manual?: number | null,
+): Readonly<{ contextWindow: number; contextWindowSource: ContextWindowSource }> {
+  if (isContextWindow(manual)) return { contextWindow: manual, contextWindowSource: "manual" };
+  if (!model?.contextWindowInvalid && isContextWindow(model?.contextWindow))
+    return { contextWindow: model.contextWindow, contextWindowSource: "upstream" };
+  return { contextWindow: DEFAULT_CONTEXT_WINDOW, contextWindowSource: "default" };
+}

@@ -19,6 +19,7 @@ import { createSkillLoader } from "../adapters/windows/skill-loader.ts";
 import { createSyntaxChecker, defaultTscEntry } from "../adapters/windows/syntax-checker.ts";
 import type { RuntimeCoordinator } from "../application/coordinator/runtime-coordinator.ts";
 import { deriveTaskReport } from "../application/task-report/derive-task-report.ts";
+import { DEFAULT_CONTEXT_WINDOW } from "../domain/config/model-context.ts";
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.ts";
 import { renderHarnessRules } from "../domain/context/harness-rules.ts";
@@ -38,6 +39,7 @@ import type { SensitiveSource } from "../ports/sensitive-context.ts";
 import { assertProtectedValue } from "../services/security/guarded-delivery.ts";
 import { createDemoRuntime } from "./demo-runtime.ts";
 import { startMcpServers } from "./mcp-startup.ts";
+import { hostPlatform } from "./platform.ts";
 import { createWorkspaceTools } from "./read-only-tools.ts";
 import { assembleRuntime, type RuntimeAssemblyFailure } from "./runtime-assembly.ts";
 import { readMcpDeclarations } from "./terminal-approval.ts";
@@ -81,6 +83,7 @@ export type RuntimeSelection =
 export type SelectRuntimeOptions = Readonly<{
   workspaceRoot: string;
   dataDirectory: string;
+  stateDirectory?: string;
   settings: unknown;
   /** True when a settings document exists at all. */
   hasSettings: boolean;
@@ -186,6 +189,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   // rather than a tool executor, so it has no definition and is always available.
   const catalog = availableTools(
     (name) => name === COORDINATOR_TOOL_NAMES.ask_user || tools.getDefinition(name) !== null,
+    hostPlatform,
   );
   const mcpDefinitions =
     mcpStarted !== null && mcpStarted.ok ? mcpToolDefinitions(mcpStarted.connections) : [];
@@ -243,7 +247,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     toolDefinitions,
     // The fixed Harness rules are the only text with application authority. Project
     // material arrives separately as a sourced user turn.
-    system: renderHarnessRules(),
+    system: renderHarnessRules(hostPlatform),
     ...(options.post === undefined ? {} : { post: options.post }),
     ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
   });
@@ -290,7 +294,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
 
   // Durable Session log. Without it every launch starts with no history, which
   // makes the product unusable for anything spanning more than one sitting.
-  const sessionRoot = path.join(options.dataDirectory, "sessions");
+  const sessionRoot = path.join(options.stateDirectory ?? options.dataDirectory, "sessions");
   const eventLog = new JsonlEventLog(sessionRoot, ids, digests);
   const checkpoints = new JsonlCheckpointStore(sessionRoot, digests);
   const sessionId = options.sessionId ?? ids.create();
@@ -437,9 +441,16 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
       }
     }
 
-    // Unknown capacity is distinct from a known window that cannot fit the prompt.
+    const effectiveConfig =
+      assembly.config.contextWindow === null
+        ? {
+            ...assembly.config,
+            contextWindow: DEFAULT_CONTEXT_WINDOW,
+            contextWindowSource: "default" as const,
+          }
+        : assembly.config;
     const computed = computeContextBudget({
-      window: assembly.config.contextWindow,
+      window: effectiveConfig.contextWindow,
       modelMaxOutput: assembly.config.maxOutputTokens,
       userMaxOutput: assembly.config.maxOutputTokens,
       // The fixed part is the guidance block plus the tool schemas; both are sent
@@ -451,11 +462,16 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
 
     return {
       kind: "real",
-      config: assembly.config,
+      config: effectiveConfig,
       enableWrites,
       warnings: [
         ...assembly.warnings,
         ...mcpWarnings,
+        ...(effectiveConfig.contextWindowSource === "default"
+          ? [
+              `context window defaults to ${DEFAULT_CONTEXT_WINDOW} tokens; upstream capacity is unverified`,
+            ]
+          : []),
         ...(budgetWarning === null ? [] : [budgetWarning]),
         ...(evidenceMissing
           ? ["stored evidence is incomplete or unavailable; verification remains blocked"]
@@ -556,7 +572,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
         sessionId,
         ...(prior.conversation.length === 0 ? {} : { priorConversation: prior.conversation }),
         ...(contextBlock === "" ? {} : { projectContext: contextBlock }),
-        // Unknown capacity blocks sends; there is no guessed window or silent trim.
+        // The configured/default capacity has already been resolved above.
         ...(contextBudget === null ? {} : { contextBudget }),
         // Scoped refresh: when the Run touches a new path, gap the loader up to that
         // directory so a subdirectory AGENTS.md is injected too.
@@ -824,7 +840,7 @@ function formatterEnvironment(): Readonly<Record<string, string>> {
   for (const [name, value] of Object.entries(process.env)) {
     if (value !== undefined) inherited[name] = value;
   }
-  return filterChildEnvironment(inherited).environment;
+  return filterChildEnvironment(inherited, {}, { platform: hostPlatform }).environment;
 }
 
 /** Flatten connected MCP tools into the shape discovery matches against. */

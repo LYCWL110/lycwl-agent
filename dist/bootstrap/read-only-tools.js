@@ -1,5 +1,7 @@
 import { realpath, stat } from "node:fs/promises";
 import { tavilySearch, toWebSearchRun } from "../adapters/network/tavily-adapter.js";
+import { createBackgroundRegistry } from "../adapters/platform-background.js";
+import { createProcessSupervisor } from "../adapters/platform-process.js";
 import { createBackgroundTools } from "../adapters/tools/background-tools.js";
 import { createLspTools } from "../adapters/tools/lsp-tools.js";
 import { createMutationTools } from "../adapters/tools/mutation-tools.js";
@@ -11,21 +13,15 @@ import { createSkillTool } from "../adapters/tools/skill-tool.js";
 import { createTodoTool } from "../adapters/tools/todo-tool.js";
 import { createWebTools } from "../adapters/tools/web-tools.js";
 import { createWriteTools } from "../adapters/tools/write-tools.js";
-import { createBackgroundRegistry } from "../adapters/windows/background-registry.js";
 import { resolveWebFetchHost } from "../adapters/windows/dns-resolver.js";
 import { createLspRegistry } from "../adapters/windows/lsp-registry.js";
 import { pinnedFetch } from "../adapters/windows/pinned-https-client.js";
-import { powershellCommand, powershellExecutable } from "../adapters/windows/powershell-command.js";
-import { createProcessSupervisor } from "../adapters/windows/process-supervisor.js";
 import { createSearchLedger, makeReservationId } from "../adapters/windows/search-ledger.js";
 import { createSearchScope } from "../adapters/windows/search-scope.js";
 import { createSkillLoader } from "../adapters/windows/skill-loader.js";
-import { createWindowsFileReader } from "../adapters/windows/windows-directory-reader.js";
-import { createWindowsFsAdapter } from "../adapters/windows/windows-fs-adapter.js";
-import { createWindowsMutationAdapter } from "../adapters/windows/windows-mutation-adapter.js";
-import { createWindowsWriteAdapter } from "../adapters/windows/windows-write-adapter.js";
 import { emptyTodoList } from "../domain/planning/todo.js";
 import { resolveWorkspacePath } from "../services/permission/workspace-path.js";
+import { createFileReader, createFsAdapter, createMutationAdapter, createWriteAdapter, hostPlatform, shellCommand, shellExecutable, } from "./platform.js";
 /**
  * Composition root for the delivered filesystem slices.
  *
@@ -51,10 +47,10 @@ export function createWorkspaceTools(options) {
     const lspRegistry = createLspRegistry({
         inheritedEnvironment: { ...process.env },
     });
-    const fsAdapter = createWindowsFsAdapter({ workspaceRoot });
-    const reader = createWindowsFileReader({ workspaceRoot });
-    const writer = createWindowsWriteAdapter({ workspaceRoot });
-    const mutator = createWindowsMutationAdapter({ workspaceRoot });
+    const fsAdapter = createFsAdapter({ workspaceRoot });
+    const reader = createFileReader({ workspaceRoot });
+    const writer = createWriteAdapter({ workspaceRoot });
+    const mutator = createMutationAdapter({ workspaceRoot });
     const readFile = createReadFileTool({
         workspaceRoot,
         approvals,
@@ -116,6 +112,7 @@ export function createWorkspaceTools(options) {
         : null;
     const mutations = enableWrites
         ? createMutationTools({
+            caseSensitive: hostPlatform === "linux",
             inspectDeleteTargets: async (paths) => mutator.inspectDeleteTargets(paths),
             inspectRename: async (from, to) => mutator.inspectRename(from, to),
             deletePath: async (target) => mutator.deletePath(target),
@@ -124,6 +121,7 @@ export function createWorkspaceTools(options) {
         : null;
     const processes = enableProcesses
         ? createShellTool({
+            platform: hostPlatform,
             sessionMode: enableWrites ? "workspace_write" : "read_only",
             inheritedEnvironment: { ...process.env },
             runShell: async (request, environment, signal, toolCallId) => {
@@ -374,6 +372,11 @@ export function createWorkspaceTools(options) {
         if (!supplied.ok)
             throw new Error("invalid_path");
         const resolved = await realpath(supplied.value.absolutePath);
+        if (hostPlatform === "linux") {
+            const checked = resolveWorkspacePath(workspaceRoot, resolved);
+            if (!checked.ok || !checked.value.withinWorkspace)
+                throw new Error("invalid_cwd");
+        }
         const info = await stat(resolved);
         if (!info.isDirectory())
             throw new Error("invalid_cwd");
@@ -383,11 +386,7 @@ export function createWorkspaceTools(options) {
         const normalized = await normalize(request);
         const cwd = normalized.arguments.cwd;
         const info = await stat(cwd, { bigint: true });
-        return JSON.stringify([
-            normalized.arguments,
-            `${info.dev}:${info.ino}`,
-            powershellExecutable(),
-        ]);
+        return JSON.stringify([normalized.arguments, `${info.dev}:${info.ino}`, shellExecutable()]);
     }
     return {
         getDefinition(toolName) {
@@ -407,7 +406,7 @@ export function createWorkspaceTools(options) {
             const preview = delegate?.preview === undefined ? null : await delegate.preview(normalized);
             const command = normalized.arguments?.command;
             return isStart(request) && typeof command === "string"
-                ? `${preview}\nexecutable=${powershellExecutable()}\ncommandLine=${powershellCommand(command)}\noutputEncoding=utf-8\ncapture=guarded memory pipes; stdout+stderr limit=8388608 bytes`
+                ? `${preview}\nexecutable=${shellExecutable()}\ncommandLine=${shellCommand(command)}\noutputEncoding=utf-8\ncapture=guarded memory pipes; stdout+stderr limit=8388608 bytes${hostPlatform === "linux" ? "\nsupervision=process group with parent-disconnect watchdog; detached sessions are not contained" : ""}`
                 : preview;
         },
         async requiresApproval(request) {
@@ -435,7 +434,7 @@ export function createWorkspaceTools(options) {
         async cancelAll() {
             const results = await Promise.allSettled([
                 Promise.resolve().then(async () => {
-                    backgroundRegistry?.disposeAll();
+                    await backgroundRegistry?.disposeAll();
                     await backgroundRegistry?.flush();
                 }),
                 lspRegistry.close(),

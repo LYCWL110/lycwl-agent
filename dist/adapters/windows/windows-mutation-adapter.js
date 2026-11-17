@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, realpath, rename, rmdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { BATCH_LIMITS, } from "../../domain/mutation/batch.js";
+import { isPosixWorkspaceRoot } from "../../services/permission/posix-workspace-path.js";
 import { resolveWorkspacePath } from "../../services/permission/workspace-path.js";
 export function createWindowsMutationAdapter(options) {
     const { workspaceRoot } = options;
@@ -150,8 +151,10 @@ export function createWindowsMutationAdapter(options) {
             return empty;
         }
         const targetExists = await exists(toPath);
-        const targetInsideSource = toPath.toLowerCase().startsWith(`${fromPath.toLowerCase()}\\`) ||
-            toPath.toLowerCase() === fromPath.toLowerCase();
+        const targetInsideSource = isPosixWorkspaceRoot(workspaceRoot)
+            ? toPath === fromPath || toPath.startsWith(`${fromPath}/`)
+            : toPath.toLowerCase().startsWith(`${fromPath.toLowerCase()}\\`) ||
+                toPath.toLowerCase() === fromPath.toLowerCase();
         // Windows case-only renames resolve to the same identity and are refused.
         const aliasAmbiguous = sameIdentityText(fromPath, toPath);
         let treeEntries = 1;
@@ -168,7 +171,9 @@ export function createWindowsMutationAdapter(options) {
             to,
             sourceExists: true,
             targetExists,
-            sameVolume: sameVolume(fromPath, toPath),
+            sameVolume: isPosixWorkspaceRoot(workspaceRoot)
+                ? sourceStats.dev === (await lstat(path.dirname(toPath), { bigint: true })).dev
+                : sameVolume(fromPath, toPath),
             sourceIsSymbolicLink: sourceStats.isSymbolicLink(),
             treeEntries,
             manifestBytes,
@@ -200,9 +205,13 @@ export function createWindowsMutationAdapter(options) {
         // Re-check immediately before the single OS call.
         if (await exists(toPath))
             throw new Error("target_exists");
-        if (!sameVolume(fromPath, toPath))
+        if (isPosixWorkspaceRoot(workspaceRoot)
+            ? sourceStats.dev !== (await lstat(path.dirname(toPath), { bigint: true })).dev
+            : !sameVolume(fromPath, toPath))
             throw new Error("different_volume");
-        if (toPath.toLowerCase().startsWith(`${fromPath.toLowerCase()}\\`)) {
+        if (isPosixWorkspaceRoot(workspaceRoot)
+            ? toPath.startsWith(`${fromPath}/`)
+            : toPath.toLowerCase().startsWith(`${fromPath.toLowerCase()}\\`)) {
             throw new Error("target_inside_source");
         }
         if (sameIdentityText(fromPath, toPath))
@@ -286,5 +295,8 @@ function sameVolume(left, right) {
 }
 /** True when the two paths differ only by case or trailing separators. */
 function sameIdentityText(left, right) {
+    if (isPosixWorkspaceRoot(left)) {
+        return path.posix.resolve(left) === path.posix.resolve(right);
+    }
     return left.replace(/\\+$/, "").toLowerCase() === right.replace(/\\+$/, "").toLowerCase();
 }

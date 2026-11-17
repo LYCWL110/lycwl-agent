@@ -1,5 +1,6 @@
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
+import { isPosixWorkspaceRoot } from "../../services/permission/posix-workspace-path.js";
 import { resolveWorkspacePath } from "../../services/permission/workspace-path.js";
 export function createWindowsFsAdapter(options) {
     const { workspaceRoot } = options;
@@ -11,6 +12,32 @@ export function createWindowsFsAdapter(options) {
         const supplied = resolveWorkspacePath(workspaceRoot, requestedPath);
         if (!supplied.ok)
             return { ok: false, code: "invalid_path" };
+        if (isPosixWorkspaceRoot(workspaceRoot)) {
+            try {
+                const linkFacts = await lstat(supplied.value.absolutePath, { bigint: true });
+                if (linkFacts.isSymbolicLink()) {
+                    return {
+                        ok: true,
+                        target: {
+                            requestedPath: supplied.value.absolutePath,
+                            resolvedPath: supplied.value.absolutePath,
+                            isDirectory: false,
+                            isSymbolicLink: true,
+                        },
+                        snapshot: {
+                            identity: `${linkFacts.dev}:${linkFacts.ino}`,
+                            size: Number(linkFacts.size),
+                            lastWriteTimeNs: linkFacts.mtimeNs,
+                            isFile: false,
+                            isSymbolicLink: true,
+                        },
+                    };
+                }
+            }
+            catch (error) {
+                return { ok: false, code: mapError(error) };
+            }
+        }
         let resolvedPath;
         try {
             resolvedPath = await realpath(supplied.value.absolutePath);

@@ -16,6 +16,7 @@ import type {
 } from "../../ports/tool-executor.ts";
 
 export type MutationToolDependencies = Readonly<{
+  caseSensitive?: boolean;
   /** Injected facts for every delete target, before any removal. */
   inspectDeleteTargets: (paths: readonly string[]) => Promise<readonly DeleteTargetFacts[]>;
   /** Injected facts for the rename pair, including tree size. */
@@ -185,7 +186,12 @@ async function executeDelete(
   } catch {
     return { status: "failed", safeCode: "inspect_failed", text: null };
   }
-  const validated = validateDeleteTargets(paths.value, facts, { recursive });
+  const validated = validateDeleteTargets(paths.value, facts, {
+    recursive,
+    ...(dependencies.caseSensitive === undefined
+      ? {}
+      : { caseSensitive: dependencies.caseSensitive }),
+  });
   if (!validated.ok) return { status: "failed", safeCode: validated.code, text: null };
 
   const factsByPath = new Map(validated.targets.map((fact) => [fact.path, fact]));

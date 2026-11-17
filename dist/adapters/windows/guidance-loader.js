@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { checkGuidanceBudget, discoverProjectGuidance, PROJECT_GUIDANCE_LIMITS, } from "../../domain/context/project-guidance.js";
 import { escapeProvenanceMarkers } from "../../domain/context/provenance-marker.js";
+import { isPosixWorkspaceRoot, posixDirectoriesOnPath, } from "../../services/permission/posix-workspace-path.js";
 import { resolveWorkspacePath } from "../../services/permission/workspace-path.js";
 import { createWindowsFileReader } from "./windows-directory-reader.js";
 export function createGuidanceLoader(options) {
@@ -117,6 +118,8 @@ export function renderGuidanceBlock(blocks) {
     return lines.join("\n");
 }
 function directoriesOnPath(workspaceRoot, targetPath, targetIsDirectory) {
+    if (isPosixWorkspaceRoot(workspaceRoot))
+        return posixDirectoriesOnPath(workspaceRoot, targetPath, targetIsDirectory);
     const resolvedRoot = resolveWorkspacePath(workspaceRoot, workspaceRoot);
     if (!resolvedRoot.ok)
         return null;

@@ -4,7 +4,7 @@ import path from "node:path";
 import { parseJsonc } from "../../domain/config/jsonc.js";
 import { CREDENTIAL_LIMITS, validateReference, } from "../../ports/credential-vault.js";
 import { readBoundedUtf8 } from "../persistence/bounded-utf8-file.js";
-import { acquireExclusiveFileLease } from "./exclusive-file-lease.js";
+import { acquireExclusiveFileLease } from "../platform-file-lease.js";
 /**
  * File-based credential storage.
  *
@@ -68,7 +68,10 @@ export function createFileVault(options) {
         }
         const temporary = path.join(options.directory, `${FILE_VAULT_LIMITS.filename}.${randomBytes(6).toString("hex")}.tmp`);
         try {
-            await mkdir(options.directory, { recursive: true });
+            await mkdir(options.directory, {
+                recursive: true,
+                ...(process.platform === "linux" ? { mode: 0o700 } : {}),
+            });
             // 0o600 is honoured on POSIX. On Windows it is largely inert, so the real
             // protection is the user-profile ACL; that is reported, not pretended.
             const handle = await open(temporary, "wx", 0o600);

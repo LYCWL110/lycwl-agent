@@ -13,7 +13,7 @@ import {
   validateReference,
 } from "../../ports/credential-vault.ts";
 import { readBoundedUtf8 } from "../persistence/bounded-utf8-file.ts";
-import { acquireExclusiveFileLease } from "./exclusive-file-lease.ts";
+import { acquireExclusiveFileLease } from "../platform-file-lease.ts";
 
 /**
  * File-based credential storage.
@@ -118,7 +118,10 @@ export function createFileVault(options: FileVaultOptions): FileVault {
       `${FILE_VAULT_LIMITS.filename}.${randomBytes(6).toString("hex")}.tmp`,
     );
     try {
-      await mkdir(options.directory, { recursive: true });
+      await mkdir(options.directory, {
+        recursive: true,
+        ...(process.platform === "linux" ? { mode: 0o700 } : {}),
+      });
       // 0o600 is honoured on POSIX. On Windows it is largely inert, so the real
       // protection is the user-profile ACL; that is reported, not pretended.
       const handle = await open(temporary, "wx", 0o600);

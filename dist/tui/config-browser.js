@@ -9,6 +9,7 @@
  * The state is a pure reducer over key events so every rule below is testable
  * without a terminal. The renderer reads this state; it does not own it.
  */
+import { resolveModelContext } from "../domain/config/model-context.js";
 import { protocolReasoningEfforts, } from "../domain/config/provider-config.js";
 import { characters, editText } from "./text-edit.js";
 export const BROWSER_LIMITS = Object.freeze({
@@ -311,6 +312,16 @@ export function reasoningNotice(state) {
                 ? "Upstream-declared levels"
                 : `Upstream levels; default ${declaration.defaultEffort}`;
     return "No upstream levels; default only";
+}
+export function contextNotice(state, manual) {
+    const selected = filteredModels(state)[state.modelIndex];
+    const context = resolveModelContext(selected, manual);
+    const source = context.contextWindowSource === "manual"
+        ? "manual"
+        : context.contextWindowSource === "upstream"
+            ? "upstream-declared"
+            : "default; not verified";
+    return `Context: ${context.contextWindow.toLocaleString("en-US")} tokens (${source})`;
 }
 /** Refresh invalidates declarations and undo snapshots before a new request starts. */
 export function clearReasoningDeclarations(state) {

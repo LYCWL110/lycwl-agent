@@ -3,8 +3,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createSnapshotStore } from "../adapters/persistence/snapshot-store.ts";
 import { fetchModelDetails, fetchModelList } from "../adapters/providers/model-list.ts";
-import { createClipboardReader } from "../adapters/windows/clipboard-image.ts";
-import { createConfigStore, defaultConfigDirectory } from "../adapters/windows/config-store.ts";
+import { createConfigStore } from "../adapters/windows/config-store.ts";
 import { createFileVault } from "../adapters/windows/file-credential-vault.ts";
 import { createSessionCatalog } from "../adapters/windows/session-catalog.ts";
 import { parseJsonc, toPlainValue } from "../domain/config/jsonc.ts";
@@ -17,6 +16,7 @@ import { createTuiController } from "../tui/controller.ts";
 import { startTui } from "../tui/main.ts";
 import { hasProvider, startConfigFlow } from "./config-flow.ts";
 import { saveMcpChange } from "./mcp-save.ts";
+import { createClipboardReader, hostPlatform, platformDirectories } from "./platform.ts";
 import { describeSelection, selectRuntime } from "./runtime-selection.ts";
 import { canResumeSession, selectSessionLaunch } from "./session-launch.ts";
 import { createTerminalApproval } from "./terminal-approval.ts";
@@ -50,7 +50,7 @@ if (args.includes("--help") || args.includes("-h")) {
       "network, credential, process or write access.",
       "",
       "Shell is disabled unless --shell is given. Every command needs its own",
-      "approval and runs with your full Windows user permissions: v1 has no sandbox.",
+      `approval and runs with your full ${hostPlatform === "linux" ? "Linux" : "Windows"} user permissions: v1 has no sandbox.`,
       "",
       "Skills are disabled unless --skills is given; enabling them grants no",
       "read permission beyond ordinary file access.",
@@ -70,9 +70,10 @@ if (args.includes("--version") || args.includes("-v")) {
   process.exit(0);
 }
 
-const dataDirectory = defaultConfigDirectory(process.env["LOCALAPPDATA"]);
-const configStore = createConfigStore({ directory: dataDirectory });
-const vault = createFileVault({ directory: dataDirectory });
+const directories = platformDirectories();
+const dataDirectory = directories.state;
+const configStore = createConfigStore({ directory: directories.config });
+const vault = createFileVault({ directory: directories.config });
 /**
  * Clipboard reader for Ctrl+V.
  *
@@ -86,7 +87,10 @@ const clipboardReader = createClipboardReader({
     for (const [name, value] of Object.entries(process.env)) {
       if (value !== undefined) inherited[name] = value;
     }
-    return filterChildEnvironment(inherited).environment as Record<string, string>;
+    return filterChildEnvironment(inherited, {}, { platform: hostPlatform }).environment as Record<
+      string,
+      string
+    >;
   })(),
 });
 
@@ -128,6 +132,7 @@ if (configureFirst) {
     ].join("\n"),
   );
   const flow = startConfigFlow({
+    discoverContextOnSelection: true,
     fetchModels: fetchModelsForBrowser,
     fetchModel: fetchModelDetails,
     configStore,
@@ -150,6 +155,7 @@ process.stderr.write(`${launch.mode === "new" ? "new" : "resuming"} session ${se
 // so the app is unmounted first and the flow rebuilds this same Session afterwards.
 function openConfig(initialPage: "setup" | "model" = "setup"): void {
   const flow = startConfigFlow({
+    discoverContextOnSelection: true,
     initialPage,
     fetchModels: fetchModelsForBrowser,
     fetchModel: fetchModelDetails,
@@ -193,7 +199,8 @@ async function startSession(): Promise<void> {
   const current = loadedNow.ok ? parseSettings(loadedNow.value.text) : null;
   const chosen = await selectRuntime({
     workspaceRoot: process.cwd(),
-    dataDirectory,
+    dataDirectory: directories.config,
+    stateDirectory: dataDirectory,
     settings: current,
     hasSettings: loadedNow.ok,
     enableWrites: args.includes("--write") || args.includes("--shell"),

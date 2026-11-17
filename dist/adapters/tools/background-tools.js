@@ -147,6 +147,7 @@ async function executeStart(dependencies, args, toolCallId, signal, owner) {
     if (!parsed.ok)
         return { status: "failed", safeCode: parsed.code, text: null };
     const filter = filterChildEnvironment(dependencies.inheritedEnvironment, {}, {
+        ...(dependencies.platform === undefined ? {} : { platform: dependencies.platform }),
         ...(dependencies.providerCredentialNames === undefined
             ? {}
             : { providerCredentialNames: dependencies.providerCredentialNames }),

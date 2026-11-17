@@ -1,6 +1,7 @@
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { FileSnapshotFacts } from "../../services/files/consistent-snapshot.ts";
+import { isPosixWorkspaceRoot } from "../../services/permission/posix-workspace-path.ts";
 import type { ResolvedReadTarget } from "../../services/permission/resolved-read-policy.ts";
 import { resolveWorkspacePath } from "../../services/permission/workspace-path.ts";
 
@@ -46,6 +47,32 @@ export function createWindowsFsAdapter(options: WindowsFsAdapterOptions) {
   async function inspect(requestedPath: string): Promise<InspectResult> {
     const supplied = resolveWorkspacePath(workspaceRoot, requestedPath);
     if (!supplied.ok) return { ok: false, code: "invalid_path" };
+
+    if (isPosixWorkspaceRoot(workspaceRoot)) {
+      try {
+        const linkFacts = await lstat(supplied.value.absolutePath, { bigint: true });
+        if (linkFacts.isSymbolicLink()) {
+          return {
+            ok: true,
+            target: {
+              requestedPath: supplied.value.absolutePath,
+              resolvedPath: supplied.value.absolutePath,
+              isDirectory: false,
+              isSymbolicLink: true,
+            },
+            snapshot: {
+              identity: `${linkFacts.dev}:${linkFacts.ino}`,
+              size: Number(linkFacts.size),
+              lastWriteTimeNs: linkFacts.mtimeNs,
+              isFile: false,
+              isSymbolicLink: true,
+            },
+          };
+        }
+      } catch (error) {
+        return { ok: false, code: mapError(error) };
+      }
+    }
 
     let resolvedPath: string;
     try {

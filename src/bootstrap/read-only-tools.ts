@@ -1,5 +1,7 @@
 import { realpath, stat } from "node:fs/promises";
 import { tavilySearch, toWebSearchRun } from "../adapters/network/tavily-adapter.ts";
+import { createBackgroundRegistry } from "../adapters/platform-background.ts";
+import { createProcessSupervisor } from "../adapters/platform-process.ts";
 import { createBackgroundTools } from "../adapters/tools/background-tools.ts";
 import { createLspTools } from "../adapters/tools/lsp-tools.ts";
 import { createMutationTools } from "../adapters/tools/mutation-tools.ts";
@@ -11,19 +13,12 @@ import { createSkillTool } from "../adapters/tools/skill-tool.ts";
 import { createTodoTool } from "../adapters/tools/todo-tool.ts";
 import { createWebTools } from "../adapters/tools/web-tools.ts";
 import { createWriteTools } from "../adapters/tools/write-tools.ts";
-import { createBackgroundRegistry } from "../adapters/windows/background-registry.ts";
 import { resolveWebFetchHost } from "../adapters/windows/dns-resolver.ts";
 import { createLspRegistry } from "../adapters/windows/lsp-registry.ts";
 import { pinnedFetch } from "../adapters/windows/pinned-https-client.ts";
-import { powershellCommand, powershellExecutable } from "../adapters/windows/powershell-command.ts";
-import { createProcessSupervisor } from "../adapters/windows/process-supervisor.ts";
 import { createSearchLedger, makeReservationId } from "../adapters/windows/search-ledger.ts";
 import { createSearchScope } from "../adapters/windows/search-scope.ts";
 import { createSkillLoader } from "../adapters/windows/skill-loader.ts";
-import { createWindowsFileReader } from "../adapters/windows/windows-directory-reader.ts";
-import { createWindowsFsAdapter } from "../adapters/windows/windows-fs-adapter.ts";
-import { createWindowsMutationAdapter } from "../adapters/windows/windows-mutation-adapter.ts";
-import { createWindowsWriteAdapter } from "../adapters/windows/windows-write-adapter.ts";
 import type { ToolEvidence } from "../domain/evidence/tool-evidence.ts";
 import { emptyTodoList } from "../domain/planning/todo.ts";
 import type { OwnedKeyRegistry } from "../domain/security/owned-key-guard.ts";
@@ -38,6 +33,15 @@ import type {
   ToolExecutor,
 } from "../ports/tool-executor.ts";
 import { resolveWorkspacePath } from "../services/permission/workspace-path.ts";
+import {
+  createFileReader,
+  createFsAdapter,
+  createMutationAdapter,
+  createWriteAdapter,
+  hostPlatform,
+  shellCommand,
+  shellExecutable,
+} from "./platform.ts";
 
 /**
  * Composition root for the delivered filesystem slices.
@@ -123,10 +127,10 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     inheritedEnvironment: { ...process.env } as Record<string, string>,
   });
 
-  const fsAdapter = createWindowsFsAdapter({ workspaceRoot });
-  const reader = createWindowsFileReader({ workspaceRoot });
-  const writer = createWindowsWriteAdapter({ workspaceRoot });
-  const mutator = createWindowsMutationAdapter({ workspaceRoot });
+  const fsAdapter = createFsAdapter({ workspaceRoot });
+  const reader = createFileReader({ workspaceRoot });
+  const writer = createWriteAdapter({ workspaceRoot });
+  const mutator = createMutationAdapter({ workspaceRoot });
 
   const readFile = createReadFileTool({
     workspaceRoot,
@@ -188,6 +192,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
 
   const mutations = enableWrites
     ? createMutationTools({
+        caseSensitive: hostPlatform === "linux",
         inspectDeleteTargets: async (paths) => mutator.inspectDeleteTargets(paths),
         inspectRename: async (from, to) => mutator.inspectRename(from, to),
         deletePath: async (target) => mutator.deletePath(target),
@@ -197,6 +202,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
 
   const processes = enableProcesses
     ? createShellTool({
+        platform: hostPlatform,
         sessionMode: enableWrites ? "workspace_write" : "read_only",
         inheritedEnvironment: { ...process.env } as Record<string, string>,
         runShell: async (request, environment, signal, toolCallId) => {
@@ -453,6 +459,10 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     const supplied = resolveWorkspacePath(workspaceRoot, args["cwd"]);
     if (!supplied.ok) throw new Error("invalid_path");
     const resolved = await realpath(supplied.value.absolutePath);
+    if (hostPlatform === "linux") {
+      const checked = resolveWorkspacePath(workspaceRoot, resolved);
+      if (!checked.ok || !checked.value.withinWorkspace) throw new Error("invalid_cwd");
+    }
     const info = await stat(resolved);
     if (!info.isDirectory()) throw new Error("invalid_cwd");
     return { ...request, arguments: { ...args, cwd: resolved } };
@@ -461,11 +471,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     const normalized = await normalize(request);
     const cwd = (normalized.arguments as { cwd: string }).cwd;
     const info = await stat(cwd, { bigint: true });
-    return JSON.stringify([
-      normalized.arguments,
-      `${info.dev}:${info.ino}`,
-      powershellExecutable(),
-    ]);
+    return JSON.stringify([normalized.arguments, `${info.dev}:${info.ino}`, shellExecutable()]);
   }
 
   return {
@@ -486,7 +492,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
       const preview = delegate?.preview === undefined ? null : await delegate.preview(normalized);
       const command = (normalized.arguments as { command?: unknown } | null)?.command;
       return isStart(request) && typeof command === "string"
-        ? `${preview}\nexecutable=${powershellExecutable()}\ncommandLine=${powershellCommand(command)}\noutputEncoding=utf-8\ncapture=guarded memory pipes; stdout+stderr limit=8388608 bytes`
+        ? `${preview}\nexecutable=${shellExecutable()}\ncommandLine=${shellCommand(command)}\noutputEncoding=utf-8\ncapture=guarded memory pipes; stdout+stderr limit=8388608 bytes${hostPlatform === "linux" ? "\nsupervision=process group with parent-disconnect watchdog; detached sessions are not contained" : ""}`
         : preview;
     },
     async requiresApproval(request) {
@@ -513,7 +519,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     async cancelAll() {
       const results = await Promise.allSettled([
         Promise.resolve().then(async () => {
-          backgroundRegistry?.disposeAll();
+          await backgroundRegistry?.disposeAll();
           await backgroundRegistry?.flush();
         }),
         lspRegistry.close(),

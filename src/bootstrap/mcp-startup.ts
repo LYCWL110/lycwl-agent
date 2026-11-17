@@ -107,13 +107,12 @@ export async function startMcpServers(options: StartMcpOptions): Promise<McpStar
     // Merge the host environment and the declared entries, then filter. The filter
     // is last, so a declaration naming a credential variable removes it rather than
     // reintroducing it.
-    const filtered = filterChildEnvironment(
-      readHostEnvironment(),
-      declaration.environment,
-      options.providerCredentialNames === undefined
+    const filtered = filterChildEnvironment(readHostEnvironment(), declaration.environment, {
+      platform: process.platform === "linux" ? "linux" : "win32",
+      ...(options.providerCredentialNames === undefined
         ? {}
-        : { providerCredentialNames: options.providerCredentialNames },
-    );
+        : { providerCredentialNames: options.providerCredentialNames }),
+    });
     if (filtered.missingGrantNames.length > 0) {
       // Nothing was granted, so this can only report an oddity. It is not fatal.
       warnings.push(`mcp ${declaration.serverId}: environment entry missing after filtering`);
@@ -204,7 +203,7 @@ export function renderStartupPreview(declaration: McpServerDeclaration): string 
     `workingDirectory=the Session workspace`,
     `environment=${environment.length === 0 ? "inherited environment after the C09 filter" : `filtered environment plus ${environment.join(",")}`}`,
     "sandbox=none",
-    "permissions=current Windows user",
+    `permissions=current ${process.platform === "linux" ? "Linux" : "Windows"} user`,
     "this starts a third-party program and keeps it running for the Session",
   ].join("\n");
 }

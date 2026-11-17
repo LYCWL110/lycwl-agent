@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { canReserve, isChargeUncertain, utcMonthOf, validateTransition, } from "../../domain/web/search-ledger.js";
+import { linuxDirectories } from "../linux/directories.js";
 export function defaultSearchLedgerDirectory() {
+    if (process.platform === "linux")
+        return path.join(linuxDirectories().state, "search-usage");
     const localAppData = process.env["LOCALAPPDATA"];
     const base = localAppData === undefined || localAppData.length === 0
         ? path.join(process.cwd(), ".lycwl-agent")

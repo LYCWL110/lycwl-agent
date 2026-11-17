@@ -61,7 +61,10 @@ export class JsonlCheckpointStore {
     const document = { checkpoint, hash };
     const filePath = this.#checkpointPath(sessionId);
     const tempPath = `${filePath}.tmp`;
-    await mkdir(path.dirname(filePath), { recursive: true });
+    await mkdir(path.dirname(filePath), {
+      recursive: true,
+      ...(process.platform === "linux" ? { mode: 0o700 } : {}),
+    });
 
     const handle = await open(tempPath, "w");
     try {
