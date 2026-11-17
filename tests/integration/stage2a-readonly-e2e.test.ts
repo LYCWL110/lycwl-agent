@@ -83,7 +83,7 @@ describe("Stage 2A read-only tools end to end", () => {
           {
             providerToolCallId: "p1",
             toolName: "read_file",
-            arguments: { path: "src\\a.ts" },
+            arguments: { path: ["src", "a.ts"].join(path.sep) },
           },
         ],
         text: null,

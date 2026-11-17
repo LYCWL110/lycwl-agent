@@ -322,9 +322,7 @@ describe("session catalog", () => {
     const root = mkdtempSync(path.join(tmpdir(), "sessions-"));
     const directory = session(root, "aaa");
     // Hold the ownership lease exactly as a live runtime does.
-    const { acquireExclusiveFileLease } = await import(
-      "../../src/adapters/windows/exclusive-file-lease.ts"
-    );
+    const { acquireExclusiveFileLease } = await import("../../src/adapters/platform-file-lease.ts");
     const lease = await acquireExclusiveFileLease(path.join(directory, "session.lock"), {
       timeoutMs: 0,
     });

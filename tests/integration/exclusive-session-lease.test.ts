@@ -5,14 +5,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { it } from "node:test";
-import { acquireExclusiveFileLease } from "../../src/adapters/windows/exclusive-file-lease.ts";
+import { acquireExclusiveFileLease } from "../../src/adapters/platform-file-lease.ts";
 
 it("excludes a second process and releases native Session ownership on process death", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "lycwl-native-lease-"));
   const file = path.join(root, "owner.lock");
   const source = `
     import { acquireExclusiveFileLease } from ${JSON.stringify(
-      new URL("../../src/adapters/windows/exclusive-file-lease.ts", import.meta.url).href,
+      new URL("../../src/adapters/platform-file-lease.ts", import.meta.url).href,
     )};
     await acquireExclusiveFileLease(${JSON.stringify(file)}, { timeoutMs: 0 });
     process.stdout.write("owned");

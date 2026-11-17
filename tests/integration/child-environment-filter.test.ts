@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-
+import { createProcessSupervisor } from "../../src/adapters/platform-process.ts";
 import { buildEnvironmentBlock } from "../../src/adapters/windows/koffi-bindings.ts";
-import { createProcessSupervisor } from "../../src/adapters/windows/process-supervisor.ts";
 import { FIXED_FILTERED_NAMES, filterChildEnvironment } from "../../src/domain/process/shell.ts";
+import { shellCommands } from "../fakes/shell-commands.ts";
 
 /**
  * C09 environment filter: the child must not inherit the parent environment.
@@ -63,7 +63,7 @@ describe("child processes cannot inherit parent credentials", () => {
 
     const result = await supervisor.runToCompletion({
       // `set` with no match must not print a "not defined" message to stdout.
-      command: "Write-Output $env:ANTHROPIC_API_KEY",
+      command: shellCommands.readEnvironmentVariable("ANTHROPIC_API_KEY"),
       cwd: CWD,
       timeoutMs: 15_000,
       environment: filter.environment,
@@ -79,7 +79,7 @@ describe("child processes cannot inherit parent credentials", () => {
   it("keeps a non-filtered variable intact", async () => {
     const filter = filterChildEnvironment({ ...BASE_ENV, KEEPME: "visible-value" });
     const result = await supervisor.runToCompletion({
-      command: "Write-Output $env:KEEPME",
+      command: shellCommands.readEnvironmentVariable("KEEPME"),
       cwd: CWD,
       timeoutMs: 15_000,
       environment: filter.environment,
@@ -106,7 +106,7 @@ describe("child processes cannot inherit parent credentials", () => {
     assert.equal(filter.environment["LYCWL_CANARY_SECRET"], undefined);
 
     const result = await supervisor.runToCompletion({
-      command: "Write-Output $env:LYCWL_CANARY_SECRET",
+      command: shellCommands.readEnvironmentVariable("LYCWL_CANARY_SECRET"),
       cwd: CWD,
       timeoutMs: 15_000,
       environment: filter.environment,
@@ -125,7 +125,7 @@ describe("child processes cannot inherit parent credentials", () => {
       { grantedNames: ["ANTHROPIC_API_KEY"] },
     );
     const result = await supervisor.runToCompletion({
-      command: "Write-Output $env:ANTHROPIC_API_KEY",
+      command: shellCommands.readEnvironmentVariable("ANTHROPIC_API_KEY"),
       cwd: CWD,
       timeoutMs: 15_000,
       environment: filter.environment,

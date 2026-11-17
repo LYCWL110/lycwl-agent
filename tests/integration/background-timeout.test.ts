@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
-import { createBackgroundRegistry } from "../../src/adapters/windows/background-registry.ts";
+import { createBackgroundRegistry } from "../../src/adapters/platform-background.ts";
+import { shellCommands } from "../fakes/shell-commands.ts";
 
 let root = "";
 
@@ -46,7 +47,7 @@ const CHILD_ENV: Readonly<Record<string, string>> = {
 async function start(reg: ReturnType<typeof registry>, timeoutMs: number) {
   const result = await reg.dependencies.startProcess(
     {
-      command: "Write-Output 'started'; Start-Sleep -Seconds 60",
+      command: shellCommands.echoThenSleep("started", 60),
       cwd: root,
       timeoutMs,
       environmentGrants: [],

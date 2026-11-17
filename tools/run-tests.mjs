@@ -31,6 +31,22 @@ const HEAVY = new Set([
 ]);
 
 /**
+ * Files that test the Windows implementation itself, not shared behaviour.
+ *
+ * Cross-platform tests live in the shared files and switch command syntax through
+ * `tests/fakes/shell-commands.ts`, so this list holds only tests of Windows-only
+ * mechanisms: the named-pipe capture path, the PowerShell clipboard reader, and
+ * the three `windows-*` filesystem adapters.
+ */
+const WINDOWS_ONLY_ON_LINUX = new Set([
+  "integration/clipboard-image.test.ts",
+  "integration/guarded-process-pipes.test.ts",
+  "integration/windows-fs-adapter.test.ts",
+  "integration/windows-mutation-adapter.test.ts",
+  "integration/windows-write-adapter.test.ts",
+]);
+
+/**
  * Fixtures are test input, not tests of this project.
  *
  * Their verifiers assert behaviour the fixtures deliberately do not have yet, so
@@ -40,6 +56,12 @@ const HEAVY = new Set([
 const EXCLUDED_PREFIXES = ["fixtures/"];
 
 const skipProcess = process.argv.includes("--no-process");
+const linuxOnly = process.argv.includes("--linux-only");
+
+if (linuxOnly && process.platform !== "linux") {
+  process.stderr.write("Linux tests require Linux.\n");
+  process.exit(1);
+}
 
 async function collect(directory, prefix = "") {
   const found = [];
@@ -74,9 +96,16 @@ function run(files) {
 
 const all = (await collect(TESTS))
   .filter((file) => !EXCLUDED_PREFIXES.some((prefix) => file.startsWith(prefix)))
+  .filter((file) => process.platform !== "linux" || !WINDOWS_ONLY_ON_LINUX.has(file))
+  .filter((file) => process.platform !== "win32" || !path.basename(file).startsWith("linux-"))
+  .filter((file) => !linuxOnly || path.basename(file).startsWith("linux-"))
   .sort();
+if (process.platform === "linux")
+  process.stdout.write(
+    `Linux: Windows-specific suites are excluded; ${all.length} applicable files selected.\n`,
+  );
+const heavy = process.platform === "win32" ? all.filter((file) => HEAVY.has(file)) : [];
 const light = all.filter((file) => !HEAVY.has(file));
-const heavy = all.filter((file) => HEAVY.has(file));
 
 if (light.length === 0) {
   process.stderr.write("no test files found\n");

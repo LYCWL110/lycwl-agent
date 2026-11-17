@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import { createWorkspaceTools } from "../../src/bootstrap/read-only-tools.ts";
+import { echoedLineBytes, shellCommands } from "../fakes/shell-commands.ts";
 
 let root = "";
 
@@ -49,7 +50,7 @@ describe("background tools on real processes", () => {
     const started = await t.execute({
       toolCallId: "c1",
       toolName: "background_start",
-      arguments: { command: "Start-Sleep -Seconds 6", cwd: root, label: "wait" },
+      arguments: { command: shellCommands.sleep(6), cwd: root, label: "wait" },
     });
 
     assert.equal(started.status, "succeeded");
@@ -89,7 +90,7 @@ describe("background tools on real processes", () => {
     const started = await t.execute({
       toolCallId: "c1",
       toolName: "background_start",
-      arguments: { command: "Start-Sleep -Seconds 60", cwd: root },
+      arguments: { command: shellCommands.sleep(60), cwd: root },
     });
     const taskId = /taskId=(\S+)/.exec(started.text ?? "")?.[1] ?? "";
 
@@ -146,7 +147,7 @@ describe("background tools on real processes", () => {
       toolCallId: "c1",
       toolName: "background_start",
       arguments: {
-        command: "Write-Output 'first'; Start-Sleep -Seconds 2; Write-Output 'second'",
+        command: `${shellCommands.echo("first")}; ${shellCommands.sleep(2)}; ${shellCommands.echo("second")}`,
         cwd: root,
       },
     });
@@ -155,7 +156,7 @@ describe("background tools on real processes", () => {
     const initial = {
       toolCallId: "c2",
       toolName: "background_output",
-      arguments: { taskId, pageBytes: 7 },
+      arguments: { taskId, pageBytes: echoedLineBytes("first") },
     };
     try {
       const end = Date.now() + 10_000;

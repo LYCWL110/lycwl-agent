@@ -120,9 +120,7 @@ describe("session list wiring", () => {
   it("reports an in-use session as an error and keeps the row", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "sessions-wire-"));
     writeSession(root, "aaa", "one");
-    const { acquireExclusiveFileLease } = await import(
-      "../../src/adapters/windows/exclusive-file-lease.ts"
-    );
+    const { acquireExclusiveFileLease } = await import("../../src/adapters/platform-file-lease.ts");
     const lease = await acquireExclusiveFileLease(
       path.join(root, "sessions", "sessions", "aaa", "session.lock"),
       { timeoutMs: 0 },

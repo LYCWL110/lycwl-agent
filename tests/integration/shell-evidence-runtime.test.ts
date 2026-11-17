@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createFileVault } from "../../src/adapters/windows/file-credential-vault.ts";
 import { selectRuntime } from "../../src/bootstrap/runtime-selection.ts";
+import { shellCommands } from "../fakes/shell-commands.ts";
 
 async function waitFor(check: () => boolean) {
   const deadline = Date.now() + 10_000;
@@ -68,8 +69,7 @@ describe("production Shell evidence and reports", () => {
                               function: {
                                 name: "shell",
                                 arguments: JSON.stringify({
-                                  command:
-                                    "[Console]::Out.Write(('x' * 30000)); [Console]::Error.Write('problem')",
+                                  command: `${shellCommands.repeatToStdout("x", 30_000)}; ${shellCommands.writeErrorWithoutNewline("problem")}`,
                                   cwd: ".",
                                 }),
                               },

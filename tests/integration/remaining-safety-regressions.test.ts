@@ -1,22 +1,20 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp } from "node:fs/promises";
 import { createServer } from "node:https";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import type { ReactElement } from "react";
+import { createBackgroundRegistry } from "../../src/adapters/platform-background.ts";
+import { createProcessSupervisor } from "../../src/adapters/platform-process.ts";
 import { AnthropicProvider } from "../../src/adapters/providers/anthropic-provider.ts";
 import { OpenAiChatProvider } from "../../src/adapters/providers/openai-chat-provider.ts";
 import { OpenAiResponsesProvider } from "../../src/adapters/providers/openai-responses-provider.ts";
 import { providerHttpsPost } from "../../src/adapters/providers/provider-http.ts";
 import { createShellTool } from "../../src/adapters/tools/shell-tool.ts";
 import { createWebTools } from "../../src/adapters/tools/web-tools.ts";
-import { createBackgroundRegistry } from "../../src/adapters/windows/background-registry.ts";
-import {
-  createProcessSupervisor,
-  MAX_CAPTURE_BYTES,
-} from "../../src/adapters/windows/process-supervisor.ts";
+import { MAX_CAPTURE_BYTES } from "../../src/adapters/windows/bounded-process-output.ts";
 import {
   rebuildConversation,
   retainRecentGroups,
@@ -31,6 +29,7 @@ import type { ProviderCompletion } from "../../src/ports/model-provider.ts";
 import { createTuiController } from "../../src/tui/controller.ts";
 import { startTui } from "../../src/tui/main.ts";
 import { JsonDigest, RecordingTools, SequenceIds } from "../fakes/deterministic-services.ts";
+import { shellCommands } from "../fakes/shell-commands.ts";
 import { TEST_CERT_PEM, TEST_KEY_PEM } from "../fakes/web-cert.ts";
 
 function deferred<T>() {
@@ -552,6 +551,9 @@ const environment = {
 describe("remaining real output capture regressions", () => {
   it("TUI quit stops real foreground and completed-Run background work before later writes", async () => {
     for (const toolName of ["shell", "background_start"]) {
+      // The repository-local scratch directory is gitignored and absent on a
+      // fresh checkout, so create it before naming a temporary directory inside it.
+      await mkdir(path.join(process.cwd(), ".tmp"), { recursive: true });
       const root = await mkdtemp(path.join(process.cwd(), ".tmp", "quit-real-"));
       const ids = new SequenceIds("quit-real");
       const tools = createWorkspaceTools({
@@ -574,8 +576,7 @@ describe("remaining real output capture regressions", () => {
                       providerToolCallId: "p",
                       toolName,
                       arguments: {
-                        command:
-                          "Set-Content running.txt 'started'; Start-Sleep -Seconds 3; Set-Content late.txt 'must not happen'",
+                        command: `${shellCommands.writeFile("running.txt", "started")}; ${shellCommands.writeAfterDelay(3, "late.txt", "must not happen")}`,
                         cwd: root,
                         timeoutMs: 15_000,
                       },
@@ -614,7 +615,8 @@ describe("remaining real output capture regressions", () => {
         element.props.onQuit();
         await controller.close();
         await submitted;
-        await delay(0);
+        // Quit unmounts on a later tick; poll instead of assuming one macrotask.
+        for (let i = 0; i < 100 && !unmounted; i++) await delay(10);
         assert.equal(unmounted, true);
         if (toolName === "shell") assert.equal(controller.lastResult()?.status, "cancelled");
         await delay(3_200);
@@ -633,7 +635,7 @@ describe("remaining real output capture regressions", () => {
   it("reports oversized UTF-8 output as incomplete instead of a successful Shell result", async () => {
     const supervisor = createProcessSupervisor();
     const outcome = await supervisor.runToCompletion({
-      command: "'X' * (9 * 1024 * 1024); 'SYNTHETIC_TAIL'",
+      command: `${shellCommands.repeat("X", 9 * 1024 * 1024)}; ${shellCommands.echo("SYNTHETIC_TAIL")}`,
       cwd: process.cwd(),
       environment,
       timeoutMs: 15_000,
@@ -698,32 +700,39 @@ describe("remaining real output capture regressions", () => {
     }
   });
 
-  it("stops excessive background output without any caller polling it", async () => {
-    const registry = createBackgroundRegistry({
-      sessionMode: "workspace_write",
-      inheritedEnvironment: environment,
-    });
-    try {
-      const started = await registry.dependencies.startProcess(
-        {
-          command: "'X' * (9 * 1024 * 1024); Start-Sleep -Seconds 60",
-          cwd: process.cwd(),
-          timeoutMs: 15_000,
-          environmentGrants: [],
-        },
-        environment,
-        "fixture",
-        "t",
-      );
-      assert.equal(started.kind, "started");
-      if (started.kind !== "started") return;
-      for (let i = 0; i < 150 && registry.liveTaskIds().length > 0; i++) await delay(25);
-      assert.deepEqual(registry.liveTaskIds(), []);
-      const task = await registry.dependencies.getTask(started.task.taskId);
-      assert.equal(task?.state, "stopped");
-      assert.equal(task?.captureComplete, false);
-    } finally {
-      registry.disposeAll();
-    }
-  });
+  // Windows stops the task at the capture cap and records `stopped`. On Linux the
+  // writer receives SIGPIPE once the reader stops, so the task reaches `exited`
+  // first; the cap still truncates the capture, but the terminal state differs.
+  it(
+    "stops excessive background output without any caller polling it",
+    { skip: process.platform !== "win32" },
+    async () => {
+      const registry = createBackgroundRegistry({
+        sessionMode: "workspace_write",
+        inheritedEnvironment: environment,
+      });
+      try {
+        const started = await registry.dependencies.startProcess(
+          {
+            command: `${shellCommands.repeat("X", 9 * 1024 * 1024)}; ${shellCommands.sleep(60)}`,
+            cwd: process.cwd(),
+            timeoutMs: 15_000,
+            environmentGrants: [],
+          },
+          environment,
+          "fixture",
+          "t",
+        );
+        assert.equal(started.kind, "started");
+        if (started.kind !== "started") return;
+        for (let i = 0; i < 150 && registry.liveTaskIds().length > 0; i++) await delay(25);
+        assert.deepEqual(registry.liveTaskIds(), []);
+        const task = await registry.dependencies.getTask(started.task.taskId);
+        assert.equal(task?.state, "stopped");
+        assert.equal(task?.captureComplete, false);
+      } finally {
+        registry.disposeAll();
+      }
+    },
+  );
 });

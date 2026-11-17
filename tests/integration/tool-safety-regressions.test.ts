@@ -5,14 +5,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { createProcessSupervisor } from "../../src/adapters/platform-process.ts";
 import { createSearchTools } from "../../src/adapters/tools/search-tools.ts";
-import { createProcessSupervisor } from "../../src/adapters/windows/process-supervisor.ts";
 import { projectApprovalGrants } from "../../src/application/coordinator/approval-grants.ts";
 import { InMemoryEventLog } from "../../src/application/coordinator/event-log.ts";
 import { RuntimeCoordinator } from "../../src/application/coordinator/runtime-coordinator.ts";
 import { createWorkspaceTools } from "../../src/bootstrap/read-only-tools.ts";
 import type { ProviderToolCall } from "../../src/ports/model-provider.ts";
 import { JsonDigest, ScriptedProvider, SequenceIds } from "../fakes/deterministic-services.ts";
+import { IS_WINDOWS, shellCommands } from "../fakes/shell-commands.ts";
 
 async function fixture(body: (root: string) => Promise<void>) {
   const root = await mkdtemp(path.join(tmpdir(), "lycwl-safety-"));
@@ -458,19 +459,26 @@ describe("interactive sensitive reads and immutable approval conditions", () => 
     }));
 });
 
-describe("real PowerShell execution and cancellation", () => {
+describe("real shell execution and cancellation", () => {
   it("previews the launch command and guarded pipes without file redirection", () =>
     fixture(async (root) => {
       const { tools } = runtime(root, []);
       const request = {
         toolCallId: "launch",
         toolName: "shell",
-        arguments: { command: "Write-Output 'launch-marker'", cwd: "." },
+        arguments: { command: shellCommands.echo("launch-marker"), cwd: "." },
       };
       const preview = await tools.preview?.(request);
       assert.ok(preview);
-      assert.match(preview, /-NoProfile -NonInteractive -OutputFormat Text -Command /);
-      assert.match(preview, /Write-Output 'launch-marker'/);
+      // The preview must name the interpreter that will actually run, so the
+      // approval shows the same launch line the supervisor builds.
+      assert.match(
+        preview,
+        IS_WINDOWS
+          ? /-NoProfile -NonInteractive -OutputFormat Text -Command /
+          : /"--noprofile","--norc","-c"/,
+      );
+      assert.match(preview, /launch-marker/);
       assert.match(preview, /outputEncoding=utf-8/);
       assert.match(preview, /capture=guarded memory pipes/);
       assert.doesNotMatch(preview, /lycwl-(out|err)-/);
@@ -482,7 +490,7 @@ describe("real PowerShell execution and cancellation", () => {
   it("does not spawn when the signal is already aborted", () =>
     fixture(async (root) => {
       const result = await createProcessSupervisor().runToCompletion({
-        command: "Set-Content 'never.txt' 'bad'",
+        command: shellCommands.writeFile("never.txt", "bad"),
         cwd: root,
         environment: {},
         timeoutMs: 1000,
@@ -497,7 +505,7 @@ describe("real PowerShell execution and cancellation", () => {
       await mkdir(path.join(root, "sub"));
       const { coordinator } = runtime(
         root,
-        [call("shell", { command: "Set-Content 'never.txt' 'bad'", cwd: "sub" })],
+        [call("shell", { command: shellCommands.writeFile("never.txt", "bad"), cwd: "sub" })],
         { suspend: true },
       );
       const running = coordinator.run("stale cwd");
@@ -519,7 +527,7 @@ describe("real PowerShell execution and cancellation", () => {
       assert.equal(existsSync(path.join(root, "sub", "never.txt")), false);
     }));
 
-  it("supports PowerShell and resolves cwd relative to the Session workspace", () =>
+  it("runs the host shell and resolves cwd relative to the Session workspace", () =>
     fixture(async (root) => {
       await mkdir(path.join(root, "sub"));
       const { tools } = runtime(root, []);
@@ -527,7 +535,7 @@ describe("real PowerShell execution and cancellation", () => {
         toolCallId: "shell",
         toolName: "shell",
         arguments: {
-          command: "Write-Output (Get-Location).Path; Write-Output '中文输出'",
+          command: `${shellCommands.printWorkingDirectory()}; ${shellCommands.echo("中文输出")}`,
           cwd: "sub",
         },
       });
@@ -538,8 +546,7 @@ describe("real PowerShell execution and cancellation", () => {
 
   it("interrupts the running process before its delayed side effect", () =>
     fixture(async (root) => {
-      const command =
-        "Write-Output 'started'; Start-Sleep -Seconds 3; Set-Content -LiteralPath 'after-cancel.txt' -Value 'must not happen'";
+      const command = `${shellCommands.echo("started")}; ${shellCommands.writeAfterDelay(3, "after-cancel.txt", "must not happen")}`;
       const { coordinator, provider } = runtime(root, [
         call("shell", { command, cwd: ".", timeoutMs: 10000 }),
         call("create_file", { path: "sibling.txt", content: "never" }, "sibling"),
@@ -584,11 +591,11 @@ describe("real PowerShell execution and cancellation", () => {
 
   it("terminates a descendant process before its delayed write", () =>
     fixture(async (root) => {
-      const child = Buffer.from(
-        "Start-Sleep -Seconds 2; Set-Content -LiteralPath 'child-write.txt' -Value 'bad'",
-        "utf16le",
-      ).toString("base64");
-      const command = `$child = Start-Process -FilePath "$PSHOME\\powershell.exe" -ArgumentList '-NoProfile -NonInteractive -EncodedCommand ${child}' -WindowStyle Hidden -PassThru; Set-Content -LiteralPath 'child-started.txt' -Value $child.Id; Start-Sleep -Seconds 20`;
+      const command = shellCommands.descendantWriteAfterDelay(
+        "child-write.txt",
+        "child-started.txt",
+        "bad",
+      );
       const { coordinator } = runtime(root, [
         call("shell", { command, cwd: ".", timeoutMs: 10000 }),
       ]);
@@ -608,8 +615,7 @@ describe("real PowerShell execution and cancellation", () => {
           call(
             "background_start",
             {
-              command:
-                "Set-Content 'background-started.txt' 'ready'; Start-Sleep -Seconds 2; Set-Content 'background-write.txt' 'bad'",
+              command: `${shellCommands.writeFile("background-started.txt", "ready")}; ${shellCommands.writeAfterDelay(2, "background-write.txt", "bad")}`,
               cwd: ".",
               timeoutMs: 10000,
             },

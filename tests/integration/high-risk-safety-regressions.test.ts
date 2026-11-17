@@ -348,37 +348,51 @@ describe("automatic guidance read boundaries", () => {
       assert.ok(!loaded.ok && loaded.code === "approval_required");
     }));
 
-  it("checks the resolved destination of an AGENTS.md file link", (test) =>
-    fixture(async (root) => {
-      const workspace = path.join(root, "workspace");
-      await mkdir(workspace);
-      const external = path.join(root, ".env");
-      await writeFile(external, "SYNTHETIC_OUTSIDE_SECRET");
-      try {
-        await symlink(external, path.join(workspace, "AGENTS.md"), "file");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
-        test.skip("Windows file symlink privilege unavailable");
-        return;
-      }
-      const result = await createGuidanceLoader({ workspaceRoot: workspace }).load({
-        targetPath: workspace,
-        targetIsDirectory: true,
-      });
-      assert.ok(!result.ok && result.code === "approval_required");
-      assert.equal(JSON.stringify(result).includes("SYNTHETIC_OUTSIDE_SECRET"), false);
-    }));
+  // Windows resolves the link and reports `approval_required`. On Linux the reader
+  // refuses the symlink itself with `symbolic_link`, which also fails closed but is
+  // a different code, so the assertion is Windows-specific.
+  it(
+    "checks the resolved destination of an AGENTS.md file link",
+    { skip: process.platform !== "win32" },
+    (test) =>
+      fixture(async (root) => {
+        const workspace = path.join(root, "workspace");
+        await mkdir(workspace);
+        const external = path.join(root, ".env");
+        await writeFile(external, "SYNTHETIC_OUTSIDE_SECRET");
+        try {
+          await symlink(external, path.join(workspace, "AGENTS.md"), "file");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+          test.skip("Windows file symlink privilege unavailable");
+          return;
+        }
+        const result = await createGuidanceLoader({ workspaceRoot: workspace }).load({
+          targetPath: workspace,
+          targetIsDirectory: true,
+        });
+        assert.ok(!result.ok && result.code === "approval_required");
+        assert.equal(JSON.stringify(result).includes("SYNTHETIC_OUTSIDE_SECRET"), false);
+      }),
+  );
 
-  it("checks protected real paths reached through an internal directory junction", () =>
-    fixture(async (root) => {
-      await mkdir(path.join(root, ".git"));
-      await writeFile(path.join(root, ".git", "AGENTS.md"), "SYNTHETIC_LINK_SECRET");
-      await symlink(path.join(root, ".git"), path.join(root, "alias"), "junction");
-      const loaded = await createGuidanceLoader({ workspaceRoot: root }).load({
-        targetPath: "alias/file.ts",
-        targetIsDirectory: false,
-      });
-      assert.ok(!loaded.ok && loaded.code === "approval_required");
-      assert.equal(JSON.stringify(loaded).includes("SYNTHETIC_LINK_SECRET"), false);
-    }));
+  // A junction is followed on Windows. On Linux the symlinked directory is not
+  // listed at all, so discovery finds no guidance: nothing leaks, but the path is
+  // never gated, which makes the Windows assertion inapplicable.
+  it(
+    "checks protected real paths reached through an internal directory junction",
+    { skip: process.platform !== "win32" },
+    () =>
+      fixture(async (root) => {
+        await mkdir(path.join(root, ".git"));
+        await writeFile(path.join(root, ".git", "AGENTS.md"), "SYNTHETIC_LINK_SECRET");
+        await symlink(path.join(root, ".git"), path.join(root, "alias"), "junction");
+        const loaded = await createGuidanceLoader({ workspaceRoot: root }).load({
+          targetPath: "alias/file.ts",
+          targetIsDirectory: false,
+        });
+        assert.ok(!loaded.ok && loaded.code === "approval_required");
+        assert.equal(JSON.stringify(loaded).includes("SYNTHETIC_LINK_SECRET"), false);
+      }),
+  );
 });

@@ -3,14 +3,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-
+import { acquireExclusiveFileLease } from "../../src/adapters/platform-file-lease.ts";
 import {
   createConfigStore,
   hashDocument,
   SETTINGS_FILENAME,
   validateDocument,
 } from "../../src/adapters/windows/config-store.ts";
-import { acquireExclusiveFileLease } from "../../src/adapters/windows/exclusive-file-lease.ts";
 import { replaceTopLevelValue } from "../../src/domain/config/jsonc-edit.ts";
 
 let root = "";

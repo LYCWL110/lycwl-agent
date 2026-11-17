@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import { createWorkspaceTools } from "../../src/bootstrap/read-only-tools.ts";
+import { shellCommands } from "../fakes/shell-commands.ts";
 
 let root = "";
 
@@ -58,7 +59,7 @@ describe("shell through the composition root", () => {
     const result = await t.execute({
       toolCallId: "c1",
       toolName: "shell",
-      arguments: { command: "Write-Output 'bad'; exit 5", cwd: root },
+      arguments: { command: shellCommands.echoAndExit("bad", 5), cwd: root },
     });
 
     assert.equal(result.status, "failed");
@@ -72,7 +73,7 @@ describe("shell through the composition root", () => {
     const result = await t.execute({
       toolCallId: "c1",
       toolName: "shell",
-      arguments: { command: "Start-Sleep -Seconds 30", cwd: root, timeoutMs: 1_500 },
+      arguments: { command: shellCommands.sleep(30), cwd: root, timeoutMs: 1_500 },
     });
 
     assert.equal(result.status, "failed");

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { createProcessSupervisor } from "../../src/adapters/windows/process-supervisor.ts";
+import { createProcessSupervisor } from "../../src/adapters/platform-process.ts";
+import { shellCommands } from "../fakes/shell-commands.ts";
 
 const supervisor = createProcessSupervisor();
 const CWD = process.cwd();
@@ -33,7 +34,7 @@ describe("G02 process supervisor", () => {
 
   it("reports a non-zero exit without hiding output", async () => {
     const result = await supervisor.runToCompletion({
-      command: "Write-Output 'before'; exit 3",
+      command: shellCommands.echoAndExit("before", 3),
       cwd: CWD,
       environment: ENV,
       timeoutMs: 15_000,
@@ -47,7 +48,7 @@ describe("G02 process supervisor", () => {
 
   it("captures stderr separately", async () => {
     const result = await supervisor.runToCompletion({
-      command: "Write-Error 'problem'",
+      command: shellCommands.echoToStderr("problem"),
       cwd: CWD,
       environment: ENV,
       timeoutMs: 15_000,
@@ -60,7 +61,7 @@ describe("G02 process supervisor", () => {
 
   it("terminates the tree on timeout and reports partial output", async () => {
     const result = await supervisor.runToCompletion({
-      command: "Write-Output 'started'; Start-Sleep -Seconds 30",
+      command: shellCommands.echoThenSleep("started", 30),
       cwd: CWD,
       environment: ENV,
       timeoutMs: 1_500,
@@ -95,7 +96,7 @@ describe("G02 race runs", () => {
         races.push(
           supervisor
             .runToCompletion({
-              command: "Start-Sleep -Seconds 20",
+              command: shellCommands.sleep(20),
               cwd: CWD,
               environment: ENV,
               // Alternate between an aggressive and a slightly slower timeout.
