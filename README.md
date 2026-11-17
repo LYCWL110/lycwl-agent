@@ -9,27 +9,34 @@ approved command runs with your full user permissions.
 
 ## Requirements
 
-Node.js 24 and the project dependencies (`pnpm install`).
+Node.js 24 (`>=24.0.0 <25`). A newer release installs with an `EBADENGINE`
+warning and is not covered by the test suite.
 
 ## Install
 
-Windows, from the checkout:
-
-```powershell
-.\lycwl.cmd
-```
-
-Linux, once per checkout:
+From GitHub, once:
 
 ```sh
-pnpm install
-pnpm build
-npm link --offline --ignore-scripts --no-audit --no-fund
+npm install -g github:LYCWL110/lycwl-agent --allow-git=all
 ```
+
+npm 12 refuses git dependencies by default, hence the flag. To install without
+network access, pack a checkout instead:
+
+```sh
+npm pack
+npm install -g ./lycwl-agent-*.tgz
+```
+
+Both ship the built `dist/` only, never the sources. npm 12 also blocks
+dependency install scripts; koffi falls back to its prebuilt package, so the
+warning is harmless.
 
 `$(npm prefix -g)/bin` must be on `PATH`. If the global prefix is a system
 directory and registration fails with `EACCES`, set a user-owned prefix
 (`npm config set prefix "$HOME/.local"`) instead of using `sudo`.
+
+Windows can also run `.\lycwl.cmd` straight from a checkout, without installing.
 
 ## Use
 
