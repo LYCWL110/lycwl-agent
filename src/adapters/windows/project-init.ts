@@ -9,6 +9,7 @@ import {
   type ProjectFacts,
   renderAgentsDraft,
 } from "../../domain/context/project-init.ts";
+import { isPosixWorkspaceRoot } from "../../services/permission/posix-workspace-path.ts";
 import { resolveWorkspacePath } from "../../services/permission/workspace-path.ts";
 
 /**
@@ -56,10 +57,14 @@ export function createProjectInit(options: Readonly<{ workspaceRoot: string }>) 
       const root = resolveWorkspacePath(options.workspaceRoot, options.workspaceRoot);
       if (!root.ok) return { ok: false, code: "invalid_workspace" };
       const absoluteRoot = root.value.absolutePath;
+      // POSIX roots are case-sensitive: `Agents.md` is not the `AGENTS.md` this
+      // module would write, and `Node_Modules` is not `node_modules`.
+      const caseSensitive = isPosixWorkspaceRoot(absoluteRoot);
+      const fold = (value: string) => (caseSensitive ? value : value.toLowerCase());
 
       let entries: FileEntry[];
       try {
-        entries = await scanShallow(absoluteRoot);
+        entries = await scanShallow(absoluteRoot, fold);
       } catch (error) {
         return {
           ok: false,
@@ -68,9 +73,10 @@ export function createProjectInit(options: Readonly<{ workspaceRoot: string }>) 
         };
       }
 
-      const facts = detectProjectFacts(entries);
+      const facts = detectProjectFacts(entries, { caseSensitive });
+      const agentManifest = caseSensitive ? "AGENTS.md" : "agents.md";
       const alreadyExists = entries.some(
-        (entry) => !entry.isDirectory && entry.path.toLowerCase() === "agents.md",
+        (entry) => !entry.isDirectory && fold(entry.path) === agentManifest,
       );
 
       const scriptOf = (name: string): string | null => {
@@ -100,7 +106,10 @@ export function createProjectInit(options: Readonly<{ workspaceRoot: string }>) 
  * The manifest is read because scripts and the project name live in its contents; no
  * other file is read, so the scan cannot pull arbitrary project text into memory.
  */
-async function scanShallow(absoluteRoot: string): Promise<FileEntry[]> {
+async function scanShallow(
+  absoluteRoot: string,
+  fold: (value: string) => string,
+): Promise<FileEntry[]> {
   const entries: FileEntry[] = [];
 
   async function walk(directory: string, relative: string, depth: number): Promise<void> {
@@ -115,7 +124,7 @@ async function scanShallow(absoluteRoot: string): Promise<FileEntry[]> {
       const childRelative = relative.length === 0 ? dirent.name : `${relative}/${dirent.name}`;
       const childAbsolute = path.join(directory, dirent.name);
       if (dirent.isDirectory()) {
-        if (INIT_SKIP_DIRECTORIES.has(dirent.name.toLowerCase())) continue;
+        if (INIT_SKIP_DIRECTORIES.has(fold(dirent.name))) continue;
         entries.push({ path: childRelative, isDirectory: true });
         await walk(childAbsolute, childRelative, depth + 1);
         continue;
@@ -125,7 +134,7 @@ async function scanShallow(absoluteRoot: string): Promise<FileEntry[]> {
         path: childRelative,
         isDirectory: false,
       };
-      if (dirent.name.toLowerCase() === "package.json") {
+      if (fold(dirent.name) === "package.json") {
         try {
           const text = await readFile(childAbsolute, "utf8");
           // Bounded read: a manifest larger than this is not a manifest.

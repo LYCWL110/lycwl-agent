@@ -21,18 +21,26 @@ export const INIT_LIMITS = Object.freeze({
  *
  * The listing is expected to be shallow (the caller bounds depth), because a full
  * repository walk is both slow and unnecessary for a draft.
+ *
+ * `caseSensitive` follows the workspace filesystem: on a POSIX root `Package.json`
+ * is not the manifest and `Src` is not `src`.
  */
-export function detectProjectFacts(files) {
+export function detectProjectFacts(files, options = {}) {
+    const fold = foldFor(options);
     const paths = files.map((entry) => entry.path);
-    const lower = new Map(paths.map((path) => [path.toLowerCase(), path]));
+    const lower = new Map(paths.map((path) => [fold(path), path]));
     const packageManager = detectPackageManager(lower);
     const extensions = detectExtensions(files);
     const languages = detectLanguages(lower, extensions);
-    const scripts = detectScripts(files);
-    const sourceDirs = detectSourceDirs(files);
+    const scripts = detectScripts(files, fold);
+    const sourceDirs = detectSourceDirs(files, fold);
     const configFiles = detectConfigFiles(lower);
-    const name = detectName(lower, files);
+    const name = detectName(files, fold);
     return { name, languages, packageManager, scripts, sourceDirs, extensions, configFiles };
+}
+/** Filename folding used by every lookup in this module. */
+function foldFor(options) {
+    return options.caseSensitive === true ? (value) => value : (value) => value.toLowerCase();
 }
 function detectPackageManager(lower) {
     if (lower.has("pnpm-lock.yaml"))
@@ -75,8 +83,8 @@ function detectLanguages(lower, extensions) {
  * The listing carries file contents only for the manifest, because parsing scripts
  * from a name alone is impossible. An absent or unparsable manifest yields none.
  */
-function detectScripts(files) {
-    const manifest = files.find((entry) => !entry.isDirectory && entry.path.toLowerCase() === "package.json");
+function detectScripts(files, fold) {
+    const manifest = files.find((entry) => !entry.isDirectory && fold(entry.path) === "package.json");
     if (manifest?.content === undefined)
         return [];
     try {
@@ -99,7 +107,7 @@ function detectScripts(files) {
         return [];
     }
 }
-function detectSourceDirs(files) {
+function detectSourceDirs(files, fold) {
     const candidates = new Set();
     for (const entry of files) {
         if (!entry.isDirectory)
@@ -108,7 +116,7 @@ function detectSourceDirs(files) {
         if (segments.length !== 1)
             continue;
         const name = segments[0] ?? "";
-        if (isSourceDirName(name))
+        if (isSourceDirName(name, fold))
             candidates.add(name);
     }
     return [...candidates]
@@ -129,8 +137,8 @@ const SOURCE_DIR_NAMES = new Set([
     "spec",
     "docs",
 ]);
-function isSourceDirName(name) {
-    return SOURCE_DIR_NAMES.has(name.toLowerCase());
+function isSourceDirName(name, fold) {
+    return SOURCE_DIR_NAMES.has(fold(name));
 }
 function detectExtensions(files) {
     const counts = new Map();
@@ -199,9 +207,8 @@ function detectConfigFiles(lower) {
     }
     return found;
 }
-function detectName(lower, files) {
-    void lower;
-    const manifest = files.find((entry) => !entry.isDirectory && entry.path.toLowerCase() === "package.json");
+function detectName(files, fold) {
+    const manifest = files.find((entry) => !entry.isDirectory && fold(entry.path) === "package.json");
     if (manifest?.content === undefined)
         return null;
     try {

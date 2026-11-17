@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { detectProjectFacts, INIT_LIMITS, renderAgentsDraft, } from "../../domain/context/project-init.js";
+import { isPosixWorkspaceRoot } from "../../services/permission/posix-workspace-path.js";
 import { resolveWorkspacePath } from "../../services/permission/workspace-path.js";
 /**
  * Generate an `AGENTS.md` draft for a project.
@@ -36,9 +37,13 @@ export function createProjectInit(options) {
             if (!root.ok)
                 return { ok: false, code: "invalid_workspace" };
             const absoluteRoot = root.value.absolutePath;
+            // POSIX roots are case-sensitive: `Agents.md` is not the `AGENTS.md` this
+            // module would write, and `Node_Modules` is not `node_modules`.
+            const caseSensitive = isPosixWorkspaceRoot(absoluteRoot);
+            const fold = (value) => (caseSensitive ? value : value.toLowerCase());
             let entries;
             try {
-                entries = await scanShallow(absoluteRoot);
+                entries = await scanShallow(absoluteRoot, fold);
             }
             catch (error) {
                 return {
@@ -47,8 +52,9 @@ export function createProjectInit(options) {
                     ...(error instanceof Error ? { detail: error.message } : {}),
                 };
             }
-            const facts = detectProjectFacts(entries);
-            const alreadyExists = entries.some((entry) => !entry.isDirectory && entry.path.toLowerCase() === "agents.md");
+            const facts = detectProjectFacts(entries, { caseSensitive });
+            const agentManifest = caseSensitive ? "AGENTS.md" : "agents.md";
+            const alreadyExists = entries.some((entry) => !entry.isDirectory && fold(entry.path) === agentManifest);
             const scriptOf = (name) => {
                 const script = facts.scripts.find((entry) => entry.name === name);
                 if (script === undefined)
@@ -74,7 +80,7 @@ export function createProjectInit(options) {
  * The manifest is read because scripts and the project name live in its contents; no
  * other file is read, so the scan cannot pull arbitrary project text into memory.
  */
-async function scanShallow(absoluteRoot) {
+async function scanShallow(absoluteRoot, fold) {
     const entries = [];
     async function walk(directory, relative, depth) {
         if (depth > INIT_LIMITS.maxDepth)
@@ -90,7 +96,7 @@ async function scanShallow(absoluteRoot) {
             const childRelative = relative.length === 0 ? dirent.name : `${relative}/${dirent.name}`;
             const childAbsolute = path.join(directory, dirent.name);
             if (dirent.isDirectory()) {
-                if (INIT_SKIP_DIRECTORIES.has(dirent.name.toLowerCase()))
+                if (INIT_SKIP_DIRECTORIES.has(fold(dirent.name)))
                     continue;
                 entries.push({ path: childRelative, isDirectory: true });
                 await walk(childAbsolute, childRelative, depth + 1);
@@ -102,7 +108,7 @@ async function scanShallow(absoluteRoot) {
                 path: childRelative,
                 isDirectory: false,
             };
-            if (dirent.name.toLowerCase() === "package.json") {
+            if (fold(dirent.name) === "package.json") {
                 try {
                     const text = await readFile(childAbsolute, "utf8");
                     // Bounded read: a manifest larger than this is not a manifest.
