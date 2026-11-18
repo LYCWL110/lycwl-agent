@@ -168,6 +168,40 @@ describe("reasoning metadata across protocols", () => {
     }
   });
 
+  it("reports a provider error body instead of describing the parser", () => {
+    // Observed from a gateway that answers HTTP 200 with an error envelope, so the
+    // status line used to say `unexpected_shape`, which blames the reader.
+    const body = JSON.stringify({
+      error: {
+        message: "The model 'deepseek-v4.1-flash' does not exist",
+        type: "invalid_request_error",
+        param: "model",
+        code: "model_not_found",
+      },
+    });
+    assert.deepEqual(parseModelDetails(body, "openai_responses"), {
+      ok: false,
+      code: "model_not_found",
+    });
+  });
+
+  it("does not repeat error codes it does not understand", () => {
+    assert.deepEqual(
+      parseModelDetails(JSON.stringify({ error: { code: "insufficient_quota" } }), "openai_chat"),
+      { ok: false, code: "unexpected_shape" },
+    );
+  });
+
+  it("still reads a record that carries an unrelated error field", () => {
+    assert.deepEqual(
+      parseModelDetails(JSON.stringify({ id: "model", error: "none" }), "openai_chat"),
+      {
+        ok: true,
+        model: { id: "model" },
+      },
+    );
+  });
+
   it("does not send a key for invalid or dot-segment model identifiers", async () => {
     for (const model of ["", ".", "..", "\ud800"]) {
       let called = false;

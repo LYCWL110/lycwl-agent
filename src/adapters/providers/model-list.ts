@@ -204,6 +204,8 @@ export function parseModelDetails(
 ): ModelDetailsResult {
   const parsed = parseJsonBody(bodyText);
   if (!parsed.ok) return { ok: false, code: "body_not_json" };
+  const upstream = upstreamErrorCode(parsed.value);
+  if (upstream !== null) return { ok: false, code: upstream };
   const entry =
     isRecord(parsed.value) && isRecord(parsed.value["data"]) ? parsed.value["data"] : parsed.value;
   const id = modelIdOf(entry);
@@ -325,6 +327,25 @@ function extractEntries(value: unknown): readonly unknown[] | null {
   const models = value["models"];
   if (Array.isArray(models)) return models;
   return null;
+}
+
+/**
+ * Provider error codes this layer is willing to repeat.
+ *
+ * A gateway may answer a model lookup with HTTP 200 and an error body. That body
+ * is not a model record, so without this it is reported as `unexpected_shape`,
+ * which describes our parser instead of the provider. Only codes that mean
+ * something at this layer are passed through; anything else stays a shape
+ * failure, so a provider cannot put arbitrary text into a reported code.
+ */
+const KNOWN_DETAIL_ERROR_CODES = new Set(["model_not_found"]);
+
+function upstreamErrorCode(value: unknown): string | null {
+  if (!isRecord(value)) return null;
+  const error = value["error"];
+  if (!isRecord(error)) return null;
+  const code = error["code"];
+  return typeof code === "string" && KNOWN_DETAIL_ERROR_CODES.has(code) ? code : null;
 }
 
 function modelIdOf(entry: unknown): string | null {

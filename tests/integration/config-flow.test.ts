@@ -282,6 +282,19 @@ describe("configuration flow persistence", () => {
     assert.equal(await ui.flow.done, "discarded");
   });
 
+  it("names the provider when it reports the selected model as missing", async () => {
+    const f = await fixture("details-model-not-found", "openai_responses");
+    const ui = await open(f, {
+      initialPage: "model",
+      fetchModels: async () => ["original"],
+      fetchModel: async () => ({ ok: false, code: "model_not_found" }),
+    });
+    await waitFor(() => /reports no such model/.test(ui.browser().state.status?.text ?? ""));
+    assert.equal(ui.browser().state.status?.isError, true);
+    ui.browser().onCancel();
+    assert.equal(await ui.flow.done, "discarded");
+  });
+
   for (const protocol of ["openai_chat", "openai_responses", "anthropic_messages"] as const) {
     it(`retrieves selected-model metadata when the ${protocol} catalog lacks levels`, async () => {
       const f = await fixture(`detail-${protocol}`, protocol);

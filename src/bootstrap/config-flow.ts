@@ -696,7 +696,14 @@ export function startConfigFlow(options: ConfigFlowOptions): ConfigFlow {
     if (!current() || phase.kind !== "browser") return;
     if (!result.ok && result.code === "connection_unavailable") return;
     if (!result.ok || result.model.id !== selected.id) {
-      status("Model details unavailable; support unknown", true);
+      // A provider that answers 200 with an error body is saying something more
+      // specific than "unreadable", and the two lead to different actions.
+      status(
+        !result.ok && result.code === "model_not_found"
+          ? "Model details unavailable: the provider reports no such model"
+          : "Model details unavailable; support unknown",
+        true,
+      );
       return;
     }
     const reasoning = selected.reasoning ?? result.model.reasoning;
