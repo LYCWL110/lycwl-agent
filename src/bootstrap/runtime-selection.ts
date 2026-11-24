@@ -14,6 +14,7 @@ import {
   createGuidanceLoader,
   type GuidanceBlock,
   renderGuidanceBlock,
+  renderGuidanceUpdateBlock,
 } from "../adapters/windows/guidance-loader.ts";
 import { createSkillLoader } from "../adapters/windows/skill-loader.ts";
 import { createSyntaxChecker, defaultTscEntry } from "../adapters/windows/syntax-checker.ts";
@@ -23,6 +24,10 @@ import { DEFAULT_CONTEXT_WINDOW } from "../domain/config/model-context.ts";
 import type { ProviderConfig } from "../domain/config/provider-config.ts";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.ts";
 import { renderHarnessRules } from "../domain/context/harness-rules.ts";
+import {
+  diffGuidanceSources,
+  type GuidanceSourceIdentity,
+} from "../domain/context/project-guidance.ts";
 import {
   type DiscoverableTool,
   renderServerCatalog,
@@ -578,11 +583,15 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
         sessionId,
         ...(prior.conversation.length === 0 ? {} : { priorConversation: prior.conversation }),
         ...(contextBlock === "" ? {} : { projectContext: contextBlock }),
+        ...(guidance.summary.kind === "loaded"
+          ? { initialGuidanceSources: guidance.summary.sources }
+          : {}),
         // The configured/default capacity has already been resolved above.
         ...(contextBudget === null ? {} : { contextBudget }),
         // Scoped refresh: when the Run touches a new path, gap the loader up to that
-        // directory so a subdirectory AGENTS.md is injected too.
-        resolveProjectGuidance: async (touched) => {
+        // directory so a subdirectory AGENTS.md is injected too. Only files not in
+        // the launch block are rendered as an update, so the cached prefix survives.
+        resolveProjectGuidance: async (touched, knownSources) => {
           const loader = createGuidanceLoader({ workspaceRoot: options.workspaceRoot });
           const seen = new Set<string>();
           const blocks: GuidanceBlock[] = [];
@@ -598,10 +607,56 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
               blocks.push(block);
             }
           }
-          if (blocks.length === 0) return null;
+          const blockPaths = new Set(blocks.map((block) => block.path));
+          const knownPresent: GuidanceBlock[] = [];
+          const removed: string[] = [];
+          for (const source of knownSources) {
+            if (blockPaths.has(source.path)) continue;
+            // A known source missing from discovery is either gone or unreadable.
+            // Check existence explicitly; only a confirmed ENOENT withdraws a rule.
+            const inspected = await loader.inspectSource(source.path);
+            if (inspected.kind === "missing") {
+              removed.push(source.path);
+              continue;
+            }
+            if (inspected.kind === "present") {
+              const directory = path.dirname(source.path);
+              const relative = path.relative(options.workspaceRoot, directory);
+              knownPresent.push({
+                path: source.path,
+                directory,
+                depth: relative.length === 0 ? 0 : relative.split(path.sep).length,
+                text: inspected.text,
+                sha256: inspected.sha256,
+                bytes: inspected.bytes,
+              });
+            }
+          }
+          const sortBlocks = (list: readonly GuidanceBlock[]): readonly GuidanceBlock[] =>
+            [...list].sort((left, right) => {
+              if (left.depth !== right.depth) return left.depth - right.depth;
+              return left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
+            });
+          const allBlocks = sortBlocks([...blocks, ...knownPresent]);
+          const byPath = new Map(allBlocks.map((block) => [block.path, block]));
+          const select = (ids: readonly GuidanceSourceIdentity[]): readonly GuidanceBlock[] =>
+            ids
+              .map((id) => byPath.get(id.path))
+              .filter((block): block is GuidanceBlock => block !== undefined);
+          const sources = allBlocks.map((block) => ({
+            path: block.path,
+            sha256: block.sha256,
+          }));
+          const diff = diffGuidanceSources(sources, knownSources);
+          const added = select(diff.added);
+          const changed = select(diff.changed);
           return {
-            text: renderGuidanceBlock(blocks),
-            sources: blocks.map((block) => block.path),
+            text: renderGuidanceBlock(allBlocks),
+            sources,
+            updateText: renderGuidanceUpdateBlock({ added, changed, removed }),
+            addedSources: diff.added,
+            changedSources: diff.changed,
+            removedSources: removed,
           };
         },
       }),
@@ -701,7 +756,12 @@ export function describeSelection(selection: RuntimeSelection): readonly string[
 
 export type GuidanceSummary =
   | Readonly<{ kind: "none" }>
-  | Readonly<{ kind: "loaded"; files: readonly string[]; bytes: number }>
+  | Readonly<{
+      kind: "loaded";
+      files: readonly string[];
+      sources: readonly GuidanceSourceIdentity[];
+      bytes: number;
+    }>
   | Readonly<{ kind: "failed"; code: string }>;
 
 /**
@@ -727,6 +787,7 @@ async function loadGuidance(
     summary: {
       kind: "loaded",
       files: loaded.blocks.map((b) => b.path),
+      sources: loaded.blocks.map((b) => ({ path: b.path, sha256: b.sha256 })),
       bytes: loaded.totalBytes,
     },
   };

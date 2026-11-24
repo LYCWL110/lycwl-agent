@@ -5,13 +5,14 @@ import { createSpillStore } from "../adapters/persistence/spill-store.js";
 import { createDiscoverToolsTool, DISCOVER_TOOLS_NAME, DISCOVERY_TOOL_DESCRIPTION, DISCOVERY_TOOL_SCHEMA, } from "../adapters/tools/discover-tools.js";
 import { createMcpTools, mcpToolDefinitions } from "../adapters/tools/mcp-tools.js";
 import { createFormatterRunner } from "../adapters/windows/formatter-runner.js";
-import { createGuidanceLoader, renderGuidanceBlock, } from "../adapters/windows/guidance-loader.js";
+import { createGuidanceLoader, renderGuidanceBlock, renderGuidanceUpdateBlock, } from "../adapters/windows/guidance-loader.js";
 import { createSkillLoader } from "../adapters/windows/skill-loader.js";
 import { createSyntaxChecker, defaultTscEntry } from "../adapters/windows/syntax-checker.js";
 import { deriveTaskReport } from "../application/task-report/derive-task-report.js";
 import { DEFAULT_CONTEXT_WINDOW } from "../domain/config/model-context.js";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.js";
 import { renderHarnessRules } from "../domain/context/harness-rules.js";
+import { diffGuidanceSources, } from "../domain/context/project-guidance.js";
 import { renderServerCatalog, shouldDiscover, } from "../domain/mcp/tool-discovery.js";
 import { filterChildEnvironment } from "../domain/process/shell.js";
 import { availableTools, COORDINATOR_TOOL_NAMES } from "../domain/tool-catalog/tool-catalog.js";
@@ -438,11 +439,15 @@ export async function selectRuntime(options) {
                 sessionId,
                 ...(prior.conversation.length === 0 ? {} : { priorConversation: prior.conversation }),
                 ...(contextBlock === "" ? {} : { projectContext: contextBlock }),
+                ...(guidance.summary.kind === "loaded"
+                    ? { initialGuidanceSources: guidance.summary.sources }
+                    : {}),
                 // The configured/default capacity has already been resolved above.
                 ...(contextBudget === null ? {} : { contextBudget }),
                 // Scoped refresh: when the Run touches a new path, gap the loader up to that
-                // directory so a subdirectory AGENTS.md is injected too.
-                resolveProjectGuidance: async (touched) => {
+                // directory so a subdirectory AGENTS.md is injected too. Only files not in
+                // the launch block are rendered as an update, so the cached prefix survives.
+                resolveProjectGuidance: async (touched, knownSources) => {
                     const loader = createGuidanceLoader({ workspaceRoot: options.workspaceRoot });
                     const seen = new Set();
                     const blocks = [];
@@ -460,11 +465,56 @@ export async function selectRuntime(options) {
                             blocks.push(block);
                         }
                     }
-                    if (blocks.length === 0)
-                        return null;
+                    const blockPaths = new Set(blocks.map((block) => block.path));
+                    const knownPresent = [];
+                    const removed = [];
+                    for (const source of knownSources) {
+                        if (blockPaths.has(source.path))
+                            continue;
+                        // A known source missing from discovery is either gone or unreadable.
+                        // Check existence explicitly; only a confirmed ENOENT withdraws a rule.
+                        const inspected = await loader.inspectSource(source.path);
+                        if (inspected.kind === "missing") {
+                            removed.push(source.path);
+                            continue;
+                        }
+                        if (inspected.kind === "present") {
+                            const directory = path.dirname(source.path);
+                            const relative = path.relative(options.workspaceRoot, directory);
+                            knownPresent.push({
+                                path: source.path,
+                                directory,
+                                depth: relative.length === 0 ? 0 : relative.split(path.sep).length,
+                                text: inspected.text,
+                                sha256: inspected.sha256,
+                                bytes: inspected.bytes,
+                            });
+                        }
+                    }
+                    const sortBlocks = (list) => [...list].sort((left, right) => {
+                        if (left.depth !== right.depth)
+                            return left.depth - right.depth;
+                        return left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
+                    });
+                    const allBlocks = sortBlocks([...blocks, ...knownPresent]);
+                    const byPath = new Map(allBlocks.map((block) => [block.path, block]));
+                    const select = (ids) => ids
+                        .map((id) => byPath.get(id.path))
+                        .filter((block) => block !== undefined);
+                    const sources = allBlocks.map((block) => ({
+                        path: block.path,
+                        sha256: block.sha256,
+                    }));
+                    const diff = diffGuidanceSources(sources, knownSources);
+                    const added = select(diff.added);
+                    const changed = select(diff.changed);
                     return {
-                        text: renderGuidanceBlock(blocks),
-                        sources: blocks.map((block) => block.path),
+                        text: renderGuidanceBlock(allBlocks),
+                        sources,
+                        updateText: renderGuidanceUpdateBlock({ added, changed, removed }),
+                        addedSources: diff.added,
+                        changedSources: diff.changed,
+                        removedSources: removed,
                     };
                 },
             }),
@@ -577,6 +627,7 @@ async function loadGuidance(workspaceRoot) {
         summary: {
             kind: "loaded",
             files: loaded.blocks.map((b) => b.path),
+            sources: loaded.blocks.map((b) => ({ path: b.path, sha256: b.sha256 })),
             bytes: loaded.totalBytes,
         },
     };

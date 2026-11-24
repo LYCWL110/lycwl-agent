@@ -469,7 +469,7 @@ export class RuntimeCoordinator {
             callHistory: [],
             newInputSinceLastCall: false,
             touchedPaths: [],
-            guidanceSources: new Set(),
+            guidanceSources: new Map((this.#deps.initialGuidanceSources ?? []).map((source) => [source.path, source.sha256])),
             guidanceText: projectContext ?? null,
             eventTail: Promise.resolve(),
             replanRequested: false,
@@ -1162,41 +1162,49 @@ export class RuntimeCoordinator {
         });
     }
     /**
-     * Replace the injected guidance turn when newly touched paths bring additional
-     * sources into scope.
+     * Append guidance discovered after the launch block.
      *
-     * The previous guidance turn is replaced in place rather than appended, so the
-     * history does not accumulate a copy per round. A resolver failure keeps the
-     * existing text: guidance is helpful context, and losing it mid-Run would be a
-     * silent behaviour change.
+     * The launch block stays byte-identical so the cached prefix survives. New
+     * sources arrive as a separate `[project-guidance-update]` user turn; the
+     * update lists the new files and states that earlier guidance remains in
+     * force. Appending at the end changes no earlier message.
+     *
+     * A resolver failure keeps the existing text: guidance is helpful context, and
+     * losing it mid-Run would be a silent behaviour change.
      */
     async #refreshGuidance(context) {
         const resolver = this.#deps.resolveProjectGuidance;
-        if (resolver === undefined || context.touchedPaths.length === 0)
+        if (resolver === undefined)
             return;
         let resolved;
+        const known = [...context.guidanceSources].map(([path, sha256]) => ({ path, sha256 }));
         try {
-            resolved = await resolver(context.touchedPaths);
+            resolved = await resolver(context.touchedPaths, known);
         }
         catch {
             return;
         }
-        if (resolved === null || resolved.text.length === 0)
+        if (resolved === null)
             return;
-        const hasNewSource = resolved.sources.some((source) => !context.guidanceSources.has(source));
-        if (!hasNewSource)
-            return;
-        context.guidanceSources = new Set(resolved.sources);
-        context.guidanceText = resolved.text;
-        // Replace the first turn when it is the guidance block; otherwise insert one
-        // before the task so the ordering contract stays "material, then task".
-        const first = context.conversation[0];
-        const isGuidanceTurn = first !== undefined && first.kind === "user" && first.text.includes("[project-guidance]");
-        if (isGuidanceTurn) {
-            context.conversation[0] = { kind: "user", text: resolved.text };
-            return;
+        if (resolved.sources.length > 0 || resolved.removedSources.length > 0) {
+            context.guidanceText = resolved.text.length === 0 ? null : resolved.text;
         }
-        context.conversation.unshift({ kind: "user", text: resolved.text });
+        const changes = [...resolved.addedSources, ...resolved.changedSources];
+        const changeCount = changes.length + resolved.removedSources.length;
+        // With no guidance in the launch block, the first discovery is the normal
+        // guidance block, not an "update" that claims earlier guidance exists.
+        const updateText = context.guidanceSources.size === 0 &&
+            resolved.changedSources.length === 0 &&
+            resolved.removedSources.length === 0
+            ? resolved.text
+            : resolved.updateText;
+        if (changeCount === 0 || updateText.length === 0)
+            return;
+        for (const source of changes)
+            context.guidanceSources.set(source.path, source.sha256);
+        for (const path of resolved.removedSources)
+            context.guidanceSources.delete(path);
+        context.conversation.push({ kind: "user", text: updateText });
     }
     /**
      * Estimate the prompt and compact when it exceeds the trigger.
@@ -2246,15 +2254,10 @@ export class RuntimeCoordinator {
     #result(context, status, text, safeCode) {
         this.#clearBudgetTimer(context);
         if (status !== "waiting") {
-            // Carry the actual conversation, including tool pairs and compaction.
-            // Current project guidance is injected afresh at the next Run boundary.
-            const [first, ...rest] = context.conversation;
-            this.#conversation =
-                first?.kind === "user" &&
-                    context.guidanceText !== null &&
-                    first.text === context.guidanceText
-                    ? rest
-                    : [...context.conversation];
+            // Launch material and guidance updates are injected afresh at the next Run
+            // boundary. Carrying them as history would duplicate the rules and, for
+            // guidance, defeat the prefix cache on the next request.
+            this.#conversation = context.conversation.filter((item) => !(item.kind === "user" && isLaunchMaterial(item.text)));
         }
         const result = {
             status,
@@ -2399,6 +2402,17 @@ function snapshotTargets(args) {
         });
     }
     return [];
+}
+/** Markers that identify per-Run launch material, not carried conversation. */
+const LAUNCH_MATERIAL_MARKERS = [
+    "[project-guidance]",
+    "[project-guidance-update]",
+    "[project-skill-catalog]",
+    "[skill-activation]",
+    "[mcp-catalog]",
+];
+function isLaunchMaterial(text) {
+    return LAUNCH_MATERIAL_MARKERS.some((marker) => text.startsWith(marker));
 }
 /** File paths named by the patch markers the apply_patch tool accepts. */
 function patchTargets(patch) {

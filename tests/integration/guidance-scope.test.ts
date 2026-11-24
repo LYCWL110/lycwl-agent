@@ -176,10 +176,41 @@ describe("subdirectory guidance reaches the model", () => {
       assert.match(firstText, /root rule/);
       assert.equal(firstText.includes("api rule"), false, "nested rule must not be loaded yet");
 
-      // After touching src/api/handler.ts, the nested rule is injected.
+      // After touching src/api/handler.ts, the nested rule is injected as an update.
       const secondMessages = bodies[1]?.["messages"] as readonly Record<string, unknown>[];
       const secondText = secondMessages.map(messageText).join("\n");
       assert.match(secondText, /api rule: use UTC/, "nested guidance must be injected");
+
+      // The launch block stays byte-identical so the cached prefix can be reused.
+      assert.deepEqual(
+        secondMessages[0],
+        firstMessages[0],
+        "launch guidance must stay byte-identical",
+      );
+      const rootGuidanceTurns = secondMessages.filter((m) =>
+        messageText(m).includes("[project-guidance]"),
+      );
+      const updateTurns = secondMessages.filter((m) =>
+        messageText(m).includes("[project-guidance-update]"),
+      );
+      assert.equal(rootGuidanceTurns.length, 1, "launch guidance must not be duplicated");
+      assert.equal(updateTurns.length, 1, "new guidance must be one update turn");
+      assert.match(messageText(updateTurns[0] ?? {}), /api rule: use UTC/);
+      assert.equal((secondText.match(/root rule/gu) ?? []).length, 1);
+      assert.match(messageText(secondMessages.at(-1) ?? {}), /\[project-guidance-update\]/);
+
+      // A later Run re-injects guidance fresh; the update block is not history.
+      const second = await selection.coordinator.run("continue");
+      assert.equal(second.status, "completed");
+      const thirdMessages = bodies[2]?.["messages"] as readonly Record<string, unknown>[];
+      assert.notEqual(thirdMessages, undefined);
+      const thirdText = thirdMessages.map(messageText).join("\n");
+      assert.equal(
+        thirdText.includes("api rule: use UTC"),
+        false,
+        "guidance updates must not be carried into a new Run",
+      );
+      assert.equal((thirdText.match(/root rule/gu) ?? []).length, 1);
 
       // It is still untrusted material, not a system prompt. The system field holds
       // the fixed Harness rules, so the assertion is that the guidance is absent.
@@ -188,10 +219,6 @@ describe("subdirectory guidance reaches the model", () => {
         typeof systemField === "string" && systemField.includes("api rule: use UTC"),
         false,
       );
-      const guidanceTurns = secondMessages.filter((m) =>
-        messageText(m).includes("[project-guidance]"),
-      );
-      assert.equal(guidanceTurns.length, 1, "guidance must be replaced, not duplicated");
     } finally {
       await closeRuntimeSelections();
       await rm(workspace, { recursive: true, force: true });

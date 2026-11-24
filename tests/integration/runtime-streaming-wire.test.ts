@@ -3,13 +3,12 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-
-import { createFileVault } from "../../src/adapters/windows/file-credential-vault.ts";
 import type {
   ProviderHttpRequest,
   ProviderHttpResult,
 } from "../../src/adapters/providers/provider-http.ts";
 import type { SseEvent } from "../../src/adapters/providers/provider-sse.ts";
+import { createFileVault } from "../../src/adapters/windows/file-credential-vault.ts";
 import { closeRuntimeSelections, selectRuntime } from "../fakes/owned-runtime.ts";
 
 const SETTINGS = {

@@ -28,6 +28,34 @@ export const PROJECT_GUIDANCE_LIMITS = Object.freeze({
   maxDepth: 64,
 });
 
+/** Identity of one guidance source, independent of its text. */
+export type GuidanceSourceIdentity = Readonly<{ path: string; sha256: string }>;
+
+/**
+ * Compare currently observed sources with the versions already injected.
+ *
+ * Absence is not removal: the resolver only sees directories touched in this
+ * iteration, so a known path can be missing because it was not observed, not
+ * because the file was deleted. Deletion is therefore not inferred here.
+ */
+export function diffGuidanceSources(
+  current: readonly GuidanceSourceIdentity[],
+  known: readonly GuidanceSourceIdentity[],
+): Readonly<{
+  added: readonly GuidanceSourceIdentity[];
+  changed: readonly GuidanceSourceIdentity[];
+}> {
+  const previous = new Map(known.map((source) => [source.path, source.sha256]));
+  const added: GuidanceSourceIdentity[] = [];
+  const changed: GuidanceSourceIdentity[] = [];
+  for (const source of current) {
+    const before = previous.get(source.path);
+    if (before === undefined) added.push(source);
+    else if (before !== source.sha256) changed.push(source);
+  }
+  return { added, changed };
+}
+
 export type ProjectGuidanceFailure =
   | "invalid_workspace_root"
   | "invalid_target_path"

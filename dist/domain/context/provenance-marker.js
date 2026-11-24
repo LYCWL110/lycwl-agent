@@ -18,6 +18,7 @@
  */
 export const PROVENANCE_MARKERS = Object.freeze({
     guidance: "[project-guidance]",
+    guidanceUpdate: "[project-guidance-update]",
     skillCatalog: "[project-skill-catalog]",
     skillActivation: "[skill-activation]",
     mcpCatalog: "[mcp-catalog]",

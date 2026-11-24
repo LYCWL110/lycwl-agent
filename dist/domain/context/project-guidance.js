@@ -25,6 +25,26 @@ export const PROJECT_GUIDANCE_LIMITS = Object.freeze({
     maxDepth: 64,
 });
 /**
+ * Compare currently observed sources with the versions already injected.
+ *
+ * Absence is not removal: the resolver only sees directories touched in this
+ * iteration, so a known path can be missing because it was not observed, not
+ * because the file was deleted. Deletion is therefore not inferred here.
+ */
+export function diffGuidanceSources(current, known) {
+    const previous = new Map(known.map((source) => [source.path, source.sha256]));
+    const added = [];
+    const changed = [];
+    for (const source of current) {
+        const before = previous.get(source.path);
+        if (before === undefined)
+            added.push(source);
+        else if (before !== source.sha256)
+            changed.push(source);
+    }
+    return { added, changed };
+}
+/**
  * Compute the candidate `AGENTS.md` paths for a target path.
  *
  * `existingNames` is the set of entry names that actually exist in each

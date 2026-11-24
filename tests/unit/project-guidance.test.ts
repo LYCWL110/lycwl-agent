@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   checkGuidanceBudget,
+  diffGuidanceSources,
   discoverProjectGuidance,
   guidanceApplicationOrder,
   PROJECT_GUIDANCE_LIMITS,
@@ -213,5 +214,35 @@ describe("guidance size budget", () => {
   it("rejects a negative or non-integer size", () => {
     assert.deepEqual(checkGuidanceBudget([-1]), { ok: false, code: "invalid_size" });
     assert.deepEqual(checkGuidanceBudget([1.5]), { ok: false, code: "invalid_size" });
+  });
+});
+
+describe("guidance source diff", () => {
+  it("reports new and changed sources but not unchanged ones", () => {
+    const diff = diffGuidanceSources(
+      [
+        { path: "/w/AGENTS.md", sha256: "a" },
+        { path: "/w/src/AGENTS.md", sha256: "c" },
+        { path: "/w/src/api/AGENTS.md", sha256: "d" },
+      ],
+      [
+        { path: "/w/AGENTS.md", sha256: "a" },
+        { path: "/w/src/AGENTS.md", sha256: "b" },
+      ],
+    );
+    assert.deepEqual(diff.added, [{ path: "/w/src/api/AGENTS.md", sha256: "d" }]);
+    assert.deepEqual(diff.changed, [{ path: "/w/src/AGENTS.md", sha256: "c" }]);
+  });
+
+  it("does not infer removal from a path that was not observed", () => {
+    const diff = diffGuidanceSources(
+      [{ path: "/w/AGENTS.md", sha256: "a" }],
+      [
+        { path: "/w/AGENTS.md", sha256: "a" },
+        { path: "/w/src/AGENTS.md", sha256: "b" },
+      ],
+    );
+    assert.deepEqual(diff.added, []);
+    assert.deepEqual(diff.changed, []);
   });
 });
