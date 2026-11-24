@@ -1,6 +1,6 @@
 # ADR-0042: Write Tools Behind An Explicit Opt-In
 
-- Status: Implemented and verified locally; no real vendor request made
+- Status: Superseded by ADR-0090 (2026-11-24)
 - Date: 2026-11-05
 - Related: ADR-0041; C02; S02
 

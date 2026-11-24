@@ -15,6 +15,7 @@ import { createTuiController } from "../tui/controller.js";
 import { startTui } from "../tui/main.js";
 import { hasProvider, startConfigFlow } from "./config-flow.js";
 import { saveMcpChange } from "./mcp-save.js";
+import { permissionModeFromArgs } from "./permission-mode.js";
 import { createClipboardReader, hostPlatform, platformDirectories } from "./platform.js";
 import { describeSelection, selectRuntime } from "./runtime-selection.js";
 import { canResumeSession, selectSessionLaunch } from "./session-launch.js";
@@ -28,15 +29,15 @@ import { undoSessionChanges } from "./undo.js";
  * prints its reason before the TUI takes the screen.
  */
 const args = process.argv.slice(2);
+const permissionMode = permissionModeFromArgs(args);
 if (args.includes("--help") || args.includes("-h")) {
     process.stdout.write([
         "lycwl - local agent TUI",
         "",
         "Usage:",
-        "  lycwl               start the interactive TUI (read-only)",
-        "  lycwl --write       allow file mutations, each requiring approval",
+        "  lycwl               start the interactive TUI (writes and shell enabled)",
+        "  lycwl --read-only   disable writes and shell; read and search only",
         "  lycwl --skills      enable the .agents/skills catalog (default off)",
-        "  lycwl --shell       enable shell and background commands (implies --write)",
         "  lycwl --resume ID   explicitly continue a recorded conversation",
         "  lycwl --setup       show configuration status and file locations",
         "  lycwl --help        show this help",
@@ -45,14 +46,15 @@ if (args.includes("--help") || args.includes("-h")) {
         "With no configured Provider the TUI runs a demo runtime that performs no",
         "network, credential, process or write access.",
         "",
-        "Shell is disabled unless --shell is given. Every command needs its own",
-        `approval and runs with your full ${hostPlatform === "linux" ? "Linux" : "Windows"} user permissions: v1 has no sandbox.`,
+        "Writes and shell are enabled by default. Every write and every command still",
+        "needs its own approval, and an approved command runs with your full",
+        `${hostPlatform === "linux" ? "Linux" : "Windows"} user permissions: v1 has no sandbox.`,
         "",
         "Skills are disabled unless --skills is given; enabling them grants no",
         "read permission beyond ordinary file access.",
         "",
-        "Write tools are disabled unless --write is given. Every write still needs",
-        "its own approval in the TUI.",
+        "--write and --shell are accepted for compatibility but ignored. Use",
+        "--read-only to opt out of writes and process execution.",
         "",
         "An interactive terminal is required.",
         "",
@@ -87,6 +89,9 @@ const clipboardReader = createClipboardReader({
 if (args.includes("--setup")) {
     process.stdout.write(`${(await describeConfiguration(await configStore.load())).join("\n")}\n`);
     process.exit(0);
+}
+if (permissionMode === "full" && (args.includes("--write") || args.includes("--shell"))) {
+    process.stderr.write("note: --write and --shell are ignored; writes and shell are enabled by default. Use --read-only to opt out.\n");
 }
 const launch = selectSessionLaunch(args);
 if (!launch.ok) {
@@ -178,9 +183,9 @@ async function startSession() {
         stateDirectory: dataDirectory,
         settings: current,
         hasSettings: loadedNow.ok,
-        enableWrites: args.includes("--write") || args.includes("--shell"),
+        enableWrites: permissionMode === "full",
         enableSkills: args.includes("--skills"),
-        enableProcesses: args.includes("--shell"),
+        enableProcesses: permissionMode === "full",
         sessionId,
         // A declared MCP server must be approved before its process is spawned, which
         // is before the TUI exists. This gate is denial-by-default and is not remembered
@@ -357,11 +362,7 @@ async function startSession() {
     }), {
         ...(chosen.kind === "real" ? { modelLabel: chosen.config.model } : {}),
         readClipboardImage: () => clipboardReader.readImage(),
-        modeLabel: args.includes("--shell")
-            ? "shell"
-            : args.includes("--write")
-                ? "workspace-write"
-                : "read-only",
+        modeLabel: permissionMode,
         onConfigRequest: openConfig,
         sessionId,
         onSessionRequest: (requestedId) => {

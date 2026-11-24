@@ -330,6 +330,7 @@ export async function selectRuntime(options) {
             kind: "real",
             config: effectiveConfig,
             enableWrites,
+            enableProcesses,
             warnings: [
                 ...assembly.warnings,
                 ...mcpWarnings,
@@ -505,11 +506,20 @@ function restoredProtocolState(events, runId) {
 /** Human-readable launch summary, printed before the TUI takes the screen. */
 export function describeSelection(selection) {
     if (selection.kind === "real") {
+        const permission = !selection.enableWrites
+            ? "read-only"
+            : selection.enableProcesses
+                ? "full (writes and shell)"
+                : "workspace-write";
         return [
             `mode: real provider`,
             `model: ${selection.config.model}`,
             `endpoint: ${selection.config.baseUrl}`,
+            `permissions: ${permission}`,
             `writes: ${selection.enableWrites ? "enabled (every write requires approval)" : "disabled"}`,
+            `processes: ${selection.enableProcesses
+                ? "enabled (every command requires approval; no sandbox)"
+                : "disabled"}`,
             ...(selection.skills.kind === "loaded"
                 ? [`skills: ${selection.skills.count} catalogued (~${selection.skills.tokens} tokens)`]
                 : selection.skills.kind === "failed"

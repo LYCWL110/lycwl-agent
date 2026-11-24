@@ -1,6 +1,6 @@
 # ADR-0058: Enabling Shell Behind An Explicit Flag
 
-- Status: Wired and verified locally; **G02 remains OPEN**
+- Status: Superseded by ADR-0090 (2026-11-24); **G02 remains OPEN**
 - Date: 2026-11-05
 - Related: ADR-0042 (write opt-in), V1_BASELINE section 5, STAGE2D_PROCESS_G02
 

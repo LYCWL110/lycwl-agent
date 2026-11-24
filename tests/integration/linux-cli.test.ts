@@ -46,12 +46,13 @@ describe("Linux lycwl command", { skip: process.platform !== "linux" }, () => {
       timeout: 10_000,
     });
     assert.equal(version.stdout.trim(), "lycwl-agent 0.1.0");
-    const help = await execute("lycwl", ["--shell", "--skills", "--help"], {
+    const help = await execute("lycwl", ["--read-only", "--skills", "--help"], {
       cwd: workspace,
       env: environment,
       timeout: 10_000,
     });
-    assert.match(help.stdout, /lycwl --shell/);
+    assert.match(help.stdout, /lycwl --read-only/);
+    assert.match(help.stdout, /writes and shell enabled/);
     assert.match(help.stdout, /lycwl --resume ID/);
     assert.match(help.stdout, /Linux user permissions/);
   });
@@ -87,15 +88,17 @@ describe("Linux lycwl command", { skip: process.platform !== "linux" }, () => {
     );
   });
 
-  it("requires a terminal when lycwl starts an interactive session", async () => {
-    await assert.rejects(
-      execute("lycwl", ["--write"], { cwd: workspace, env: environment, timeout: 10_000 }),
-      (error) => {
-        const failure = error as Error & { code: number; stderr: string };
-        assert.equal(failure.code, 1);
-        assert.match(failure.stderr, /lycwl requires an interactive terminal/);
-        return true;
-      },
-    );
+  it("requires a terminal in both permission modes", async () => {
+    for (const args of [[], ["--read-only"]]) {
+      await assert.rejects(
+        execute("lycwl", args, { cwd: workspace, env: environment, timeout: 10_000 }),
+        (error) => {
+          const failure = error as Error & { code: number; stderr: string };
+          assert.equal(failure.code, 1);
+          assert.match(failure.stderr, /lycwl requires an interactive terminal/);
+          return true;
+        },
+      );
+    }
   });
 });

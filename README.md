@@ -4,8 +4,9 @@ A local coding agent for Windows and Linux. It runs in a terminal and gives a
 model permission-controlled tools: read and search files, edit them, run shell
 commands, and talk to LSP and MCP servers.
 
-Every write and every command is approved separately. Nothing is sandboxed: an
-approved command runs with your full user permissions.
+Writes and shell are enabled by default. Every write and every command is
+approved separately. Nothing is sandboxed: an approved command runs with your
+full user permissions.
 
 ## Requirements
 
@@ -44,14 +45,16 @@ Run `lycwl` inside the project you want to work on; that directory is the
 workspace.
 
 ```
-lycwl                  read-only
-lycwl --write          allow file changes, each approved
-lycwl --shell          allow shell and background commands (implies --write)
+lycwl                  read, write and shell, each action approved
+lycwl --read-only      disable writes and shell; read and search only
 lycwl --skills         enable the .agents/skills catalog
 lycwl --resume <id>    continue a recorded conversation
 lycwl --setup          show configuration status and file locations
 lycwl --help
 ```
+
+`--write` and `--shell` are accepted for compatibility but ignored; the default
+already enables both. Use `--read-only` to opt out.
 
 Type `/` for commands (`/config`, `/model`, `/session`, `/new`, `/cancel`,
 `/quit`). Each launch starts a new conversation; older ones stay on disk until
