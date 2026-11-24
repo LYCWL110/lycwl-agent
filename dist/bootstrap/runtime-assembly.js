@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { AnthropicProvider, } from "../adapters/providers/anthropic-provider.js";
 import { OpenAiChatProvider } from "../adapters/providers/openai-chat-provider.js";
 import { OpenAiResponsesProvider } from "../adapters/providers/openai-responses-provider.js";
-import { providerHttpsPost } from "../adapters/providers/provider-http.js";
+import { providerHttpsPost, providerHttpsPostStream, } from "../adapters/providers/provider-http.js";
 import { createFileVault } from "../adapters/windows/file-credential-vault.js";
 import { protocolEndpoint, readProviderConfig, } from "../domain/config/provider-config.js";
 import { assertProtectedValue, ProtectedDeliveryError, } from "../services/security/guarded-delivery.js";
@@ -144,7 +144,7 @@ export async function assembleRuntime(options) {
             return null;
         return read.value.secret;
     };
-    const post = async (request) => {
+    const guardRequest = async (request) => {
         await refreshOwnedKeys();
         if (prepared !== null) {
             const current = await vault.readCurrent(reference.reference, reference.purpose);
@@ -166,7 +166,25 @@ export async function assembleRuntime(options) {
         }
         if (request.signal?.aborted)
             return { ok: false, code: "cancelled" };
+        return null;
+    };
+    const post = async (request) => {
+        const blocked = await guardRequest(request);
+        if (blocked !== null)
+            return blocked;
         return (options.post ?? providerHttpsPost)(request);
+    };
+    const streamPost = async (request, onEvent) => {
+        const blocked = await guardRequest(request);
+        if (blocked !== null)
+            return blocked;
+        if (options.streamPost !== undefined)
+            return options.streamPost(request, onEvent);
+        // A test that injected only the non-streaming transport keeps using it. The
+        // adapter sees a non-SSE body and falls back to its full-response parser.
+        if (options.post !== undefined)
+            return options.post(request);
+        return providerHttpsPostStream(request, onEvent);
     };
     const provider = config.protocol === "openai_responses"
         ? new OpenAiResponsesProvider({
@@ -181,6 +199,7 @@ export async function assembleRuntime(options) {
                 : { reasoningEffort: config.reasoningEffort }),
             tools: options.toolDefinitions,
             post,
+            streamPost,
             ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
         })
         : config.protocol === "openai_chat"
@@ -195,6 +214,7 @@ export async function assembleRuntime(options) {
                     : { reasoningEffort: config.reasoningEffort }),
                 tools: options.toolDefinitions,
                 post,
+                streamPost,
                 ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
             })
             : new AnthropicProvider({
@@ -208,6 +228,7 @@ export async function assembleRuntime(options) {
                     : { reasoningEffort: config.reasoningEffort }),
                 tools: options.toolDefinitions,
                 post,
+                streamPost,
                 ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
             });
     return {

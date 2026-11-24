@@ -512,12 +512,12 @@ function documentLines(
       entry.kind === "user"
         ? `you${entry.status === null ? "" : ` · ${entry.status}`}`
         : entry.kind === "assistant"
-          ? "agent"
+          ? `agent${entry.status === "streaming" ? " · streaming" : ""}`
           : entry.kind === "tool"
             ? `tool${entry.status === null ? "" : `·${entry.status}`}`
             : "sys";
     append(`▌ ${label}`, role, true);
-    append(entry.text, "dim");
+    append(entry.status === "streaming" ? `${entry.text}▍` : entry.text, "dim");
     append("", "faint");
   }
   if (view.todo !== null) {

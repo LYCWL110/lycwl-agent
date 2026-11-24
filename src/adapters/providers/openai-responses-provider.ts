@@ -4,6 +4,7 @@ import type {
   ModelProvider,
   ProviderCompletion,
   ProviderConversationItem,
+  ProviderDelta,
   ProviderRequest,
   ProviderToolCall,
 } from "../../ports/model-provider.ts";
@@ -12,6 +13,7 @@ import {
   type ProviderHttpRequest,
   type ProviderHttpResult,
   providerHttpsPost,
+  providerHttpsPostStream,
 } from "./provider-http.ts";
 import {
   classifyHttpStatus,
@@ -20,6 +22,7 @@ import {
   requireString,
   transportFailure,
 } from "./provider-response.ts";
+import type { SseEvent } from "./provider-sse.ts";
 
 /**
  * OpenAI Responses adapter.
@@ -59,16 +62,28 @@ export type OpenAiResponsesAdapterOptions = Readonly<{
   /** Trusted Harness rules only; never project text. */
   instructions?: string;
   post?: (input: ProviderHttpRequest) => Promise<ProviderHttpResult>;
+  /** Injected SSE transport for tests. Production uses the real streaming POST. */
+  streamPost?: (
+    input: ProviderHttpRequest,
+    onEvent: (event: SseEvent) => void,
+  ) => Promise<ProviderHttpResult>;
   trustedCaPem?: string;
 }>;
 
 export class OpenAiResponsesProvider implements ModelProvider {
   readonly #options: OpenAiResponsesAdapterOptions;
   readonly #post: (input: ProviderHttpRequest) => Promise<ProviderHttpResult>;
+  readonly #streamPost: (
+    input: ProviderHttpRequest,
+    onEvent: (event: SseEvent) => void,
+  ) => Promise<ProviderHttpResult>;
 
   constructor(options: OpenAiResponsesAdapterOptions) {
     this.#options = options;
     this.#post = options.post ?? providerHttpsPost;
+    const post = options.post;
+    this.#streamPost =
+      options.streamPost ?? (post === undefined ? providerHttpsPostStream : (input) => post(input));
   }
 
   async complete(request: ProviderRequest): Promise<ProviderCompletion> {
@@ -119,6 +134,69 @@ export class OpenAiResponsesProvider implements ModelProvider {
     return interpretResponsesResponse(posted.bodyText);
   }
 
+  async stream(
+    request: ProviderRequest,
+    onDelta: (delta: ProviderDelta) => void,
+  ): Promise<ProviderCompletion> {
+    if (request.signal?.aborted) return { kind: "cancelled", safeCode: "provider_cancelled" };
+    const apiKey = await this.#resolveKey();
+    if (apiKey === null) {
+      return { kind: "authentication_failure", safeCode: "openai_responses_key_not_configured" };
+    }
+    if (request.signal?.aborted) return { kind: "cancelled", safeCode: "provider_cancelled" };
+
+    const state = createResponsesStreamState();
+    const posted = await this.#streamPost(
+      {
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
+        url: protocolEndpoint(this.#options.baseUrl, "openai_responses"),
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          authorization: `Bearer ${apiKey}`,
+        },
+        bodyText: JSON.stringify(
+          buildResponsesRequestBody(
+            request.compaction === undefined
+              ? this.#options
+              : {
+                  ...this.#options,
+                  tools: [],
+                  maxOutputTokens: Math.min(
+                    this.#options.maxOutputTokens ?? OPENAI_RESPONSES_DEFAULTS.maxOutputTokens,
+                    request.compaction.maxOutputTokens,
+                  ),
+                },
+            request.conversation,
+            true,
+          ),
+        ),
+        ...(this.#options.trustedCaPem === undefined
+          ? {}
+          : { trustedCaPem: this.#options.trustedCaPem }),
+      },
+      (event) => {
+        applyResponsesStreamEvent(state, event, onDelta);
+      },
+    );
+
+    if (!posted.ok) return transportFailure(posted.code as ProviderHttpFailure);
+
+    const statusOutcome = classifyHttpStatus(
+      posted.status,
+      posted.headers,
+      OPENAI_RESPONSES_DEFAULTS.providerLabel,
+    );
+    if (statusOutcome !== null) return statusOutcome;
+
+    // A provider that ignored `stream` answered with a normal JSON body.
+    if (posted.bodyText.length > 0) return interpretResponsesResponse(posted.bodyText);
+    if (posted.eventStream !== true) {
+      return { kind: "invalid_response", safeCode: "openai_responses_stream_missing" };
+    }
+    return finishResponsesStream(state);
+  }
+
   async #resolveKey(): Promise<string | null> {
     try {
       const key = await this.#options.resolveApiKey();
@@ -134,10 +212,12 @@ export class OpenAiResponsesProvider implements ModelProvider {
 export function buildResponsesRequestBody(
   options: OpenAiResponsesAdapterOptions,
   conversation: readonly ProviderConversationItem[],
+  stream = false,
 ): Readonly<Record<string, unknown>> {
   return {
     model: options.model,
     max_output_tokens: options.maxOutputTokens ?? OPENAI_RESPONSES_DEFAULTS.maxOutputTokens,
+    ...(stream ? { stream: true } : {}),
     ...(options.reasoningEffort === undefined || options.reasoningEffort === "default"
       ? {}
       : { reasoning: { effort: options.reasoningEffort } }),
@@ -329,4 +409,93 @@ export function interpretResponsesResponse(bodyText: string): ProviderCompletion
     text: textParts.length === 0 ? null : textParts.join(""),
     ...(usage === undefined ? {} : { usage }),
   };
+}
+
+export type ResponsesStreamState = {
+  text: string;
+  completed: Record<string, unknown> | null;
+  failure: string | null;
+  error: string | null;
+};
+
+export function createResponsesStreamState(): ResponsesStreamState {
+  return { text: "", completed: null, failure: null, error: null };
+}
+
+/**
+ * Apply one Responses SSE event.
+ *
+ * Text deltas are forwarded for display. The authoritative completion is the
+ * `response.completed` payload, which is run through the same non-streaming
+ * interpreter as a full response. That keeps tool-call and usage handling in one
+ * place instead of duplicating it for the stream path.
+ */
+export function applyResponsesStreamEvent(
+  state: ResponsesStreamState,
+  event: SseEvent,
+  onDelta: (delta: ProviderDelta) => void,
+): void {
+  if (state.error !== null || state.failure !== null) return;
+  if (event.data === "[DONE]") return;
+  const parsed = parseJsonBody(event.data);
+  if (!parsed.ok || !isRecord(parsed.value)) {
+    state.error = "openai_responses_stream_not_json";
+    return;
+  }
+  const record = parsed.value;
+  const type = event.event ?? (typeof record["type"] === "string" ? record["type"] : null);
+
+  if (type === "response.output_text.delta") {
+    const delta = record["delta"];
+    if (typeof delta !== "string") {
+      state.error = "openai_responses_stream_delta_invalid";
+      return;
+    }
+    if (delta.length > 0) {
+      state.text += delta;
+      onDelta({ kind: "text", text: delta });
+    }
+    return;
+  }
+
+  if (type === "response.completed") {
+    const response = record["response"];
+    if (isRecord(response)) {
+      state.completed = response;
+    } else {
+      state.completed = record;
+    }
+    return;
+  }
+
+  if (type === "response.incomplete") {
+    state.failure = "openai_responses_incomplete";
+    return;
+  }
+
+  if (type === "response.failed") {
+    state.failure = "openai_responses_failed";
+    return;
+  }
+
+  if (type === "error") {
+    state.error = "openai_responses_stream_error";
+    return;
+  }
+
+  // `response.created`, `response.in_progress`, output-item events and future
+  // event types are ignored; `response.completed` carries the final object.
+}
+
+export function finishResponsesStream(state: ResponsesStreamState): ProviderCompletion {
+  if (state.error !== null) {
+    return { kind: "invalid_response", safeCode: state.error };
+  }
+  if (state.failure !== null) {
+    return { kind: "invalid_response", safeCode: state.failure };
+  }
+  if (state.completed === null) {
+    return { kind: "invalid_response", safeCode: "openai_responses_stream_incomplete" };
+  }
+  return interpretResponsesResponse(JSON.stringify(state.completed));
 }

@@ -46,6 +46,30 @@ function view(overrides: Partial<Parameters<typeof deriveView>[0]> = {}): TuiVie
 }
 
 describe("transcript derivation", () => {
+  it("appends an ephemeral streaming entry without making it durable", async () => {
+    const live = view({ streaming: { text: "hel" } });
+    assert.equal(live.transcript.length, 1);
+    assert.equal(live.transcript[0]?.kind, "assistant");
+    assert.equal(live.transcript[0]?.status, "streaming");
+    assert.equal(live.transcript[0]?.text, "hel");
+    assert.equal(live.activity, "working");
+
+    const final = await build([
+      record("model_response_validated", {
+        kind: "model_response_validated",
+        modelRequestId: "m1",
+        attemptNo: 1,
+        toolCallCount: 0,
+        text: "hello",
+        toolCalls: [],
+      }),
+    ]);
+    const done = view({ events: final });
+    assert.equal(done.transcript.length, 1);
+    assert.equal(done.transcript[0]?.status, null);
+    assert.equal(done.transcript[0]?.text, "hello");
+  });
+
   it("updates a single tool row from requested to running and finished with details", async () => {
     const received = record("tool_call_received", {
       kind: "tool_call_received",

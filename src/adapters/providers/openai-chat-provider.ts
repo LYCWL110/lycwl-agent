@@ -4,14 +4,17 @@ import type {
   ModelProvider,
   ProviderCompletion,
   ProviderConversationItem,
+  ProviderDelta,
   ProviderRequest,
   ProviderToolCall,
+  TokenUsage,
 } from "../../ports/model-provider.ts";
 import {
   type ProviderHttpFailure,
   type ProviderHttpRequest,
   type ProviderHttpResult,
   providerHttpsPost,
+  providerHttpsPostStream,
 } from "./provider-http.ts";
 import {
   classifyHttpStatus,
@@ -20,6 +23,7 @@ import {
   requireString,
   transportFailure,
 } from "./provider-response.ts";
+import type { SseEvent } from "./provider-sse.ts";
 
 /**
  * OpenAI Chat Completions adapter.
@@ -60,16 +64,28 @@ export type OpenAiChatAdapterOptions = Readonly<{
   /** Trusted Harness rules only; never project text. */
   system?: string;
   post?: (input: ProviderHttpRequest) => Promise<ProviderHttpResult>;
+  /** Injected SSE transport for tests. Production uses the real streaming POST. */
+  streamPost?: (
+    input: ProviderHttpRequest,
+    onEvent: (event: SseEvent) => void,
+  ) => Promise<ProviderHttpResult>;
   trustedCaPem?: string;
 }>;
 
 export class OpenAiChatProvider implements ModelProvider {
   readonly #options: OpenAiChatAdapterOptions;
   readonly #post: (input: ProviderHttpRequest) => Promise<ProviderHttpResult>;
+  readonly #streamPost: (
+    input: ProviderHttpRequest,
+    onEvent: (event: SseEvent) => void,
+  ) => Promise<ProviderHttpResult>;
 
   constructor(options: OpenAiChatAdapterOptions) {
     this.#options = options;
     this.#post = options.post ?? providerHttpsPost;
+    const post = options.post;
+    this.#streamPost =
+      options.streamPost ?? (post === undefined ? providerHttpsPostStream : (input) => post(input));
   }
 
   async complete(request: ProviderRequest): Promise<ProviderCompletion> {
@@ -120,6 +136,69 @@ export class OpenAiChatProvider implements ModelProvider {
     return interpretChatResponse(posted.bodyText);
   }
 
+  async stream(
+    request: ProviderRequest,
+    onDelta: (delta: ProviderDelta) => void,
+  ): Promise<ProviderCompletion> {
+    if (request.signal?.aborted) return { kind: "cancelled", safeCode: "provider_cancelled" };
+    const apiKey = await this.#resolveKey();
+    if (apiKey === null) {
+      return { kind: "authentication_failure", safeCode: "openai_chat_key_not_configured" };
+    }
+    if (request.signal?.aborted) return { kind: "cancelled", safeCode: "provider_cancelled" };
+
+    const state = createChatStreamState();
+    const posted = await this.#streamPost(
+      {
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
+        url: protocolEndpoint(this.#options.baseUrl, "openai_chat"),
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          authorization: `Bearer ${apiKey}`,
+        },
+        bodyText: JSON.stringify(
+          buildChatRequestBody(
+            request.compaction === undefined
+              ? this.#options
+              : {
+                  ...this.#options,
+                  tools: [],
+                  maxTokens: Math.min(
+                    this.#options.maxTokens ?? OPENAI_CHAT_DEFAULTS.maxTokens,
+                    request.compaction.maxOutputTokens,
+                  ),
+                },
+            request.conversation,
+            true,
+          ),
+        ),
+        ...(this.#options.trustedCaPem === undefined
+          ? {}
+          : { trustedCaPem: this.#options.trustedCaPem }),
+      },
+      (event) => {
+        applyChatStreamData(state, event.data, onDelta);
+      },
+    );
+
+    if (!posted.ok) return transportFailure(posted.code as ProviderHttpFailure);
+
+    const statusOutcome = classifyHttpStatus(
+      posted.status,
+      posted.headers,
+      OPENAI_CHAT_DEFAULTS.providerLabel,
+    );
+    if (statusOutcome !== null) return statusOutcome;
+
+    // A provider that ignored `stream` answered with a normal JSON body.
+    if (posted.bodyText.length > 0) return interpretChatResponse(posted.bodyText);
+    if (posted.eventStream !== true) {
+      return { kind: "invalid_response", safeCode: "openai_chat_stream_missing" };
+    }
+    return finishChatStream(state);
+  }
+
   async #resolveKey(): Promise<string | null> {
     try {
       const key = await this.#options.resolveApiKey();
@@ -135,9 +214,11 @@ export class OpenAiChatProvider implements ModelProvider {
 export function buildChatRequestBody(
   options: OpenAiChatAdapterOptions,
   conversation: readonly ProviderConversationItem[],
+  stream = false,
 ): Readonly<Record<string, unknown>> {
   return {
     model: options.model,
+    ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
     ...(options.reasoningEffort === undefined || options.reasoningEffort === "default"
       ? { max_tokens: options.maxTokens ?? OPENAI_CHAT_DEFAULTS.maxTokens }
       : {
@@ -330,5 +411,178 @@ export function interpretChatResponse(bodyText: string): ProviderCompletion {
     toolCalls,
     text,
     ...(usage === undefined ? {} : { usage }),
+  };
+}
+
+type ChatToolCallState = {
+  id: string | null;
+  name: string | null;
+  arguments: string;
+};
+
+export type ChatStreamState = {
+  text: string;
+  toolCalls: Map<number, ChatToolCallState>;
+  finishReason: string | null;
+  usage: TokenUsage | undefined;
+  done: boolean;
+  error: string | null;
+};
+
+export function createChatStreamState(): ChatStreamState {
+  return {
+    text: "",
+    toolCalls: new Map(),
+    finishReason: null,
+    usage: undefined,
+    done: false,
+    error: null,
+  };
+}
+
+/**
+ * Apply one `data:` frame from a Chat Completions SSE stream.
+ *
+ * Tool-call fragments are collected by index; nothing executes here. The final
+ * JSON is parsed only after the stream ends, so a partial argument string never
+ * reaches the coordinator.
+ */
+export function applyChatStreamData(
+  state: ChatStreamState,
+  data: string,
+  onDelta: (delta: ProviderDelta) => void,
+): void {
+  if (state.error !== null) return;
+  if (data === "[DONE]") {
+    state.done = true;
+    return;
+  }
+  const parsed = parseJsonBody(data);
+  if (!parsed.ok || !isRecord(parsed.value)) {
+    state.error = "openai_chat_stream_not_json";
+    return;
+  }
+  const record = parsed.value;
+  if (isRecord(record["error"])) {
+    state.error = "openai_chat_stream_error";
+    return;
+  }
+
+  const usage = parseOpenAiChatUsage(record);
+  if (usage !== undefined) state.usage = usage;
+
+  const choices = record["choices"];
+  if (choices === undefined) return;
+  if (!Array.isArray(choices)) {
+    state.error = "openai_chat_stream_choices_invalid";
+    return;
+  }
+
+  for (const choice of choices) {
+    if (!isRecord(choice)) {
+      state.error = "openai_chat_stream_choice_invalid";
+      return;
+    }
+    const delta = choice["delta"];
+    if (isRecord(delta)) {
+      const content = delta["content"];
+      if (typeof content === "string") {
+        if (content.length > 0) {
+          state.text += content;
+          onDelta({ kind: "text", text: content });
+        }
+      } else if (content !== null && content !== undefined) {
+        state.error = "openai_chat_stream_content_invalid";
+        return;
+      }
+
+      const rawCalls = delta["tool_calls"];
+      if (rawCalls !== undefined) {
+        if (!Array.isArray(rawCalls)) {
+          state.error = "openai_chat_stream_tool_calls_invalid";
+          return;
+        }
+        for (const [fallbackIndex, rawCall] of rawCalls.entries()) {
+          if (!isRecord(rawCall)) {
+            state.error = "openai_chat_stream_tool_call_invalid";
+            return;
+          }
+          const rawIndex = rawCall["index"];
+          const index =
+            typeof rawIndex === "number" && Number.isSafeInteger(rawIndex) && rawIndex >= 0
+              ? rawIndex
+              : fallbackIndex;
+          const current = state.toolCalls.get(index) ?? {
+            id: null,
+            name: null,
+            arguments: "",
+          };
+          const id = rawCall["id"];
+          if (typeof id === "string" && id.length > 0) current.id = id;
+          const fn = rawCall["function"];
+          if (isRecord(fn)) {
+            const name = fn["name"];
+            if (typeof name === "string" && name.length > 0) current.name = name;
+            const args = fn["arguments"];
+            if (typeof args === "string") current.arguments += args;
+            else if (args !== null && args !== undefined) {
+              state.error = "openai_chat_stream_arguments_invalid";
+              return;
+            }
+          }
+          state.toolCalls.set(index, current);
+        }
+      }
+    }
+
+    const finishReason = choice["finish_reason"];
+    if (typeof finishReason === "string") state.finishReason = finishReason;
+  }
+}
+
+export function finishChatStream(state: ChatStreamState): ProviderCompletion {
+  if (state.error !== null) {
+    return { kind: "invalid_response", safeCode: state.error };
+  }
+  if (state.finishReason === "length") {
+    return { kind: "invalid_response", safeCode: "openai_chat_truncated" };
+  }
+  if (state.finishReason === "content_filter") {
+    return { kind: "invalid_response", safeCode: "openai_chat_content_filtered" };
+  }
+  if (!state.done && state.finishReason === null) {
+    return { kind: "invalid_response", safeCode: "openai_chat_stream_incomplete" };
+  }
+
+  const toolCalls: ProviderToolCall[] = [];
+  const ordered = [...state.toolCalls.entries()].sort((left, right) => left[0] - right[0]);
+  for (const [, call] of ordered) {
+    if (call.id === null || call.name === null) {
+      return { kind: "invalid_response", safeCode: "openai_chat_tool_call_invalid" };
+    }
+    const raw = call.arguments.trim();
+    let args: unknown = {};
+    if (raw.length > 0) {
+      try {
+        args = JSON.parse(raw);
+      } catch {
+        return { kind: "invalid_response", safeCode: "openai_chat_arguments_not_json" };
+      }
+    }
+    toolCalls.push({
+      providerToolCallId: call.id,
+      toolName: call.name,
+      arguments: args,
+    });
+  }
+  if (state.finishReason === "tool_calls" && toolCalls.length === 0) {
+    return { kind: "invalid_response", safeCode: "openai_chat_tool_calls_missing" };
+  }
+
+  return {
+    kind: "completed",
+    toolCalls,
+    text: state.text.length === 0 ? null : state.text,
+    ...(state.usage === undefined ? {} : { usage: state.usage }),
   };
 }

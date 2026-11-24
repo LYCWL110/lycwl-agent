@@ -113,6 +113,8 @@ export type SelectRuntimeOptions = Readonly<{
    */
   sessionId?: string;
   post?: Parameters<typeof assembleRuntime>[0]["post"];
+  /** Injected SSE transport for tests; production uses the bounded streaming POST. */
+  streamPost?: Parameters<typeof assembleRuntime>[0]["streamPost"];
   trustedCaPem?: string;
   /**
    * Approval channel for MCP server startup. Servers must be approved before the
@@ -251,6 +253,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     // material arrives separately as a sourced user turn.
     system: renderHarnessRules(hostPlatform),
     ...(options.post === undefined ? {} : { post: options.post }),
+    ...(options.streamPost === undefined ? {} : { streamPost: options.streamPost }),
     ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
   });
 

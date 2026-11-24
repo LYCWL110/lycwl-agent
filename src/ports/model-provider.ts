@@ -93,6 +93,26 @@ export type ProviderRequest = Readonly<{
   compaction?: Readonly<{ maxOutputTokens: number }>;
 }>;
 
+/**
+ * A model-visible delta that is not itself part of the durable history.
+ *
+ * Only text is emitted today. Tool calls are assembled inside the adapter and
+ * delivered on the final completion, so the coordinator never executes a call
+ * from a partial response.
+ */
+export type ProviderDelta = Readonly<{ kind: "text"; text: string }>;
+
 export interface ModelProvider {
   complete(request: ProviderRequest): Promise<ProviderCompletion>;
+  /**
+   * Streaming variant. The adapter emits text deltas as they arrive and returns
+   * the same fully validated completion that `complete` would return.
+   *
+   * Absent means the adapter is not streaming-capable; callers fall back to
+   * `complete`. Deltas are UI hints, never authoritative history.
+   */
+  stream?(
+    request: ProviderRequest,
+    onDelta: (delta: ProviderDelta) => void,
+  ): Promise<ProviderCompletion>;
 }

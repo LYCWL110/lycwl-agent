@@ -3,6 +3,7 @@ export const EMPTY_VIEW = {
     runStatus: "idle",
     waitingKind: null,
     activity: null,
+    streaming: null,
     safeCode: null,
     transcript: [],
     todo: null,
@@ -23,12 +24,28 @@ export const EMPTY_VIEW = {
 export function deriveView(input) {
     const waitingKind = deriveWaitingKind(input);
     const runStatus = input.runStatus;
+    const transcript = buildTranscript(input.events);
+    const streaming = input.streaming ?? null;
+    const streamed = streaming === null || streaming.text.length === 0
+        ? transcript
+        : [
+            ...transcript,
+            {
+                id: "streaming",
+                kind: "assistant",
+                text: streaming.text,
+                status: "streaming",
+            },
+        ];
     return {
         runStatus,
         waitingKind,
-        activity: deriveActivity(input, waitingKind),
+        activity: streaming === null || streaming.text.length === 0
+            ? deriveActivity(input, waitingKind)
+            : "working",
+        streaming,
         safeCode: input.safeCode,
-        transcript: buildTranscript(input.events),
+        transcript: streamed,
         todo: input.todo,
         pendingApproval: input.pendingApproval,
         pendingDisclosure: input.pendingDisclosure ?? null,

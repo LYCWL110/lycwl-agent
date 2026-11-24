@@ -200,7 +200,13 @@ export class RuntimeCoordinator {
      */
     currentRunProjection() {
         const context = this.#activeContext;
-        return context === null ? null : { status: context.run.state, events: context.events.slice() };
+        return context === null
+            ? null
+            : {
+                status: context.run.state,
+                events: context.events.slice(),
+                streaming: context.streamingText.length === 0 ? null : { text: context.streamingText },
+            };
     }
     configurationWaitView() {
         const run = this.#activeContext?.run;
@@ -421,6 +427,7 @@ export class RuntimeCoordinator {
             events: [],
             budget: createRunBudget(),
             usage: undefined,
+            streamingText: "",
             spilledPreviews: new Map(),
             lastBudgetTick: this.#nowMs(),
             accountingActive: true,
@@ -584,6 +591,7 @@ export class RuntimeCoordinator {
                 const modelRequestId = context.pendingModel?.modelRequestId ?? this.#deps.ids.create();
                 context.cancelledDuring = "model_request";
                 const completion = await this.#completeWithRetries(context, modelRequestId);
+                context.streamingText = "";
                 context.cancelledDuring = null;
                 if (completion.kind === "terminal")
                     return completion.result;
@@ -692,6 +700,7 @@ export class RuntimeCoordinator {
             }
         }
         catch (error) {
+            context.streamingText = "";
             if (this.#persistenceFailed) {
                 this.#clearBudgetTimer(context);
                 await this.#deps.tools.cancelAll?.();
@@ -788,6 +797,17 @@ export class RuntimeCoordinator {
             sleep: this.#deps.sleep ?? sleep,
             signal: context.abortController.signal,
             attemptStart: attemptsUsed + 1,
+            onAttemptStarted: () => {
+                context.streamingText = "";
+            },
+            ...(auxiliaryAttempts === undefined
+                ? {
+                    onDelta: (delta) => {
+                        if (delta.kind === "text")
+                            context.streamingText += delta.text;
+                    },
+                }
+                : {}),
             ...(auxiliaryAttempts === undefined
                 ? {}
                 : {

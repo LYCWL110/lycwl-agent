@@ -364,6 +364,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       pendingDisclosure: deps.coordinator.pendingDisclosureView(),
       pendingQuestion: deps.coordinator.pendingQuestionView(),
       answerError,
+      streaming: live?.streaming ?? null,
       draft,
     });
     return {

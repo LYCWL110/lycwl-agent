@@ -70,6 +70,8 @@ export type TuiViewState = Readonly<{
   runStatus: RunStatus;
   waitingKind: WaitingKind | null;
   activity: RunActivity | null;
+  /** Text deltas from the current model attempt; not durable history. */
+  streaming: Readonly<{ text: string }> | null;
   safeCode: string | null;
   transcript: readonly TranscriptEntry[];
   todo: TodoList | null;
@@ -126,6 +128,7 @@ export const EMPTY_VIEW: TuiViewState = {
   runStatus: "idle",
   waitingKind: null,
   activity: null,
+  streaming: null,
   safeCode: null,
   transcript: [],
   todo: null,
@@ -150,6 +153,8 @@ export type ViewInput = Readonly<{
   pendingQuestion: PendingQuestionView | null;
   /** Set by the controller when an answer could not be resolved. */
   answerError?: string | null;
+  /** Text streamed by the current model attempt, when any. */
+  streaming?: Readonly<{ text: string }> | null;
   draft: string;
 }>;
 
@@ -160,12 +165,30 @@ export type ViewInput = Readonly<{
 export function deriveView(input: ViewInput): TuiViewState {
   const waitingKind = deriveWaitingKind(input);
   const runStatus = input.runStatus;
+  const transcript = buildTranscript(input.events);
+  const streaming = input.streaming ?? null;
+  const streamed: readonly TranscriptEntry[] =
+    streaming === null || streaming.text.length === 0
+      ? transcript
+      : [
+          ...transcript,
+          {
+            id: "streaming",
+            kind: "assistant",
+            text: streaming.text,
+            status: "streaming",
+          },
+        ];
   return {
     runStatus,
     waitingKind,
-    activity: deriveActivity(input, waitingKind),
+    activity:
+      streaming === null || streaming.text.length === 0
+        ? deriveActivity(input, waitingKind)
+        : "working",
+    streaming,
     safeCode: input.safeCode,
-    transcript: buildTranscript(input.events),
+    transcript: streamed,
     todo: input.todo,
     pendingApproval: input.pendingApproval,
     pendingDisclosure: input.pendingDisclosure ?? null,

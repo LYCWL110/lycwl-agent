@@ -21,7 +21,8 @@ export type TransportFailureCode =
   | "timeout"
   | "response_too_large"
   | "request_too_large"
-  | "invalid_endpoint";
+  | "invalid_endpoint"
+  | "invalid_stream";
 
 /**
  * Map a transport failure. TLS and connect failures are transient because they are
@@ -32,6 +33,10 @@ export function transportFailure(code: TransportFailureCode): ProviderCompletion
   if (code === "cancelled") return { kind: "cancelled", safeCode: "provider_cancelled" };
   if (code === "invalid_endpoint" || code === "request_too_large") {
     return { kind: "invalid_response", safeCode: `provider_${code}` };
+  }
+  if (code === "invalid_stream") {
+    // A malformed SSE frame is a protocol error, not a transient network event.
+    return { kind: "invalid_response", safeCode: "provider_invalid_stream" };
   }
   if (code === "response_too_large") {
     // A reply this large is a broken or hostile endpoint, not a slow one.

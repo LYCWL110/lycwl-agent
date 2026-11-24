@@ -135,6 +135,7 @@ export async function selectRuntime(options) {
         // material arrives separately as a sourced user turn.
         system: renderHarnessRules(hostPlatform),
         ...(options.post === undefined ? {} : { post: options.post }),
+        ...(options.streamPost === undefined ? {} : { streamPost: options.streamPost }),
         ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
     });
     // Project guidance is loaded once at Run setup and injected as sourced,

@@ -1,5 +1,6 @@
 import type { ClientRequest, IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { type SseEvent, SseParser } from "./provider-sse.ts";
 
 /**
  * Bounded HTTPS POST for Provider adapters.
@@ -50,7 +51,8 @@ export type ProviderHttpFailure =
   | "timeout"
   | "response_too_large"
   | "request_too_large"
-  | "invalid_endpoint";
+  | "invalid_endpoint"
+  | "invalid_stream";
 
 export type ProviderHttpResult =
   | Readonly<{
@@ -59,11 +61,28 @@ export type ProviderHttpResult =
       headers: Readonly<Record<string, string>>;
       bodyText: string;
       wireBytes: number;
+      /** True when the body was parsed as SSE and delivered through `onEvent`. */
+      eventStream?: boolean;
     }>
   | Readonly<{ ok: false; code: ProviderHttpFailure }>;
 
 export async function providerHttpsPost(input: ProviderHttpRequest): Promise<ProviderHttpResult> {
   return providerHttpsRequest("POST", input);
+}
+
+/**
+ * Streaming HTTPS POST for Provider adapters.
+ *
+ * The same transport rules apply as `providerHttpsPost`. A successful
+ * `text/event-stream` response is parsed incrementally and delivered through
+ * `onEvent`; any other 2xx response is buffered and returned as `bodyText` so an
+ * adapter can fall back to its non-streaming interpreter.
+ */
+export async function providerHttpsPostStream(
+  input: ProviderHttpRequest,
+  onEvent: (event: SseEvent) => void,
+): Promise<ProviderHttpResult> {
+  return providerHttpsRequest("POST", input, { onEvent });
 }
 
 /**
@@ -83,6 +102,7 @@ export async function providerHttpsGet(
 async function providerHttpsRequest(
   method: "GET" | "POST",
   input: ProviderHttpRequest,
+  stream?: Readonly<{ onEvent: (event: SseEvent) => void }>,
 ): Promise<ProviderHttpResult> {
   let parsed: URL;
   try {
@@ -164,7 +184,58 @@ async function providerHttpsRequest(
             // Reported, never followed: an automatic redirect on a Provider call
             // could silently move credentials to another host.
             response.resume();
-            finish({ ok: true, status, headers, bodyText: "", wireBytes: 0 });
+            finish({
+              ok: true,
+              status,
+              headers,
+              bodyText: "",
+              wireBytes: 0,
+              eventStream: false,
+            });
+            return;
+          }
+
+          const contentType = (headers["content-type"] ?? "").toLowerCase();
+          if (
+            stream !== undefined &&
+            status >= 200 &&
+            status < 300 &&
+            contentType.includes("text/event-stream")
+          ) {
+            const parser = new SseParser(stream.onEvent);
+            response.setEncoding("utf8");
+            let received = 0;
+            response.on("data", (chunk: string) => {
+              received += Buffer.byteLength(chunk, "utf8");
+              if (received > maxResponseBytes) {
+                finish({ ok: false, code: "response_too_large" });
+                request?.destroy();
+                return;
+              }
+              try {
+                parser.push(chunk);
+              } catch {
+                finish({ ok: false, code: "invalid_stream" });
+                request?.destroy();
+              }
+            });
+            response.on("end", () => {
+              try {
+                parser.end();
+              } catch {
+                finish({ ok: false, code: "invalid_stream" });
+                return;
+              }
+              finish({
+                ok: true,
+                status,
+                headers,
+                bodyText: "",
+                wireBytes: received,
+                eventStream: true,
+              });
+            });
+            response.on("error", () => finish({ ok: false, code: "connect_failed" }));
             return;
           }
 
@@ -186,6 +257,7 @@ async function providerHttpsRequest(
               headers,
               bodyText: Buffer.concat(chunks).toString("utf8"),
               wireBytes: received,
+              eventStream: false,
             });
           });
           response.on("error", () => finish({ ok: false, code: "connect_failed" }));

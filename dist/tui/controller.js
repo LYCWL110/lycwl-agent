@@ -233,6 +233,7 @@ export function createTuiController(deps) {
             pendingDisclosure: deps.coordinator.pendingDisclosureView(),
             pendingQuestion: deps.coordinator.pendingQuestionView(),
             answerError,
+            streaming: live?.streaming ?? null,
             draft,
         });
         return {

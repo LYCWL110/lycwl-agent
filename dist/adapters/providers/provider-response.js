@@ -9,6 +9,10 @@ export function transportFailure(code) {
     if (code === "invalid_endpoint" || code === "request_too_large") {
         return { kind: "invalid_response", safeCode: `provider_${code}` };
     }
+    if (code === "invalid_stream") {
+        // A malformed SSE frame is a protocol error, not a transient network event.
+        return { kind: "invalid_response", safeCode: "provider_invalid_stream" };
+    }
     if (code === "response_too_large") {
         // A reply this large is a broken or hostile endpoint, not a slow one.
         return { kind: "invalid_response", safeCode: "provider_response_too_large" };

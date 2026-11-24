@@ -8,6 +8,9 @@ Writes and shell are enabled by default. Every write and every command is
 approved separately. Nothing is sandboxed: an approved command runs with your
 full user permissions.
 
+Model replies stream into the terminal as they arrive. Tool calls still wait for
+the complete response and their own approval.
+
 ## Requirements
 
 Node.js 24 (`>=24.0.0 <25`). A newer release installs with an `EBADENGINE`

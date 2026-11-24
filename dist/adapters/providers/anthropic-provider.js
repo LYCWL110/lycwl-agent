@@ -1,6 +1,6 @@
 import { protocolReasoningEfforts, } from "../../domain/config/provider-config.js";
 import { parseAnthropicUsage } from "../../domain/model-request/token-usage.js";
-import { providerHttpsPost, } from "./provider-http.js";
+import { providerHttpsPost, providerHttpsPostStream, } from "./provider-http.js";
 import { classifyHttpStatus, isRecord, parseJsonBody, requireString, transportFailure, } from "./provider-response.js";
 /**
  * Anthropic Messages adapter.
@@ -23,9 +23,13 @@ export const ANTHROPIC_DEFAULTS = Object.freeze({
 export class AnthropicProvider {
     #options;
     #post;
+    #streamPost;
     constructor(options) {
         this.#options = options;
         this.#post = options.post ?? providerHttpsPost;
+        const post = options.post;
+        this.#streamPost =
+            options.streamPost ?? (post === undefined ? providerHttpsPostStream : (input) => post(input));
     }
     async complete(request) {
         if (request.signal?.aborted)
@@ -69,6 +73,54 @@ export class AnthropicProvider {
             return statusOutcome;
         return interpretMessageResponse(posted.bodyText);
     }
+    async stream(request, onDelta) {
+        if (request.signal?.aborted)
+            return { kind: "cancelled", safeCode: "provider_cancelled" };
+        if (this.#options.reasoningEffort !== undefined &&
+            !protocolReasoningEfforts("anthropic_messages").includes(this.#options.reasoningEffort))
+            return { kind: "invalid_response", safeCode: "anthropic_reasoning_effort_invalid" };
+        const apiKey = await this.#resolveKey();
+        if (apiKey === null) {
+            return { kind: "authentication_failure", safeCode: "anthropic_key_not_configured" };
+        }
+        if (request.signal?.aborted)
+            return { kind: "cancelled", safeCode: "provider_cancelled" };
+        const state = createAnthropicStreamState();
+        const posted = await this.#streamPost({
+            ...(request.signal === undefined ? {} : { signal: request.signal }),
+            url: this.#options.endpoint ?? ANTHROPIC_DEFAULTS.endpoint,
+            headers: {
+                "content-type": "application/json",
+                accept: "text/event-stream",
+                "anthropic-version": this.#options.apiVersion ?? ANTHROPIC_DEFAULTS.apiVersion,
+                "x-api-key": apiKey,
+            },
+            bodyText: JSON.stringify(buildRequestBody(request.compaction === undefined
+                ? this.#options
+                : {
+                    ...this.#options,
+                    tools: [],
+                    maxTokens: Math.min(this.#options.maxTokens ?? ANTHROPIC_DEFAULTS.maxTokens, request.compaction.maxOutputTokens),
+                }, request.conversation, true)),
+            ...(this.#options.trustedCaPem === undefined
+                ? {}
+                : { trustedCaPem: this.#options.trustedCaPem }),
+        }, (event) => {
+            applyAnthropicStreamEvent(state, event, onDelta);
+        });
+        if (!posted.ok)
+            return transportFailure(posted.code);
+        const statusOutcome = classifyHttpStatus(posted.status, posted.headers, ANTHROPIC_DEFAULTS.providerLabel);
+        if (statusOutcome !== null)
+            return statusOutcome;
+        // A provider that ignored `stream` answered with a normal JSON body.
+        if (posted.bodyText.length > 0)
+            return interpretMessageResponse(posted.bodyText);
+        if (posted.eventStream !== true) {
+            return { kind: "invalid_response", safeCode: "anthropic_stream_missing" };
+        }
+        return finishAnthropicStream(state);
+    }
     async #resolveKey() {
         try {
             const key = await this.#options.resolveApiKey();
@@ -84,10 +136,11 @@ export class AnthropicProvider {
     }
 }
 /** Exported for tests: the exact JSON that would be sent. */
-export function buildRequestBody(options, conversation) {
+export function buildRequestBody(options, conversation, stream = false) {
     return {
         model: options.model,
         max_tokens: options.maxTokens ?? ANTHROPIC_DEFAULTS.maxTokens,
+        ...(stream ? { stream: true } : {}),
         ...(options.reasoningEffort === undefined || options.reasoningEffort === "default"
             ? {}
             : { output_config: { effort: options.reasoningEffort } }),
@@ -232,6 +285,216 @@ export function interpretMessageResponse(bodyText) {
     // Usage is optional: a provider that omits it leaves the cost unknown rather
     // than reporting zero.
     const usage = parseAnthropicUsage(record);
+    return {
+        kind: "completed",
+        toolCalls,
+        text: textParts.length === 0 ? null : textParts.join(""),
+        ...(usage === undefined ? {} : { usage }),
+    };
+}
+export function createAnthropicStreamState() {
+    return {
+        blocks: new Map(),
+        messageUsage: null,
+        outputTokens: null,
+        stopReason: null,
+        started: false,
+        stopped: false,
+        error: null,
+    };
+}
+/**
+ * Apply one Anthropic SSE event.
+ *
+ * Text deltas are forwarded for display; tool-use JSON fragments are collected
+ * and parsed only after the block closes. Nothing here executes a tool.
+ */
+export function applyAnthropicStreamEvent(state, event, onDelta) {
+    if (state.error !== null)
+        return;
+    const parsed = parseJsonBody(event.data);
+    if (!parsed.ok || !isRecord(parsed.value)) {
+        state.error = "anthropic_stream_not_json";
+        return;
+    }
+    const record = parsed.value;
+    const type = event.event ?? (typeof record["type"] === "string" ? record["type"] : null);
+    if (type === "message_start") {
+        const message = record["message"];
+        state.started = true;
+        if (isRecord(message)) {
+            const usage = message["usage"];
+            if (isRecord(usage))
+                state.messageUsage = usage;
+        }
+        return;
+    }
+    if (type === "content_block_start") {
+        const index = record["index"];
+        const block = record["content_block"];
+        if (typeof index !== "number" ||
+            !Number.isSafeInteger(index) ||
+            index < 0 ||
+            !isRecord(block)) {
+            state.error = "anthropic_stream_block_invalid";
+            return;
+        }
+        const blockType = block["type"];
+        if (blockType === "text") {
+            const text = typeof block["text"] === "string" ? block["text"] : "";
+            state.blocks.set(index, { kind: "text", text });
+            if (text.length > 0)
+                onDelta({ kind: "text", text });
+            return;
+        }
+        if (blockType === "tool_use") {
+            const id = block["id"];
+            const name = block["name"];
+            if (typeof id !== "string" ||
+                id.length === 0 ||
+                typeof name !== "string" ||
+                name.length === 0) {
+                state.error = "anthropic_stream_tool_use_invalid";
+                return;
+            }
+            state.blocks.set(index, {
+                kind: "tool_use",
+                id,
+                name,
+                json: "",
+                initialInput: block["input"],
+            });
+            return;
+        }
+        if (blockType === "thinking" ||
+            blockType === "redacted_thinking" ||
+            blockType === "server_tool_use" ||
+            blockType === "web_search_tool_result") {
+            state.blocks.set(index, { kind: "ignored" });
+            return;
+        }
+        state.error = "anthropic_block_unknown";
+        return;
+    }
+    if (type === "content_block_delta") {
+        const index = record["index"];
+        const delta = record["delta"];
+        if (typeof index !== "number" ||
+            !Number.isSafeInteger(index) ||
+            index < 0 ||
+            !isRecord(delta)) {
+            state.error = "anthropic_stream_delta_invalid";
+            return;
+        }
+        const block = state.blocks.get(index);
+        if (block === undefined) {
+            state.error = "anthropic_stream_delta_without_block";
+            return;
+        }
+        // Thinking and server-tool blocks are narration this Harness does not record.
+        // Their deltas must not be interpreted as text or tool input.
+        if (block.kind === "ignored")
+            return;
+        const deltaType = delta["type"];
+        if (deltaType === "text_delta") {
+            if (block.kind !== "text") {
+                state.error = "anthropic_stream_delta_invalid";
+                return;
+            }
+            const text = delta["text"];
+            if (typeof text !== "string") {
+                state.error = "anthropic_stream_text_invalid";
+                return;
+            }
+            block.text += text;
+            if (text.length > 0)
+                onDelta({ kind: "text", text });
+            return;
+        }
+        if (deltaType === "input_json_delta") {
+            if (block.kind !== "tool_use") {
+                state.error = "anthropic_stream_delta_invalid";
+                return;
+            }
+            const partial = delta["partial_json"];
+            if (typeof partial !== "string") {
+                state.error = "anthropic_stream_json_invalid";
+                return;
+            }
+            block.json += partial;
+            return;
+        }
+        if (deltaType === "thinking_delta" || deltaType === "signature_delta") {
+            return;
+        }
+        state.error = "anthropic_delta_unknown";
+        return;
+    }
+    if (type === "message_delta") {
+        const delta = record["delta"];
+        if (isRecord(delta) && typeof delta["stop_reason"] === "string") {
+            state.stopReason = delta["stop_reason"];
+        }
+        const usage = record["usage"];
+        if (isRecord(usage) && typeof usage["output_tokens"] === "number") {
+            state.outputTokens = usage["output_tokens"];
+        }
+        return;
+    }
+    if (type === "message_stop") {
+        state.stopped = true;
+        return;
+    }
+    if (type === "error") {
+        state.error = "anthropic_stream_error";
+        return;
+    }
+    // `ping` and future event types are ignored; the final message_stop still
+    // decides whether the response is complete.
+}
+export function finishAnthropicStream(state) {
+    if (state.error !== null) {
+        return { kind: "invalid_response", safeCode: state.error };
+    }
+    if (!state.started) {
+        return { kind: "invalid_response", safeCode: "anthropic_stream_not_started" };
+    }
+    if (!state.stopped) {
+        return { kind: "invalid_response", safeCode: "anthropic_stream_incomplete" };
+    }
+    if (state.stopReason === "max_tokens") {
+        return { kind: "invalid_response", safeCode: "anthropic_truncated" };
+    }
+    const ordered = [...state.blocks.entries()].sort((left, right) => left[0] - right[0]);
+    const textParts = [];
+    const toolCalls = [];
+    for (const [, block] of ordered) {
+        if (block.kind === "text") {
+            if (block.text.length > 0)
+                textParts.push(block.text);
+            continue;
+        }
+        if (block.kind === "tool_use") {
+            let args = block.initialInput ?? {};
+            if (block.json.trim().length > 0) {
+                try {
+                    args = JSON.parse(block.json);
+                }
+                catch {
+                    return { kind: "invalid_response", safeCode: "anthropic_arguments_not_json" };
+                }
+            }
+            toolCalls.push({
+                providerToolCallId: block.id,
+                toolName: block.name,
+                arguments: args,
+            });
+        }
+    }
+    const usageRecord = { ...(state.messageUsage ?? {}) };
+    if (state.outputTokens !== null)
+        usageRecord["output_tokens"] = state.outputTokens;
+    const usage = Object.keys(usageRecord).length === 0 ? undefined : parseAnthropicUsage({ usage: usageRecord });
     return {
         kind: "completed",
         toolCalls,

@@ -1,4 +1,5 @@
 import { request as httpsRequest } from "node:https";
+import { SseParser } from "./provider-sse.js";
 /**
  * Bounded HTTPS POST for Provider adapters.
  *
@@ -28,6 +29,17 @@ export async function providerHttpsPost(input) {
     return providerHttpsRequest("POST", input);
 }
 /**
+ * Streaming HTTPS POST for Provider adapters.
+ *
+ * The same transport rules apply as `providerHttpsPost`. A successful
+ * `text/event-stream` response is parsed incrementally and delivered through
+ * `onEvent`; any other 2xx response is buffered and returned as `bodyText` so an
+ * adapter can fall back to its non-streaming interpreter.
+ */
+export async function providerHttpsPostStream(input, onEvent) {
+    return providerHttpsRequest("POST", input, { onEvent });
+}
+/**
  * Bounded HTTPS GET, for read-only provider endpoints such as a model list.
  *
  * Same guarantees as the POST path: HTTPS only, no proxy inheritance, no redirect
@@ -39,7 +51,7 @@ export async function providerHttpsGet(input) {
         return { ok: false, code: "cancelled" };
     return providerHttpsRequest("GET", { ...input, bodyText: "" });
 }
-async function providerHttpsRequest(method, input) {
+async function providerHttpsRequest(method, input, stream) {
     let parsed;
     try {
         parsed = new URL(input.url);
@@ -116,7 +128,57 @@ async function providerHttpsRequest(method, input) {
                     // Reported, never followed: an automatic redirect on a Provider call
                     // could silently move credentials to another host.
                     response.resume();
-                    finish({ ok: true, status, headers, bodyText: "", wireBytes: 0 });
+                    finish({
+                        ok: true,
+                        status,
+                        headers,
+                        bodyText: "",
+                        wireBytes: 0,
+                        eventStream: false,
+                    });
+                    return;
+                }
+                const contentType = (headers["content-type"] ?? "").toLowerCase();
+                if (stream !== undefined &&
+                    status >= 200 &&
+                    status < 300 &&
+                    contentType.includes("text/event-stream")) {
+                    const parser = new SseParser(stream.onEvent);
+                    response.setEncoding("utf8");
+                    let received = 0;
+                    response.on("data", (chunk) => {
+                        received += Buffer.byteLength(chunk, "utf8");
+                        if (received > maxResponseBytes) {
+                            finish({ ok: false, code: "response_too_large" });
+                            request?.destroy();
+                            return;
+                        }
+                        try {
+                            parser.push(chunk);
+                        }
+                        catch {
+                            finish({ ok: false, code: "invalid_stream" });
+                            request?.destroy();
+                        }
+                    });
+                    response.on("end", () => {
+                        try {
+                            parser.end();
+                        }
+                        catch {
+                            finish({ ok: false, code: "invalid_stream" });
+                            return;
+                        }
+                        finish({
+                            ok: true,
+                            status,
+                            headers,
+                            bodyText: "",
+                            wireBytes: received,
+                            eventStream: true,
+                        });
+                    });
+                    response.on("error", () => finish({ ok: false, code: "connect_failed" }));
                     return;
                 }
                 const chunks = [];
@@ -137,6 +199,7 @@ async function providerHttpsRequest(method, input) {
                         headers,
                         bodyText: Buffer.concat(chunks).toString("utf8"),
                         wireBytes: received,
+                        eventStream: false,
                     });
                 });
                 response.on("error", () => finish({ ok: false, code: "connect_failed" }));

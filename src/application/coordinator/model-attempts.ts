@@ -2,6 +2,8 @@ import { beginModelRequest } from "../../domain/model-request/model-request-stat
 import type {
   ModelProvider,
   ProviderConversationItem,
+  ProviderDelta,
+  ProviderRequest,
   ProviderToolCall,
   TokenUsage,
 } from "../../ports/model-provider.ts";
@@ -24,6 +26,16 @@ export type ModelAttemptDependencies = Readonly<{
   provider: ModelProvider;
   sleep: (delayMs: number, signal?: AbortSignal) => Promise<void>;
   signal?: AbortSignal;
+  /**
+   * Called before each attempt is sent. A retry uses this to clear text streamed
+   * by the failed attempt, so the next attempt starts from an empty display.
+   */
+  onAttemptStarted?: () => void;
+  /**
+   * Receives text deltas for display. Absent keeps the adapter on `complete`,
+   * which is what auxiliary compaction requests want.
+   */
+  onDelta?: (delta: ProviderDelta) => void;
   /** Auxiliary regeneration and retries share one bounded attempt sequence. */
   attemptStart?: number;
   attemptLimit?: number;
@@ -61,6 +73,10 @@ export async function completeWithBoundedRetries(
   const limit = dependencies.attemptLimit ?? MAX_TRANSIENT_RETRIES + 1;
   for (let attemptNo = dependencies.attemptStart ?? 1; attemptNo <= limit; attemptNo += 1) {
     if (dependencies.signal?.aborted) return cancelled();
+    // A retry starts a fresh display, so text from the failed attempt is not
+    // mistaken for part of the new response. Clearing before the pre-send checks
+    // also removes stale text while a disclosure or credential check is waiting.
+    dependencies.onAttemptStarted?.();
     const request = beginModelRequest(modelRequestId, attemptNo);
     if (!request.ok) {
       return { kind: "invalid_response", safeCode: request.code };
@@ -87,17 +103,24 @@ export async function completeWithBoundedRetries(
       // A refused pre-send check is not a transient failure: nothing was sent.
       return { kind: "invalid_response", safeCode: started.safeCode };
     }
+    const providerRequest: ProviderRequest = {
+      modelRequestId,
+      attemptNo,
+      // Snapshot the conversation: the Run keeps appending to its own array, and a
+      // provider that held the live reference would observe later turns inside a
+      // request it already sent. A retry must also see exactly what was sent.
+      conversation: [...conversation],
+      ...(dependencies.compaction === undefined ? {} : { compaction: dependencies.compaction }),
+      ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
+    };
+    const provider = dependencies.provider;
     const completion = await untilAborted(
-      dependencies.provider.complete({
-        modelRequestId,
-        attemptNo,
-        // Snapshot the conversation: the Run keeps appending to its own array, and a
-        // provider that held the live reference would observe later turns inside a
-        // request it already sent. A retry must also see exactly what was sent.
-        conversation: [...conversation],
-        ...(dependencies.compaction === undefined ? {} : { compaction: dependencies.compaction }),
-        ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
-      }),
+      dependencies.onDelta !== undefined && provider.stream !== undefined
+        ? provider.stream(providerRequest, (delta) => {
+            if (dependencies.signal?.aborted) return;
+            dependencies.onDelta?.(delta);
+          })
+        : provider.complete(providerRequest),
       dependencies.signal,
     );
     if (completion === null || dependencies.signal?.aborted) return cancelled();

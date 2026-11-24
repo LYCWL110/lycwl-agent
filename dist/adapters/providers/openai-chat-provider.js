@@ -1,6 +1,6 @@
 import { protocolEndpoint } from "../../domain/config/provider-config.js";
 import { parseOpenAiChatUsage } from "../../domain/model-request/token-usage.js";
-import { providerHttpsPost, } from "./provider-http.js";
+import { providerHttpsPost, providerHttpsPostStream, } from "./provider-http.js";
 import { classifyHttpStatus, isRecord, parseJsonBody, requireString, transportFailure, } from "./provider-response.js";
 /**
  * OpenAI Chat Completions adapter.
@@ -25,9 +25,13 @@ export const OPENAI_CHAT_DEFAULTS = Object.freeze({
 export class OpenAiChatProvider {
     #options;
     #post;
+    #streamPost;
     constructor(options) {
         this.#options = options;
         this.#post = options.post ?? providerHttpsPost;
+        const post = options.post;
+        this.#streamPost =
+            options.streamPost ?? (post === undefined ? providerHttpsPostStream : (input) => post(input));
     }
     async complete(request) {
         if (request.signal?.aborted)
@@ -64,6 +68,50 @@ export class OpenAiChatProvider {
             return statusOutcome;
         return interpretChatResponse(posted.bodyText);
     }
+    async stream(request, onDelta) {
+        if (request.signal?.aborted)
+            return { kind: "cancelled", safeCode: "provider_cancelled" };
+        const apiKey = await this.#resolveKey();
+        if (apiKey === null) {
+            return { kind: "authentication_failure", safeCode: "openai_chat_key_not_configured" };
+        }
+        if (request.signal?.aborted)
+            return { kind: "cancelled", safeCode: "provider_cancelled" };
+        const state = createChatStreamState();
+        const posted = await this.#streamPost({
+            ...(request.signal === undefined ? {} : { signal: request.signal }),
+            url: protocolEndpoint(this.#options.baseUrl, "openai_chat"),
+            headers: {
+                "content-type": "application/json",
+                accept: "text/event-stream",
+                authorization: `Bearer ${apiKey}`,
+            },
+            bodyText: JSON.stringify(buildChatRequestBody(request.compaction === undefined
+                ? this.#options
+                : {
+                    ...this.#options,
+                    tools: [],
+                    maxTokens: Math.min(this.#options.maxTokens ?? OPENAI_CHAT_DEFAULTS.maxTokens, request.compaction.maxOutputTokens),
+                }, request.conversation, true)),
+            ...(this.#options.trustedCaPem === undefined
+                ? {}
+                : { trustedCaPem: this.#options.trustedCaPem }),
+        }, (event) => {
+            applyChatStreamData(state, event.data, onDelta);
+        });
+        if (!posted.ok)
+            return transportFailure(posted.code);
+        const statusOutcome = classifyHttpStatus(posted.status, posted.headers, OPENAI_CHAT_DEFAULTS.providerLabel);
+        if (statusOutcome !== null)
+            return statusOutcome;
+        // A provider that ignored `stream` answered with a normal JSON body.
+        if (posted.bodyText.length > 0)
+            return interpretChatResponse(posted.bodyText);
+        if (posted.eventStream !== true) {
+            return { kind: "invalid_response", safeCode: "openai_chat_stream_missing" };
+        }
+        return finishChatStream(state);
+    }
     async #resolveKey() {
         try {
             const key = await this.#options.resolveApiKey();
@@ -77,9 +125,10 @@ export class OpenAiChatProvider {
     }
 }
 /** Exported for tests: the exact JSON that would be sent. */
-export function buildChatRequestBody(options, conversation) {
+export function buildChatRequestBody(options, conversation, stream = false) {
     return {
         model: options.model,
+        ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
         ...(options.reasoningEffort === undefined || options.reasoningEffort === "default"
             ? { max_tokens: options.maxTokens ?? OPENAI_CHAT_DEFAULTS.maxTokens }
             : {
@@ -266,5 +315,157 @@ export function interpretChatResponse(bodyText) {
         toolCalls,
         text,
         ...(usage === undefined ? {} : { usage }),
+    };
+}
+export function createChatStreamState() {
+    return {
+        text: "",
+        toolCalls: new Map(),
+        finishReason: null,
+        usage: undefined,
+        done: false,
+        error: null,
+    };
+}
+/**
+ * Apply one `data:` frame from a Chat Completions SSE stream.
+ *
+ * Tool-call fragments are collected by index; nothing executes here. The final
+ * JSON is parsed only after the stream ends, so a partial argument string never
+ * reaches the coordinator.
+ */
+export function applyChatStreamData(state, data, onDelta) {
+    if (state.error !== null)
+        return;
+    if (data === "[DONE]") {
+        state.done = true;
+        return;
+    }
+    const parsed = parseJsonBody(data);
+    if (!parsed.ok || !isRecord(parsed.value)) {
+        state.error = "openai_chat_stream_not_json";
+        return;
+    }
+    const record = parsed.value;
+    if (isRecord(record["error"])) {
+        state.error = "openai_chat_stream_error";
+        return;
+    }
+    const usage = parseOpenAiChatUsage(record);
+    if (usage !== undefined)
+        state.usage = usage;
+    const choices = record["choices"];
+    if (choices === undefined)
+        return;
+    if (!Array.isArray(choices)) {
+        state.error = "openai_chat_stream_choices_invalid";
+        return;
+    }
+    for (const choice of choices) {
+        if (!isRecord(choice)) {
+            state.error = "openai_chat_stream_choice_invalid";
+            return;
+        }
+        const delta = choice["delta"];
+        if (isRecord(delta)) {
+            const content = delta["content"];
+            if (typeof content === "string") {
+                if (content.length > 0) {
+                    state.text += content;
+                    onDelta({ kind: "text", text: content });
+                }
+            }
+            else if (content !== null && content !== undefined) {
+                state.error = "openai_chat_stream_content_invalid";
+                return;
+            }
+            const rawCalls = delta["tool_calls"];
+            if (rawCalls !== undefined) {
+                if (!Array.isArray(rawCalls)) {
+                    state.error = "openai_chat_stream_tool_calls_invalid";
+                    return;
+                }
+                for (const [fallbackIndex, rawCall] of rawCalls.entries()) {
+                    if (!isRecord(rawCall)) {
+                        state.error = "openai_chat_stream_tool_call_invalid";
+                        return;
+                    }
+                    const rawIndex = rawCall["index"];
+                    const index = typeof rawIndex === "number" && Number.isSafeInteger(rawIndex) && rawIndex >= 0
+                        ? rawIndex
+                        : fallbackIndex;
+                    const current = state.toolCalls.get(index) ?? {
+                        id: null,
+                        name: null,
+                        arguments: "",
+                    };
+                    const id = rawCall["id"];
+                    if (typeof id === "string" && id.length > 0)
+                        current.id = id;
+                    const fn = rawCall["function"];
+                    if (isRecord(fn)) {
+                        const name = fn["name"];
+                        if (typeof name === "string" && name.length > 0)
+                            current.name = name;
+                        const args = fn["arguments"];
+                        if (typeof args === "string")
+                            current.arguments += args;
+                        else if (args !== null && args !== undefined) {
+                            state.error = "openai_chat_stream_arguments_invalid";
+                            return;
+                        }
+                    }
+                    state.toolCalls.set(index, current);
+                }
+            }
+        }
+        const finishReason = choice["finish_reason"];
+        if (typeof finishReason === "string")
+            state.finishReason = finishReason;
+    }
+}
+export function finishChatStream(state) {
+    if (state.error !== null) {
+        return { kind: "invalid_response", safeCode: state.error };
+    }
+    if (state.finishReason === "length") {
+        return { kind: "invalid_response", safeCode: "openai_chat_truncated" };
+    }
+    if (state.finishReason === "content_filter") {
+        return { kind: "invalid_response", safeCode: "openai_chat_content_filtered" };
+    }
+    if (!state.done && state.finishReason === null) {
+        return { kind: "invalid_response", safeCode: "openai_chat_stream_incomplete" };
+    }
+    const toolCalls = [];
+    const ordered = [...state.toolCalls.entries()].sort((left, right) => left[0] - right[0]);
+    for (const [, call] of ordered) {
+        if (call.id === null || call.name === null) {
+            return { kind: "invalid_response", safeCode: "openai_chat_tool_call_invalid" };
+        }
+        const raw = call.arguments.trim();
+        let args = {};
+        if (raw.length > 0) {
+            try {
+                args = JSON.parse(raw);
+            }
+            catch {
+                return { kind: "invalid_response", safeCode: "openai_chat_arguments_not_json" };
+            }
+        }
+        toolCalls.push({
+            providerToolCallId: call.id,
+            toolName: call.name,
+            arguments: args,
+        });
+    }
+    if (state.finishReason === "tool_calls" && toolCalls.length === 0) {
+        return { kind: "invalid_response", safeCode: "openai_chat_tool_calls_missing" };
+    }
+    return {
+        kind: "completed",
+        toolCalls,
+        text: state.text.length === 0 ? null : state.text,
+        ...(state.usage === undefined ? {} : { usage: state.usage }),
     };
 }
