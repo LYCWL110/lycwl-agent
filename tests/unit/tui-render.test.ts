@@ -22,10 +22,11 @@ const actions = {
   onQuit: noop,
 };
 
-function renderApp(view: TuiViewState) {
+function renderApp(view: TuiViewState, viewport?: { columns: number; rows: number }) {
   return render(
     createElement(App, {
       view,
+      ...(viewport === undefined ? {} : { viewport }),
       onSubmit: () => undefined,
       onApprove: () => undefined,
       onDeny: () => undefined,
@@ -141,7 +142,13 @@ describe("queued messages and compact tools", () => {
     let submitted = 0;
     stdout.on("data", (chunk) => {
       const text = chunk.toString();
-      if (text.includes("task ›") || text.includes("queue ›")) frame = text;
+      if (
+        text.includes("task ›") ||
+        text.includes("queue ›") ||
+        text.includes("approval required")
+      ) {
+        frame = text;
+      }
     });
     const instance = mountTerminal(
       createElement(App, {
@@ -185,7 +192,8 @@ describe("queued messages and compact tools", () => {
       await press(stdin, "\u001b[<0;10;3M");
       expect(frame).toMatch(/private detail line/);
       expect(frame).toMatch(/command: echo approved-only/);
-      expect(frame).toMatch(/queue › unfinished/);
+      expect(frame).toMatch(/approval required/);
+      expect(frame).not.toMatch(/unfinished/);
       await press(stdin, "\u001b[<0;10;3m");
       expect(frame).toMatch(/private detail line/);
       await press(stdin, "\u001b[200~\u001b[<0;10;3M\u001b[201~");
@@ -290,26 +298,41 @@ describe("TUI rendering", () => {
   });
 
   it("renders the approval panel with explicit actions", () => {
-    const instance = renderApp({
-      ...EMPTY_VIEW,
-      runStatus: "waiting",
-      waitingKind: "approval",
-      canSubmit: false,
-      queueingInput: true,
-      pendingApproval: {
-        approvalId: "approval-1",
-        toolCallId: "call-1",
-        toolName: "shell",
-        requestVersion: 1,
+    const instance = renderApp(
+      {
+        ...EMPTY_VIEW,
+        runStatus: "waiting",
+        waitingKind: "approval",
+        canSubmit: false,
+        queueingInput: true,
+        pendingApproval: {
+          approvalId: "approval-1",
+          toolCallId: "call-1",
+          toolName: "shell",
+          requestVersion: 1,
+        },
+        pendingApprovalPreview: ["command: npm test", "cwd: D:\\fixture"],
       },
-      pendingApprovalPreview: ["command: npm test", "cwd: D:\\fixture"],
-    });
+      { columns: 80, rows: 24 },
+    );
     const frame = instance.lastFrame() ?? "";
     expect(frame).toMatch(/waiting:approval/);
     expect(frame).toMatch(/approval required · shell/);
     expect(frame).toMatch(/▶ Approve/);
     expect(frame).toMatch(/Cancel/);
     expect(frame).toMatch(/←\/→ select · Enter confirms/);
+    expect(frame).not.toMatch(/task ›|queue ›/);
+    instance.unmount();
+  });
+
+  it("marks system transcript entries apart from tools and messages", () => {
+    const instance = renderApp({
+      ...EMPTY_VIEW,
+      transcript: [{ id: "s1", kind: "system", text: "waiting: approval", status: null }],
+    });
+    const frame = instance.lastFrame() ?? "";
+    expect(frame).toMatch(/\[sys\]/);
+    expect(frame).toMatch(/waiting: approval/);
     instance.unmount();
   });
 

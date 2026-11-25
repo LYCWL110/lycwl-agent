@@ -11,13 +11,13 @@ tool approval starts with `Approve` selected. A sensitive-context redisclosure
 starts with `Cancel` selected because it sends context to a new destination.
 
 Selection is not a reply. The Run remains suspended until Enter is pressed, and
-there is no always-allow control. The existing `a` and `d` plus Enter shortcuts
-remain for compatibility.
+there is no always-allow control. The existing `a` and `d` shortcuts select the
+corresponding action; Enter still confirms it.
 
-The composer stays usable during a wait. With an empty composer, arrows select the
-approval action and Enter confirms it. With text present, arrows keep their
-normal cursor meaning and Enter queues the text instead of approving. This is
-deliberate: queueing a follow-up must not turn into a tool approval by accident.
+While a decision is pending, the composer is replaced by an approval box. The
+text input is hidden and disabled, so ordinary typing cannot be mistaken for an
+approval or queued behind the wait. Input returns only after Approve or Cancel is
+confirmed. Scrolling keys still reach the operation preview.
 
 An approval whose exact preview could not be recorded has no actionable
 `Approve` button. `Cancel` is selected, and Enter denies.
@@ -25,11 +25,12 @@ An approval whose exact preview could not be recorded has no actionable
 ## Consequences
 
 The decision is visible instead of being encoded in a typed word, and the
-default path is one Enter keypress. A stray Enter can approve a tool call when
-the composer is empty, which is the explicit cost of the requested default.
+default path is one Enter keypress. A stray Enter can approve a tool call while
+the approval box is focused, which is the explicit cost of the requested default.
+Queueing a follow-up waits until the decision is made.
 
 ## Reassessment Conditions
 
 Revisit if approval needs more than two actions, if a keyboard-only confirmation
 must be separated from the default selection, or if queued input during a wait is
-removed.
+required again.

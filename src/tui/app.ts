@@ -2,7 +2,15 @@ import { Box, Text, useInput, usePaste } from "ink";
 import { createElement, type ReactElement, useState } from "react";
 import type { ProviderImage } from "../ports/model-provider.ts";
 import { ActivityIndicator } from "./activity-indicator.ts";
-import { Brand, clipText, colorProps, useViewport, type Viewport, wrapText } from "./chrome.ts";
+import {
+  Brand,
+  cellWidth,
+  clipText,
+  colorProps,
+  useViewport,
+  type Viewport,
+  wrapText,
+} from "./chrome.ts";
 import { CommandMenu } from "./command-menu.ts";
 import { CredentialScreen } from "./credential-screen.ts";
 import { InitPanel } from "./init-panel.ts";
@@ -131,8 +139,10 @@ export function App(props: AppProps): ReactElement {
       ? COMPOSER_COMMANDS.filter((command) => command.name.startsWith(draft))
       : [];
   const selectedCommand = Math.min(commandIndex, Math.max(0, commands.length - 1));
-  const bodyRows = Math.max(1, viewport.rows - 9);
-  const lines = documentLines(view, width, expandedTools, selectedTool, approvalChoice);
+  // The approval box is taller than the ordinary composer; reserve its lines so
+  // the title bar and the decision controls stay on screen together.
+  const bodyRows = Math.max(1, viewport.rows - (approvalKey === null ? 9 : 14));
+  const lines = documentLines(view, width, expandedTools);
   const maxStart = Math.max(0, lines.length - bodyRows);
   const start = scroll === null ? maxStart : Math.min(scroll, maxStart);
   const capabilities =
@@ -158,9 +168,14 @@ export function App(props: AppProps): ReactElement {
     });
   }
 
-  function toggleTool(id: string): void {
+  function toggleTool(id: string, reveal = false): void {
     setSelectedTool(id);
-    setScroll(start);
+    if (reveal && !expandedTools.has(id)) {
+      const index = lines.findIndex((line) => line.toolId === id);
+      setScroll(index < 0 ? start : index);
+    } else {
+      setScroll(start);
+    }
     setExpandedTools((current) => {
       const next = new Set(current);
       if (next.has(id)) next.delete(id);
@@ -192,34 +207,31 @@ export function App(props: AppProps): ReactElement {
       return;
     }
     if (approvalKey !== null) {
-      // Arrows choose between Approve and Cancel only while the composer is
-      // empty. With text present they keep their normal cursor-editing meaning,
-      // so queued input remains usable during a wait.
-      if (draft.length === 0 && key.leftArrow) {
+      // The composer is an approval box while a decision is pending, so every
+      // letter is a decision shortcut rather than text. Scrolling keys still
+      // reach the preview; everything else is swallowed.
+      if (key.leftArrow) {
         selectApproval(canApprove ? "approve" : "deny");
         return;
       }
-      if (draft.length === 0 && key.rightArrow) {
+      if (key.rightArrow) {
+        selectApproval("deny");
+        return;
+      }
+      if (input === "a") {
+        if (canApprove) selectApproval("approve");
+        return;
+      }
+      if (input === "d") {
         selectApproval("deny");
         return;
       }
       if (key.return) {
-        const text = draft.trim();
-        if (text === "a" || text === "d") {
-          setEditor({ value: "", cursor: 0 });
-          setScroll(null);
-          if (text === "a" && canApprove) props.onApprove();
-          else if (text === "d") props.onDeny();
-          return;
-        }
-        if (text.length === 0) {
-          if (approvalChoice === "approve" && canApprove) props.onApprove();
-          else props.onDeny();
-          return;
-        }
-        // Non-empty text falls through to the normal composer path, which queues
-        // it instead of treating Enter as a decision.
+        if (approvalChoice === "approve" && canApprove) props.onApprove();
+        else props.onDeny();
+        return;
       }
+      if (!(key.pageUp || key.pageDown || (key.ctrl && (key.home || key.end)))) return;
     }
     if (key.ctrl && input === "v") {
       // A terminal delivers the key, not the image. Reading the clipboard here is
@@ -253,7 +265,7 @@ export function App(props: AppProps): ReactElement {
         view.transcript.some((entry) => entry.id === selectedTool && entry.tool !== undefined)
           ? selectedTool
           : visibleTools.at(-1)?.toolId;
-      if (id !== undefined && id !== null) toggleTool(id);
+      if (id !== undefined && id !== null) toggleTool(id, true);
       return;
     }
     if (key.escape) {
@@ -313,7 +325,7 @@ export function App(props: AppProps): ReactElement {
   });
 
   usePaste((text) => {
-    if (view.localPanel != null) return;
+    if (view.localPanel != null || approvalKey !== null) return;
     setCommandIndex(0);
     setDismissedCommands(false);
     setEditor((current) => editText(current, text, {}));
@@ -428,6 +440,8 @@ export function App(props: AppProps): ReactElement {
           commandRows: Math.max(1, Math.min(6, Math.floor((viewport.rows - 5) / 2))),
           attachedImages: pastedImages.length,
           imageNotice,
+          approvalChoice,
+          canApprove,
           animated: props.animated,
         }),
         h(Footer, {
@@ -468,6 +482,9 @@ export function App(props: AppProps): ReactElement {
             key: `${start + index}`,
             ...colorProps(colorFor(line.role, capabilities)),
             ...(line.bold ? { bold: true } : {}),
+            ...(line.background === true && capabilities.depth !== "mono"
+              ? { backgroundColor: "black" }
+              : {}),
           },
           line.text || " ",
         ),
@@ -493,6 +510,8 @@ export function App(props: AppProps): ReactElement {
       commandRows: Math.max(1, Math.min(6, viewport.rows - 6)),
       attachedImages: pastedImages.length,
       imageNotice,
+      approvalChoice,
+      canApprove,
       animated: props.animated,
     }),
     h(Footer, {
@@ -510,6 +529,8 @@ type DocumentLine = Readonly<{
   role: "primary" | "secondary" | "tertiary" | "success" | "dim" | "faint";
   bold?: boolean;
   toolId?: string;
+  /** Fill the terminal background to make a tool box read as one block. */
+  background?: boolean;
 }>;
 
 /** Wrap rather than truncate: approval commands and diffs remain available by paging. */
@@ -517,48 +538,88 @@ function documentLines(
   view: TuiViewState,
   width: number,
   expanded: ReadonlySet<string>,
-  selected: string | null,
-  approvalChoice: ApprovalChoice,
 ): DocumentLine[] {
   const lines: DocumentLine[] = [];
   function append(text: string, role: DocumentLine["role"], bold = false): void {
     lines.push(...wrapText(displayText(text), width).map((line) => ({ text: line, role, bold })));
   }
-  function appendApprovalButtons(
-    choice: ApprovalChoice,
-    canApprove: boolean,
-    approveLabel: string,
+  function appendBoxTop(text: string, role: DocumentLine["role"], toolId: string): void {
+    if (width < 8) {
+      append(text, role, true);
+      return;
+    }
+    const left = "┌─ ";
+    const right = " ┐";
+    const inner = Math.max(1, width - cellWidth(left) - cellWidth(right));
+    const clipped = clipText(displayText(text), Math.max(1, inner - 1));
+    const fill = "─".repeat(Math.max(0, inner - cellWidth(clipped) - 1));
+    lines.push({
+      text: clipText(`${left}${clipped} ${fill}${right}`, width),
+      role,
+      bold: true,
+      toolId,
+    });
+  }
+  function appendBoxBottom(toolId: string): void {
+    if (width < 8) return;
+    lines.push({
+      text: `└${"─".repeat(Math.max(0, width - 2))}┘`,
+      role: "faint",
+      toolId,
+    });
+  }
+  function appendBoxLine(
+    text: string,
+    role: DocumentLine["role"],
+    toolId: string,
+    background = true,
   ): void {
-    const approve = canApprove
-      ? `${choice === "approve" ? "▶ " : "  "}${approveLabel}`
-      : `  ${approveLabel} (unavailable)`;
-    const deny = `${choice === "deny" ? "▶ " : "  "}Cancel`;
-    append(`[ ${approve} ]   [ ${deny} ]`, "secondary", true);
-    append("empty input: ←/→ select · Enter confirms", "dim");
+    if (width < 8) {
+      append(text, role);
+      return;
+    }
+    const inner = Math.max(1, width - 4);
+    const clipped = clipText(displayText(text), inner);
+    const padding = " ".repeat(Math.max(0, inner - cellWidth(clipped)));
+    lines.push({
+      text: `│ ${clipped}${padding} │`,
+      role,
+      toolId,
+      ...(background ? { background: true } : {}),
+    });
+  }
+  function appendToolBlock(entry: TuiViewState["transcript"][number], isExpanded: boolean): void {
+    if (entry.tool === undefined) {
+      const role = entry.status === "failed" || entry.status === "denied" ? "tertiary" : "dim";
+      append(`▌ tool·${entry.status ?? "requested"}`, role, true);
+      append(entry.text, "dim");
+      return;
+    }
+    const status = entry.status ?? "requested";
+    const role =
+      status === "failed" || status === "denied" || status === "outcome_unknown"
+        ? "tertiary"
+        : status === "succeeded"
+          ? "success"
+          : "secondary";
+    appendBoxTop(`${isExpanded ? "▾" : "▸"} ${entry.tool.summary} · ${status}`, role, entry.id);
+    const detailLines =
+      entry.tool.details.length === 0 ? ["(no recorded details)"] : entry.tool.details.split("\n");
+    const shown = isExpanded ? detailLines : detailLines.slice(0, 2);
+    const hidden = detailLines.length - shown.length;
+    if (!isExpanded && hidden > 0) {
+      appendBoxLine(`… ${hidden} more line(s) · click to expand`, "faint", entry.id);
+    }
+    for (const detail of shown) {
+      for (const wrapped of wrapText(displayText(detail), Math.max(1, width - 4))) {
+        appendBoxLine(wrapped, "dim", entry.id);
+      }
+    }
+    appendBoxBottom(entry.id);
   }
   for (const entry of view.transcript) {
-    if (entry.kind === "tool" && entry.tool !== undefined) {
-      const isExpanded = expanded.has(entry.id);
-      const role =
-        entry.status === "failed" || entry.status === "denied" || entry.status === "outcome_unknown"
-          ? "tertiary"
-          : entry.status === "succeeded"
-            ? "success"
-            : "secondary";
-      const prefix = `${selected === entry.id ? "▸" : " "} ${isExpanded ? "▾" : "▸"} `;
-      const suffix = ` · ${entry.status ?? "requested"}`;
-      lines.push({
-        text: clipText(
-          `${prefix}${clipText(displayText(entry.tool.summary), Math.max(1, width - prefix.length - suffix.length))}${suffix}`,
-          width,
-        ),
-        role,
-        bold: true,
-        toolId: entry.id,
-      });
-      if (isExpanded) {
-        append(entry.tool.details || "(no recorded details)", "dim");
-      }
+    if (entry.kind === "tool") {
+      appendToolBlock(entry, expanded.has(entry.id));
       append("", "faint");
       continue;
     }
@@ -575,10 +636,8 @@ function documentLines(
         ? `you${entry.status === null ? "" : ` · ${entry.status}`}`
         : entry.kind === "assistant"
           ? `agent${entry.status === "streaming" ? " · streaming" : ""}`
-          : entry.kind === "tool"
-            ? `tool${entry.status === null ? "" : `·${entry.status}`}`
-            : "sys";
-    append(`▌ ${label}`, role, true);
+          : "[sys]";
+    append(`▌ ${label}`, entry.kind === "system" ? "secondary" : role, true);
     append(entry.status === "streaming" ? `${entry.text}▍` : entry.text, "dim");
     append("", "faint");
   }
@@ -593,14 +652,14 @@ function documentLines(
   if (view.pendingDisclosure != null) {
     append("Sensitive context redisclosure", "secondary", true);
     for (const line of view.pendingDisclosure.safePreview.split("\n")) append(line, "dim");
-    appendApprovalButtons(approvalChoice, true, "Consent");
+    append("decision: use the consent box below", "faint");
   }
   if (view.pendingApproval !== null) {
     append(`▌ approval required · ${view.pendingApproval.toolName}`, "secondary", true);
     if (view.pendingApprovalPreview === null)
       append("preview unavailable: the exact operation is not recorded", "tertiary");
     else for (const line of view.pendingApprovalPreview) append(line, "dim");
-    appendApprovalButtons(approvalChoice, view.pendingApprovalPreview !== null, "Approve");
+    append("decision: use the approval box below", "faint");
   }
   if (view.pendingQuestion !== null) {
     const question = view.pendingQuestion;
@@ -659,6 +718,73 @@ function marker(state: string): string {
 }
 
 /**
+ * The approval box that replaces the composer while a decision is pending.
+ *
+ * The full operation preview stays in the transcript, where it is scrollable.
+ * This box owns the decision, so ordinary input cannot be typed or queued until
+ * Approve or Cancel is confirmed.
+ */
+function ApprovalBox(props: {
+  view: TuiViewState;
+  capabilities: Capabilities;
+  width: number;
+  choice: ApprovalChoice;
+  canApprove: boolean;
+}): ReactElement {
+  const { view, capabilities, choice, canApprove } = props;
+  const disclosure = view.pendingDisclosure !== null;
+  const title = disclosure
+    ? "sensitive context redisclosure"
+    : `approval required · ${view.pendingApproval?.toolName ?? "tool"}`;
+  const approveLabel = disclosure ? "Consent" : "Approve";
+  const approveText = canApprove
+    ? `${choice === "approve" ? "▶ " : "  "}${approveLabel}`
+    : `  ${approveLabel} (unavailable)`;
+  const cancelText = `${choice === "deny" ? "▶ " : "  "}Cancel`;
+  return h(
+    Box,
+    {
+      flexDirection: "column",
+      marginTop: 1,
+      flexShrink: 0,
+      width: props.width,
+      borderStyle: "round",
+      borderColor: colorFor("secondary", capabilities),
+      paddingX: 1,
+    },
+    h(Text, { bold: true, ...colorProps(colorFor("secondary", capabilities)) }, `▌ ${title}`),
+    h(
+      Box,
+      { marginTop: 1 },
+      h(
+        Text,
+        {
+          ...colorProps(
+            colorFor(choice === "approve" && canApprove ? "secondary" : "dim", capabilities),
+          ),
+          ...(choice === "approve" && canApprove ? { bold: true } : {}),
+        },
+        approveText,
+      ),
+      h(Text, null, "    "),
+      h(
+        Text,
+        {
+          ...colorProps(colorFor(choice === "deny" ? "secondary" : "dim", capabilities)),
+          ...(choice === "deny" ? { bold: true } : {}),
+        },
+        cancelText,
+      ),
+    ),
+    h(
+      Text,
+      colorProps(colorFor("faint", capabilities)),
+      "←/→ select · Enter confirms · input returns after the decision",
+    ),
+  );
+}
+
+/**
  * The composer, with the lane bar on its left edge.
  *
  * The bar is the reference's most recognisable element: it marks where input goes and
@@ -676,16 +802,23 @@ function Composer(props: {
   attachedImages: number;
   /** Why the last paste produced no image. */
   imageNotice: string | null;
+  approvalChoice: ApprovalChoice;
+  canApprove: boolean;
   animated?: boolean | undefined;
 }): ReactElement {
   const { view, editor, capabilities } = props;
+  if (view.pendingDisclosure != null || view.pendingApproval !== null) {
+    return h(ApprovalBox, {
+      view,
+      capabilities,
+      width: props.width,
+      choice: props.approvalChoice,
+      canApprove: props.canApprove,
+    });
+  }
   const accent = colorFor(view.queueingInput ? "secondary" : "primary", capabilities);
-  const approvalPending = view.pendingDisclosure != null || view.pendingApproval !== null;
-  const hint = approvalPending
-    ? editor.value.length === 0
-      ? "←/→ select · Enter confirms"
-      : 'Enter queues · "a"/"d" decide'
-    : view.pendingQuestion !== null
+  const hint =
+    view.pendingQuestion !== null
       ? "Enter answer"
       : view.queueingInput
         ? "queued as supplementary input for the running run"
@@ -757,7 +890,14 @@ function Footer(props: {
   width: number;
 }): ReactElement {
   const { view, capabilities, modelLabel } = props;
-  const mode = view.queueingInput ? "queue" : view.runStatus === "idle" ? "ready" : view.runStatus;
+  const approvalPending = view.pendingApproval !== null || view.pendingDisclosure != null;
+  const mode = approvalPending
+    ? "approval"
+    : view.queueingInput
+      ? "queue"
+      : view.runStatus === "idle"
+        ? "ready"
+        : view.runStatus;
   const accent = colorFor(view.runStatus === "failed" ? "tertiary" : "primary", capabilities);
   return h(
     Box,
