@@ -372,6 +372,8 @@ export async function selectRuntime(options) {
                     ids,
                     enableWrites,
                     enableProcesses,
+                    enableLsp: options.enableLsp === true,
+                    enableWeb: options.enableWeb === true,
                     enableSkills: options.enableSkills === true,
                     ownedKeys: assembly.ownedKeys,
                     refreshOwnedKeys: assembly.refreshOwnedKeys,

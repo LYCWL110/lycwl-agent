@@ -238,8 +238,25 @@ function sampleFor(spec: Record<string, unknown> | undefined): unknown {
     return minimum;
   }
   if (type === "boolean") return true;
-  if (type === "array") return [];
-  if (type === "object") return {};
+  if (type === "array") {
+    const items = spec["items"];
+    return items === undefined ? [] : [sampleFor(items as Record<string, unknown>)];
+  }
+  if (type === "object") {
+    const required = spec["required"];
+    const properties = spec["properties"];
+    if (Array.isArray(required) && typeof properties === "object" && properties !== null) {
+      const sample: Record<string, unknown> = {};
+      for (const name of required) {
+        if (typeof name !== "string") continue;
+        sample[name] = sampleFor(
+          (properties as Record<string, unknown>)[name] as Record<string, unknown> | undefined,
+        );
+      }
+      return sample;
+    }
+    return {};
+  }
   const pattern = spec["pattern"];
   if (typeof pattern === "string" && pattern.includes("[a-z]")) return "abc";
   return "x";

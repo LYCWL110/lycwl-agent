@@ -6,10 +6,12 @@
  * matches what the executor actually validates. Keeping both in one file is what
  * stops the advertised contract and the implemented contract from drifting.
  *
- * Only tools that are both implemented and safe to expose in a read-only session
- * appear here. Write, delete, rename, shell, background, LSP and web tools are
- * omitted deliberately: exposing a schema for a tool the composition root does not
- * wire would advertise a capability that fails at call time.
+ * The catalog lists every built-in tool this build can implement. Which entries
+ * are advertised is decided by the composition root through `availableTools`:
+ * write/delete/rename require `enableWrites`, shell/background require
+ * `enableProcesses`, LSP requires `enableLsp` plus a separately started and
+ * approved server, and web requires `enableWeb`. An entry here is a schema, not
+ * a promise that the tool is wired in the current session.
  */
 
 export type ToolJsonSchema = Readonly<{
@@ -151,6 +153,117 @@ export const TOOL_CATALOG: readonly CatalogEntry[] = Object.freeze([
     },
   },
   {
+    name: "lsp_diagnostics",
+    description:
+      "Ask the approved session language server for diagnostics on one workspace file. " +
+      "Requires a started and approved LSP instance; otherwise it fails with lsp_not_started.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Workspace-relative or absolute path of the file to inspect.",
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "lsp_definition",
+    description:
+      "Find the definition at a zero-based line and character position using the approved " +
+      "session language server. Requires a started and approved LSP instance.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Workspace-relative or absolute path of the file.",
+        },
+        position: {
+          type: "object",
+          properties: {
+            line: { type: "integer", minimum: 0, description: "Zero-based line." },
+            character: { type: "integer", minimum: 0, description: "Zero-based character." },
+          },
+          required: ["line", "character"],
+          additionalProperties: false,
+        },
+      },
+      required: ["path", "position"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "lsp_references",
+    description:
+      "Find references at a zero-based line and character position using the approved " +
+      "session language server. Requires a started and approved LSP instance.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Workspace-relative or absolute path of the file.",
+        },
+        position: {
+          type: "object",
+          properties: {
+            line: { type: "integer", minimum: 0, description: "Zero-based line." },
+            character: { type: "integer", minimum: 0, description: "Zero-based character." },
+          },
+          required: ["line", "character"],
+          additionalProperties: false,
+        },
+      },
+      required: ["path", "position"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "web_search",
+    description:
+      "Search the web for current information. Requires approval and a configured search " +
+      "backend. Fee-sensitive operators are rejected while the vendor fee rules are unreviewed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query." },
+        count: {
+          type: "integer",
+          minimum: 1,
+          maximum: 10,
+          description: "Number of results to request. Defaults to 10.",
+        },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "web_fetch",
+    description:
+      "Fetch one HTTP or HTTPS URL with approval. Redirects are reported rather than followed; " +
+      "cookies, proxy inheritance and credentials are not used.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "HTTP or HTTPS URL to fetch." },
+        headers: {
+          type: "object",
+          properties: {
+            accept: { type: "string", description: "Accept header value." },
+            "accept-language": { type: "string", description: "Accept-Language header value." },
+          },
+          additionalProperties: false,
+        },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "todo",
     description:
       "Replace the visible task list. Each item needs a stable id, content, and state. " +
@@ -243,6 +356,39 @@ export const TOOL_CATALOG: readonly CatalogEntry[] = Object.freeze([
         },
       },
       required: ["patch"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "delete_path",
+    description:
+      "Permanently remove one or more workspace files or empty directories. Every target " +
+      "is previewed and approved separately. There is no trash, backup or restore promise.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        paths: {
+          type: "array",
+          description: "Workspace-relative or absolute paths to remove.",
+          items: { type: "string" },
+        },
+      },
+      required: ["paths"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "rename_path",
+    description:
+      "Rename a workspace path on the same volume. Fails when the target already exists. " +
+      "The operation is previewed and approved.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "Existing workspace-relative or absolute path." },
+        to: { type: "string", description: "New workspace-relative or absolute path." },
+      },
+      required: ["from", "to"],
       additionalProperties: false,
     },
   },

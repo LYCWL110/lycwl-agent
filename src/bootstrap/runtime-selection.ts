@@ -113,6 +113,16 @@ export type SelectRuntimeOptions = Readonly<{
    */
   enableProcesses?: boolean;
   /**
+   * Expose LSP tools. A language server must still be started and approved
+   * separately; this flag alone does not spawn one.
+   */
+  enableLsp?: boolean;
+  /**
+   * Expose web tools. WebSearch still requires a configured search backend and
+   * every request still requires approval.
+   */
+  enableWeb?: boolean;
+  /**
    * Conversation identity. A fresh launch supplies a new ID; explicit resume
    * and configuration reload reuse one. Absent creates one per coordinator.
    */
@@ -514,6 +524,8 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
           ids,
           enableWrites,
           enableProcesses,
+          enableLsp: options.enableLsp === true,
+          enableWeb: options.enableWeb === true,
           enableSkills: options.enableSkills === true,
           ownedKeys: assembly.ownedKeys,
           refreshOwnedKeys: assembly.refreshOwnedKeys,
