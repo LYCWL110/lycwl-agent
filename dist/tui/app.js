@@ -31,6 +31,19 @@ export function App(props) {
     const { view } = props;
     const [editor, setEditor] = useState({ value: "", cursor: 0 });
     /**
+     * Focused approval button. Focus is not a reply: the Run stays suspended
+     * until Enter confirms the selected action. A new approval starts on Approve
+     * for tool calls and on Cancel for sensitive redisclosure.
+     */
+    const approvalKey = view.pendingApproval?.approvalId ?? view.pendingDisclosure?.disclosureId ?? null;
+    const approvalDefault = view.pendingDisclosure === null ? "approve" : "deny";
+    const [approvalSelection, setApprovalSelection] = useState(null);
+    const canApprove = view.pendingDisclosure !== null || view.pendingApprovalPreview !== null;
+    const selectedApproval = approvalKey !== null && approvalSelection?.key === approvalKey
+        ? approvalSelection.choice
+        : approvalDefault;
+    const approvalChoice = canApprove ? selectedApproval : "deny";
+    /**
      * Images pasted with Ctrl+V and not yet sent.
      *
      * A terminal paste carries text only, so the image is read from the system
@@ -58,7 +71,7 @@ export function App(props) {
         : [];
     const selectedCommand = Math.min(commandIndex, Math.max(0, commands.length - 1));
     const bodyRows = Math.max(1, viewport.rows - 9);
-    const lines = documentLines(view, width, expandedTools, selectedTool);
+    const lines = documentLines(view, width, expandedTools, selectedTool, approvalChoice);
     const maxStart = Math.max(0, lines.length - bodyRows);
     const start = scroll === null ? maxStart : Math.min(scroll, maxStart);
     const capabilities = props.capabilities ??
@@ -69,6 +82,11 @@ export function App(props) {
             force: process.env["LYCWL_COLOR"],
             windowsTerminal: process.env["WT_SESSION"] !== undefined,
         });
+    function selectApproval(choice) {
+        if (approvalKey === null)
+            return;
+        setApprovalSelection({ key: approvalKey, choice });
+    }
     function scrollBy(delta) {
         setScroll((current) => {
             const top = current === null ? maxStart : Math.min(current, maxStart);
@@ -105,6 +123,40 @@ export function App(props) {
         if (key.ctrl && input === "c") {
             props.onCancelRun();
             return;
+        }
+        if (approvalKey !== null) {
+            // Arrows choose between Approve and Cancel only while the composer is
+            // empty. With text present they keep their normal cursor-editing meaning,
+            // so queued input remains usable during a wait.
+            if (draft.length === 0 && key.leftArrow) {
+                selectApproval(canApprove ? "approve" : "deny");
+                return;
+            }
+            if (draft.length === 0 && key.rightArrow) {
+                selectApproval("deny");
+                return;
+            }
+            if (key.return) {
+                const text = draft.trim();
+                if (text === "a" || text === "d") {
+                    setEditor({ value: "", cursor: 0 });
+                    setScroll(null);
+                    if (text === "a" && canApprove)
+                        props.onApprove();
+                    else if (text === "d")
+                        props.onDeny();
+                    return;
+                }
+                if (text.length === 0) {
+                    if (approvalChoice === "approve" && canApprove)
+                        props.onApprove();
+                    else
+                        props.onDeny();
+                    return;
+                }
+                // Non-empty text falls through to the normal composer path, which queues
+                // it instead of treating Enter as a decision.
+            }
         }
         if (key.ctrl && input === "v") {
             // A terminal delivers the key, not the image. Reading the clipboard here is
@@ -191,18 +243,6 @@ export function App(props) {
                 return;
             if (view.pendingQuestion !== null)
                 props.onAnswer(text);
-            else if (view.pendingDisclosure != null) {
-                if (text === "a")
-                    props.onApprove();
-                else if (text === "d")
-                    props.onDeny();
-            }
-            else if (view.pendingApproval !== null) {
-                if (text === "a" && view.pendingApprovalPreview !== null)
-                    props.onApprove();
-                else if (text === "d")
-                    props.onDeny();
-            }
             else
                 submit(text);
             return;
@@ -360,10 +400,18 @@ export function App(props) {
     }));
 }
 /** Wrap rather than truncate: approval commands and diffs remain available by paging. */
-function documentLines(view, width, expanded, selected) {
+function documentLines(view, width, expanded, selected, approvalChoice) {
     const lines = [];
     function append(text, role, bold = false) {
         lines.push(...wrapText(displayText(text), width).map((line) => ({ text: line, role, bold })));
+    }
+    function appendApprovalButtons(choice, canApprove, approveLabel) {
+        const approve = canApprove
+            ? `${choice === "approve" ? "▶ " : "  "}${approveLabel}`
+            : `  ${approveLabel} (unavailable)`;
+        const deny = `${choice === "deny" ? "▶ " : "  "}Cancel`;
+        append(`[ ${approve} ]   [ ${deny} ]`, "secondary", true);
+        append("empty input: ←/→ select · Enter confirms", "dim");
     }
     for (const entry of view.transcript) {
         if (entry.kind === "tool" && entry.tool !== undefined) {
@@ -414,7 +462,7 @@ function documentLines(view, width, expanded, selected) {
         append("Sensitive context redisclosure", "secondary", true);
         for (const line of view.pendingDisclosure.safePreview.split("\n"))
             append(line, "dim");
-        append('type "a" then Enter to consent, "d" to deny', "secondary");
+        appendApprovalButtons(approvalChoice, true, "Consent");
     }
     if (view.pendingApproval !== null) {
         append(`▌ approval required · ${view.pendingApproval.toolName}`, "secondary", true);
@@ -423,9 +471,7 @@ function documentLines(view, width, expanded, selected) {
         else
             for (const line of view.pendingApprovalPreview)
                 append(line, "dim");
-        append(view.pendingApprovalPreview === null
-            ? 'type "d" then Enter to deny'
-            : 'type "a" then Enter to approve, "d" to deny', "secondary");
+        appendApprovalButtons(approvalChoice, view.pendingApprovalPreview !== null, "Approve");
     }
     if (view.pendingQuestion !== null) {
         const question = view.pendingQuestion;
@@ -482,19 +528,18 @@ function marker(state) {
 function Composer(props) {
     const { view, editor, capabilities } = props;
     const accent = colorFor(view.queueingInput ? "secondary" : "primary", capabilities);
-    const hint = view.pendingDisclosure != null
-        ? "a consent  /  d deny"
-        : view.pendingApproval !== null
-            ? view.pendingApprovalPreview === null
-                ? "d deny · preview unavailable"
-                : "a approve  ·  d deny"
-            : view.pendingQuestion !== null
-                ? "Enter answer"
-                : view.queueingInput
-                    ? "queued as supplementary input for the running run"
-                    : view.canSubmit
-                        ? "Enter submits · / commands · Ctrl+C cancels"
-                        : "run is busy";
+    const approvalPending = view.pendingDisclosure != null || view.pendingApproval !== null;
+    const hint = approvalPending
+        ? editor.value.length === 0
+            ? "←/→ select · Enter confirms"
+            : 'Enter queues · "a"/"d" decide'
+        : view.pendingQuestion !== null
+            ? "Enter answer"
+            : view.queueingInput
+                ? "queued as supplementary input for the running run"
+                : view.canSubmit
+                    ? "Enter submits · / commands · Ctrl+C cancels"
+                    : "run is busy";
     return h(Box, { flexDirection: "column", marginTop: 1, flexShrink: 0 }, h(Box, null, h(Text, colorProps(accent), "▌ "), h(Text, colorProps(accent), view.queueingInput ? "queue" : "task"), h(Text, null, " › "), 
     // The attachment marker sits before the input so the user sees that the next
     // send will carry an image before typing the task.

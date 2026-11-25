@@ -307,8 +307,85 @@ describe("TUI rendering", () => {
     const frame = instance.lastFrame() ?? "";
     expect(frame).toMatch(/waiting:approval/);
     expect(frame).toMatch(/approval required · shell/);
-    expect(frame).toMatch(/type "a" then Enter to approve/);
+    expect(frame).toMatch(/▶ Approve/);
+    expect(frame).toMatch(/Cancel/);
+    expect(frame).toMatch(/←\/→ select · Enter confirms/);
     instance.unmount();
+  });
+
+  it("defaults tool approval to Approve and moves to Cancel with the right arrow", async () => {
+    const view: TuiViewState = {
+      ...EMPTY_VIEW,
+      runStatus: "waiting",
+      waitingKind: "approval",
+      canSubmit: false,
+      queueingInput: true,
+      pendingApproval: {
+        approvalId: "approval-arrow",
+        toolCallId: "call-arrow",
+        toolName: "shell",
+        requestVersion: 1,
+      },
+      pendingApprovalPreview: ["command: npm test"],
+    };
+    let approved = 0;
+    let denied = 0;
+    const instance = render(
+      createElement(App, {
+        ...actions,
+        view,
+        onApprove: () => {
+          approved += 1;
+        },
+        onDeny: () => {
+          denied += 1;
+        },
+      }),
+    );
+    try {
+      expect(instance.lastFrame()).toMatch(/▶ Approve/);
+      await press(instance.stdin, "\u001b[C");
+      expect(instance.lastFrame()).toMatch(/▶ Cancel/);
+      await press(instance.stdin, "\r");
+      expect(approved).toBe(0);
+      expect(denied).toBe(1);
+    } finally {
+      instance.unmount();
+    }
+  });
+
+  it("approves a tool with Enter when the default Approve button is selected", async () => {
+    const view: TuiViewState = {
+      ...EMPTY_VIEW,
+      runStatus: "waiting",
+      waitingKind: "approval",
+      canSubmit: false,
+      queueingInput: true,
+      pendingApproval: {
+        approvalId: "approval-enter",
+        toolCallId: "call-enter",
+        toolName: "shell",
+        requestVersion: 1,
+      },
+      pendingApprovalPreview: ["command: npm test"],
+    };
+    let approved = 0;
+    const instance = render(
+      createElement(App, {
+        ...actions,
+        view,
+        onApprove: () => {
+          approved += 1;
+        },
+      }),
+    );
+    try {
+      expect(instance.lastFrame()).toMatch(/▶ Approve/);
+      await press(instance.stdin, "\r");
+      expect(approved).toBe(1);
+    } finally {
+      instance.unmount();
+    }
   });
 
   it("renders the question panel with its options", () => {
@@ -777,7 +854,8 @@ describe("Miyu layout and configuration keys", () => {
       }),
     );
     expect(instance.lastFrame()).toMatch(/preview unavailable/);
-    expect(instance.lastFrame()).not.toMatch(/a approve|Enter to approve/);
+    expect(instance.lastFrame()).toMatch(/Approve \(unavailable\)/);
+    expect(instance.lastFrame()).toMatch(/▶ Cancel/);
     await new Promise((resolve) => setTimeout(resolve, 20));
     instance.stdin.write("a");
     await new Promise((resolve) => setTimeout(resolve, 20));
