@@ -52,8 +52,9 @@ describe("Linux lycwl command", { skip: process.platform !== "linux" }, () => {
       timeout: 10_000,
     });
     assert.match(help.stdout, /lycwl --read-only/);
-    assert.match(help.stdout, /writes and shell enabled/);
+    assert.match(help.stdout, /writes, shell and web enabled/);
     assert.match(help.stdout, /lycwl --resume ID/);
+    assert.match(help.stdout, /lycwl --search-key/);
     assert.match(help.stdout, /Linux user permissions/);
   });
 

@@ -135,6 +135,26 @@ describe("web_search execution", () => {
       safeCode: "search_outcome_unknown",
     });
   });
+
+  it("passes the coordinator-owned Run identity to the search runner", async () => {
+    let received: Readonly<{ sessionId: string; runId: string }> | undefined;
+    const f = fixture({
+      overrides: {
+        runSearch: async (_request, _toolCallId, owner) => {
+          received = owner;
+          return { kind: "completed", items: [] };
+        },
+      },
+    });
+    await f.tool.execute({
+      toolCallId: "call-1",
+      toolName: "web_search",
+      arguments: { query: "q" },
+      owner: { sessionId: "session-1", runId: "run-1" },
+    });
+
+    assert.deepEqual(received, { sessionId: "session-1", runId: "run-1" });
+  });
 });
 
 describe("web_fetch execution", () => {

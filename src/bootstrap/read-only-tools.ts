@@ -73,8 +73,8 @@ export type WorkspaceToolsOptions = Readonly<{
    */
   enableLsp?: boolean;
   /**
-   * Set true to expose WebFetch. WebSearch still refuses because no reviewed fee
-   * snapshot or paid account is configured, and the baseline forbids guessing.
+   * Web tools are on by default. Every request still needs its own approval.
+   * Set false to leave `web_search` and `web_fetch` unwired.
    */
   enableWeb?: boolean;
   /**
@@ -109,7 +109,14 @@ export type WorkspaceToolsOptions = Readonly<{
 }>;
 
 export function createReadOnlyWorkspaceTools(options: WorkspaceToolsOptions): ToolExecutor {
-  return createWorkspaceTools({ ...options, enableWrites: false, enableProcesses: false });
+  return createWorkspaceTools({
+    ...options,
+    enableWrites: false,
+    enableProcesses: false,
+    // Read-only also opts out of network effects. The tools themselves remain
+    // approval-gated when web is enabled explicitly.
+    enableWeb: false,
+  });
 }
 
 export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecutor {
@@ -117,7 +124,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
   const enableWrites = options.enableWrites !== false;
   const enableProcesses = options.enableProcesses === true;
   const enableLsp = options.enableLsp === true;
-  const enableWeb = options.enableWeb === true;
+  const enableWeb = options.enableWeb !== false;
   const searchLedger = createSearchLedger(
     options.searchLedgerDirectory === undefined ? {} : { directory: options.searchLedgerDirectory },
   );
@@ -345,7 +352,11 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
           if (!resolved.ok) throw new Error(resolved.code);
           return resolved.addresses;
         },
-        runSearch: async (request, toolCallId) => {
+        runSearch: async (request, toolCallId, owner) => {
+          // The coordinator's Run identity is authoritative for the per-Run
+          // quota. The constructor defaults are only for callers outside a Run.
+          const sessionId = owner?.sessionId ?? ledgerSessionId;
+          const runId = owner?.runId ?? ledgerRunId;
           if (options.resolveSearchApiKey === undefined) {
             // No credential boundary was composed, so there is nothing to
             // authenticate with. This is a definite non-send, not a charge.
@@ -366,8 +377,8 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
           }
           // C07: a durable reservation must exist before the request is sent.
           const reservationId = makeReservationId({
-            sessionId: ledgerSessionId,
-            runId: ledgerRunId,
+            sessionId,
+            runId,
             toolCallId,
             query: request.query,
           });
@@ -375,8 +386,8 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
           const reserved = await searchLedger.reserve({
             reservationId,
             utcMonth: recordedAtUtc.slice(0, 7),
-            runId: ledgerRunId,
-            sessionId: ledgerSessionId,
+            runId,
+            sessionId,
             recordedAtUtc,
           });
           if (!reserved.ok) {

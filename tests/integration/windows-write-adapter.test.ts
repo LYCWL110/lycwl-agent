@@ -269,9 +269,9 @@ describe("write safety on real disk", () => {
     });
   });
 
-  it("still fails closed for shell, background, LSP and web", async () => {
+  it("still fails closed for shell, background and LSP", async () => {
     const t = tools();
-    for (const toolName of ["shell", "background_start", "lsp_diagnostics", "web_fetch"]) {
+    for (const toolName of ["shell", "background_start", "lsp_diagnostics"]) {
       const result = await t.execute({
         toolCallId: "c1",
         toolName,

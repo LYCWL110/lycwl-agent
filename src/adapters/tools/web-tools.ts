@@ -46,7 +46,11 @@ export type WebToolDependencies = Readonly<{
    * quota reservation is bound to the call rather than to the query text; two
    * identical queries are still two distinct reservations.
    */
-  runSearch: (request: WebSearchRequest, toolCallId: string) => Promise<WebSearchRun>;
+  runSearch: (
+    request: WebSearchRequest,
+    toolCallId: string,
+    owner?: Readonly<{ sessionId: string; runId: string }>,
+  ) => Promise<WebSearchRun>;
   /** Injected fetch runner; must not follow redirects automatically. */
   runFetch: (
     request: WebFetchRequest,
@@ -163,7 +167,7 @@ export function createWebTools(dependencies: WebToolDependencies): ToolExecutor 
 
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
       if (request.toolName === WEB_SEARCH_DEFINITION.name) {
-        return executeSearch(dependencies, request.arguments, request.toolCallId);
+        return executeSearch(dependencies, request.arguments, request.toolCallId, request.owner);
       }
       if (request.toolName === WEB_FETCH_DEFINITION.name) {
         const snapshot = snapshots.get(request.toolCallId);
@@ -179,6 +183,7 @@ async function executeSearch(
   dependencies: WebToolDependencies,
   args: unknown,
   toolCallId: string,
+  owner?: Readonly<{ sessionId: string; runId: string }>,
 ): Promise<ToolExecutionResult> {
   const validated = validateWebSearch(args, {
     surchargeRulesReviewed: dependencies.surchargeRulesReviewed,
@@ -187,7 +192,7 @@ async function executeSearch(
 
   let run: WebSearchRun;
   try {
-    run = await dependencies.runSearch(validated.value, toolCallId);
+    run = await dependencies.runSearch(validated.value, toolCallId, owner);
   } catch {
     // A paid request may already have been sent; keep the charge unknown.
     return { status: "outcome_unknown", safeCode: "search_outcome_unknown" };

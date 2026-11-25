@@ -24,6 +24,7 @@ import {
   assertProtectedValue,
   ProtectedDeliveryError,
 } from "../services/security/guarded-delivery.ts";
+import { SEARCH_CREDENTIAL_REFERENCE } from "./search-key.ts";
 
 /**
  * Real runtime composition.
@@ -55,6 +56,8 @@ export type RuntimeAssembly =
       refreshOwnedKeys: () => Promise<void>;
       runBinding: RunModelBinding;
       resolveCredentialRevision: () => Promise<number | null>;
+      /** Read the Tavily key from the purpose-bound vault reference, or null. */
+      resolveSearchApiKey: () => Promise<string | null>;
       requestFingerprint: (value: unknown) => Promise<string>;
       /** Non-fatal notes worth showing, e.g. plaintext credential storage. */
       warnings: readonly string[];
@@ -151,6 +154,18 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
       ])
         byValue.set(value, { ...key, value, byteEncoding: "latin1" });
     }
+    // The search key is also a sending credential. Protecting it here means a
+    // model reply or tool result that echoes it is blocked before delivery, the
+    // same way a provider key is.
+    const search = await vault.readCurrent(SEARCH_CREDENTIAL_REFERENCE, "search_api_key");
+    if (search.ok) {
+      byValue.set(search.value.secret, {
+        keyId: `search:${search.value.credential.revision}`,
+        value: search.value.secret,
+        revision: search.value.credential.revision,
+        state: "sending",
+      });
+    }
     protectedKeys = [...byValue.values()];
   };
   try {
@@ -232,6 +247,15 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
       return null;
     return read.value.secret;
   };
+
+  // The search credential is read at the point of use, like the provider key.
+  // A missing or unreadable entry is "not configured"; it never falls back to an
+  // environment variable or another vendor.
+  const resolveSearchApiKey = async () => {
+    const read = await vault.readCurrent(SEARCH_CREDENTIAL_REFERENCE, "search_api_key");
+    return read.ok ? read.value.secret : null;
+  };
+
   const guardRequest = async (request: ProviderHttpRequest): Promise<ProviderHttpResult | null> => {
     await refreshOwnedKeys();
     if (prepared !== null) {
@@ -328,6 +352,7 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
     refreshOwnedKeys,
     runBinding,
     resolveCredentialRevision,
+    resolveSearchApiKey,
     requestFingerprint: async (value) => hash([config, options.toolDefinitions, value]),
   };
 }

@@ -33,14 +33,21 @@ export const UNAVAILABLE_CODE = "tool_unavailable_in_build";
 /** Harness-managed User-Agent; the model never supplies it. */
 const HARNESS_USER_AGENT = "lycwl-agent/0.1";
 export function createReadOnlyWorkspaceTools(options) {
-    return createWorkspaceTools({ ...options, enableWrites: false, enableProcesses: false });
+    return createWorkspaceTools({
+        ...options,
+        enableWrites: false,
+        enableProcesses: false,
+        // Read-only also opts out of network effects. The tools themselves remain
+        // approval-gated when web is enabled explicitly.
+        enableWeb: false,
+    });
 }
 export function createWorkspaceTools(options) {
     const { workspaceRoot, approvals, ids } = options;
     const enableWrites = options.enableWrites !== false;
     const enableProcesses = options.enableProcesses === true;
     const enableLsp = options.enableLsp === true;
-    const enableWeb = options.enableWeb === true;
+    const enableWeb = options.enableWeb !== false;
     const searchLedger = createSearchLedger(options.searchLedgerDirectory === undefined ? {} : { directory: options.searchLedgerDirectory });
     const ledgerSessionId = options.sessionId ?? "local-session";
     const ledgerRunId = options.runId ?? "local-run";
@@ -263,7 +270,11 @@ export function createWorkspaceTools(options) {
                     throw new Error(resolved.code);
                 return resolved.addresses;
             },
-            runSearch: async (request, toolCallId) => {
+            runSearch: async (request, toolCallId, owner) => {
+                // The coordinator's Run identity is authoritative for the per-Run
+                // quota. The constructor defaults are only for callers outside a Run.
+                const sessionId = owner?.sessionId ?? ledgerSessionId;
+                const runId = owner?.runId ?? ledgerRunId;
                 if (options.resolveSearchApiKey === undefined) {
                     // No credential boundary was composed, so there is nothing to
                     // authenticate with. This is a definite non-send, not a charge.
@@ -285,8 +296,8 @@ export function createWorkspaceTools(options) {
                 }
                 // C07: a durable reservation must exist before the request is sent.
                 const reservationId = makeReservationId({
-                    sessionId: ledgerSessionId,
-                    runId: ledgerRunId,
+                    sessionId,
+                    runId,
                     toolCallId,
                     query: request.query,
                 });
@@ -294,8 +305,8 @@ export function createWorkspaceTools(options) {
                 const reserved = await searchLedger.reserve({
                     reservationId,
                     utcMonth: recordedAtUtc.slice(0, 7),
-                    runId: ledgerRunId,
-                    sessionId: ledgerSessionId,
+                    runId,
+                    sessionId,
                     recordedAtUtc,
                 });
                 if (!reserved.ok) {

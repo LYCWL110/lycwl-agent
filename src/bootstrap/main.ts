@@ -19,6 +19,7 @@ import { saveMcpChange } from "./mcp-save.ts";
 import { permissionModeFromArgs } from "./permission-mode.ts";
 import { createClipboardReader, hostPlatform, platformDirectories } from "./platform.ts";
 import { describeSelection, selectRuntime } from "./runtime-selection.ts";
+import { SEARCH_CREDENTIAL_REFERENCE, storeSearchKey } from "./search-key.ts";
 import { canResumeSession, selectSessionLaunch } from "./session-launch.ts";
 import { createTerminalApproval } from "./terminal-approval.ts";
 import { undoSessionChanges } from "./undo.ts";
@@ -39,10 +40,11 @@ if (args.includes("--help") || args.includes("-h")) {
       "lycwl - local agent TUI",
       "",
       "Usage:",
-      "  lycwl               start the interactive TUI (writes and shell enabled)",
-      "  lycwl --read-only   disable writes and shell; read and search only",
+      "  lycwl               start the interactive TUI (writes, shell and web enabled)",
+      "  lycwl --read-only   disable writes, shell and web; read and local search only",
       "  lycwl --skills      enable the .agents/skills catalog (default off)",
       "  lycwl --resume ID   explicitly continue a recorded conversation",
+      "  lycwl --search-key  store or replace the Tavily key (input hidden)",
       "  lycwl --setup       show configuration status and file locations",
       "  lycwl --help        show this help",
       "  lycwl --version     show the package version",
@@ -50,15 +52,16 @@ if (args.includes("--help") || args.includes("-h")) {
       "With no configured Provider the TUI runs a demo runtime that performs no",
       "network, credential, process or write access.",
       "",
-      "Writes and shell are enabled by default. Every write and every command still",
-      "needs its own approval, and an approved command runs with your full",
-      `${hostPlatform === "linux" ? "Linux" : "Windows"} user permissions: v1 has no sandbox.`,
+      "Writes, shell and web are enabled by default. Every write, command and web",
+      "request still needs its own approval, and an approved command runs with your",
+      `full ${hostPlatform === "linux" ? "Linux" : "Windows"} user permissions: v1 has no sandbox.`,
+      "Web search also needs a Tavily key; store it with --search-key.",
       "",
       "Skills are disabled unless --skills is given; enabling them grants no",
       "read permission beyond ordinary file access.",
       "",
       "--write and --shell are accepted for compatibility but ignored. Use",
-      "--read-only to opt out of writes and process execution.",
+      "--read-only to opt out of writes, process execution and web access.",
       "",
       "An interactive terminal is required.",
       "",
@@ -76,6 +79,11 @@ const directories = platformDirectories();
 const dataDirectory = directories.state;
 const configStore = createConfigStore({ directory: directories.config });
 const vault = createFileVault({ directory: directories.config });
+
+if (args.includes("--search-key")) {
+  const stored = await storeSearchKey({ vault });
+  process.exit(stored.ok ? 0 : 1);
+}
 /**
  * Clipboard reader for Ctrl+V.
  *
@@ -214,6 +222,7 @@ async function startSession(): Promise<void> {
     enableWrites: permissionMode === "full",
     enableSkills: args.includes("--skills"),
     enableProcesses: permissionMode === "full",
+    enableWeb: permissionMode === "full",
     sessionId,
     // A declared MCP server must be approved before its process is spawned, which
     // is before the TUI exists. This gate is denial-by-default and is not remembered
@@ -416,6 +425,14 @@ async function describeConfiguration(
         : `provider: invalid (${provider.code}${provider.field === undefined ? "" : `: ${provider.field}`})`,
     );
   }
+  const search = await vault.readCurrent(SEARCH_CREDENTIAL_REFERENCE, "search_api_key");
+  lines.push(
+    search.ok
+      ? `search:     configured (${SEARCH_CREDENTIAL_REFERENCE})`
+      : search.code === "not_found"
+        ? "search:     not configured (run lycwl --search-key)"
+        : `search:     unavailable (${search.code})`,
+  );
   lines.push("", "credentials are stored unencrypted (ADR-0038)");
   return lines;
 }

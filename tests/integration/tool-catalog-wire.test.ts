@@ -180,7 +180,16 @@ describe("tool schemas reach the wire", () => {
 
       // Writes are off by default, so the mutating tools must not be advertised.
       const names = tools?.map((tool) => tool["name"]).sort();
-      assert.deepEqual(names, ["ask_user", "glob", "grep", "list_dir", "read_file", "todo"]);
+      assert.deepEqual(names, [
+        "ask_user",
+        "glob",
+        "grep",
+        "list_dir",
+        "read_file",
+        "todo",
+        "web_fetch",
+        "web_search",
+      ]);
       assert.equal(
         names?.includes("create_file"),
         false,
@@ -251,6 +260,8 @@ describe("tool schemas reach the wire", () => {
         "read_file",
         "rename_path",
         "todo",
+        "web_fetch",
+        "web_search",
       ]);
     } finally {
       await closeRuntimeSelections();

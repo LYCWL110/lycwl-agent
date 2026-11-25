@@ -6,6 +6,7 @@ import { providerHttpsPost, providerHttpsPostStream, } from "../adapters/provide
 import { createFileVault } from "../adapters/windows/file-credential-vault.js";
 import { protocolEndpoint, readProviderConfig, } from "../domain/config/provider-config.js";
 import { assertProtectedValue, ProtectedDeliveryError, } from "../services/security/guarded-delivery.js";
+import { SEARCH_CREDENTIAL_REFERENCE } from "./search-key.js";
 /**
  * Build the Provider described by `settings`.
  *
@@ -66,6 +67,18 @@ export async function assembleRuntime(options) {
                 Buffer.from(utf16le).swap16().toString("latin1"),
             ])
                 byValue.set(value, { ...key, value, byteEncoding: "latin1" });
+        }
+        // The search key is also a sending credential. Protecting it here means a
+        // model reply or tool result that echoes it is blocked before delivery, the
+        // same way a provider key is.
+        const search = await vault.readCurrent(SEARCH_CREDENTIAL_REFERENCE, "search_api_key");
+        if (search.ok) {
+            byValue.set(search.value.secret, {
+                keyId: `search:${search.value.credential.revision}`,
+                value: search.value.secret,
+                revision: search.value.credential.revision,
+                state: "sending",
+            });
         }
         protectedKeys = [...byValue.values()];
     };
@@ -143,6 +156,13 @@ export async function assembleRuntime(options) {
                 prepared.secret !== read.value.secret))
             return null;
         return read.value.secret;
+    };
+    // The search credential is read at the point of use, like the provider key.
+    // A missing or unreadable entry is "not configured"; it never falls back to an
+    // environment variable or another vendor.
+    const resolveSearchApiKey = async () => {
+        const read = await vault.readCurrent(SEARCH_CREDENTIAL_REFERENCE, "search_api_key");
+        return read.ok ? read.value.secret : null;
     };
     const guardRequest = async (request) => {
         await refreshOwnedKeys();
@@ -240,6 +260,7 @@ export async function assembleRuntime(options) {
         refreshOwnedKeys,
         runBinding,
         resolveCredentialRevision,
+        resolveSearchApiKey,
         requestFingerprint: async (value) => hash([config, options.toolDefinitions, value]),
     };
 }

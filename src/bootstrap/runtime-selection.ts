@@ -118,8 +118,8 @@ export type SelectRuntimeOptions = Readonly<{
    */
   enableLsp?: boolean;
   /**
-   * Expose web tools. WebSearch still requires a configured search backend and
-   * every request still requires approval.
+   * Expose web tools. Default true; `--read-only` passes false. WebSearch still
+   * requires a configured backend and every request still requires approval.
    */
   enableWeb?: boolean;
   /**
@@ -525,8 +525,10 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
           enableWrites,
           enableProcesses,
           enableLsp: options.enableLsp === true,
-          enableWeb: options.enableWeb === true,
+          enableWeb: options.enableWeb !== false,
           enableSkills: options.enableSkills === true,
+          sessionId,
+          resolveSearchApiKey: assembly.resolveSearchApiKey,
           ownedKeys: assembly.ownedKeys,
           refreshOwnedKeys: assembly.refreshOwnedKeys,
           evidenceStore,

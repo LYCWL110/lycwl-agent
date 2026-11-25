@@ -101,7 +101,7 @@ export function createWebTools(dependencies) {
         },
         async execute(request) {
             if (request.toolName === WEB_SEARCH_DEFINITION.name) {
-                return executeSearch(dependencies, request.arguments, request.toolCallId);
+                return executeSearch(dependencies, request.arguments, request.toolCallId, request.owner);
             }
             if (request.toolName === WEB_FETCH_DEFINITION.name) {
                 const snapshot = snapshots.get(request.toolCallId);
@@ -112,7 +112,7 @@ export function createWebTools(dependencies) {
         },
     };
 }
-async function executeSearch(dependencies, args, toolCallId) {
+async function executeSearch(dependencies, args, toolCallId, owner) {
     const validated = validateWebSearch(args, {
         surchargeRulesReviewed: dependencies.surchargeRulesReviewed,
     });
@@ -120,7 +120,7 @@ async function executeSearch(dependencies, args, toolCallId) {
         return { status: "failed", safeCode: validated.code, text: null };
     let run;
     try {
-        run = await dependencies.runSearch(validated.value, toolCallId);
+        run = await dependencies.runSearch(validated.value, toolCallId, owner);
     }
     catch {
         // A paid request may already have been sent; keep the charge unknown.

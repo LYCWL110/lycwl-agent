@@ -4,9 +4,10 @@ A local coding agent for Windows and Linux. It runs in a terminal and gives a
 model permission-controlled tools: read and search files, edit them, run shell
 commands, and talk to LSP and MCP servers.
 
-Writes and shell are enabled by default. Every write and every command is
-approved separately. Nothing is sandboxed: an approved command runs with your
-full user permissions.
+Writes, shell and web access are enabled by default. Every write, command and
+web request is approved separately. Nothing is sandboxed: an approved command
+runs with your full user permissions. Web search needs a Tavily key; store one
+with `lycwl --search-key`.
 
 Model replies stream into the terminal as they arrive. Tool calls still wait for
 the complete response and their own approval.
@@ -48,10 +49,11 @@ Run `lycwl` inside the project you want to work on; that directory is the
 workspace.
 
 ```
-lycwl                  read, write and shell, each action approved
-lycwl --read-only      disable writes and shell; read and search only
+lycwl                  read, write, shell and web, each action approved
+lycwl --read-only      disable writes, shell and web; read and local search only
 lycwl --skills         enable the .agents/skills catalog
 lycwl --resume <id>    continue a recorded conversation
+lycwl --search-key     store or replace the Tavily key (input hidden)
 lycwl --setup          show configuration status and file locations
 lycwl --help
 ```

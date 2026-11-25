@@ -49,6 +49,19 @@ function tools(enableWeb: boolean) {
 }
 
 describe("web tools through the composition root", () => {
+  it("is exposed by default unless web is explicitly disabled", () => {
+    const t = createWorkspaceTools({
+      workspaceRoot: root,
+      approvals: { decide: async () => "approved" },
+      ids: { create: () => "id" },
+      enableWrites: false,
+      enableProcesses: false,
+    });
+    for (const toolName of ["web_fetch", "web_search"]) {
+      assert.ok(t.getDefinition(toolName), `${toolName} must be available by default`);
+    }
+  });
+
   it("stays unavailable when web is disabled", async () => {
     const t = tools(false);
     for (const toolName of ["web_fetch", "web_search"]) {

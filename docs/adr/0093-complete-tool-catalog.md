@@ -30,13 +30,12 @@ of the catalog re-encoding which flags a session happened to use. Tests that
 assert the advertised list still drive real selection options, so a tool that is
 not wired stays invisible on the wire.
 
-LSP and web remain off by default because enabling the flag alone is not enough to
-make them useful: there is no LSP start tool yet, and search has no credential
-boundary in the runtime selection. Their entries are schemas, not availability
-promises.
+LSP remains off by default because enabling the flag alone is not enough to make
+it useful: there is no LSP start tool yet. Web tools are now on by default under
+ADR-0094, which also composes the search credential; the catalog entries remain
+schemas, not availability promises for a build that passes `enableWeb: false`.
 
 ## Reassessment Conditions
 
-Revisit when an LSP start tool or a search credential path is composed. At that
-point the default flags need an explicit product decision rather than remaining
-unreachable by default.
+Revisit when an LSP start tool is composed. The search credential path is now
+composed under ADR-0094, which makes web tools available by default.
