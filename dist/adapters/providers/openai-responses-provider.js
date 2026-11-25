@@ -21,6 +21,8 @@ export const OPENAI_RESPONSES_DEFAULTS = Object.freeze({
     path: "/v1/responses",
     maxOutputTokens: 4_096,
     providerLabel: "openai_responses",
+    /** Built-in tool type requested when provider-native search is enabled. */
+    nativeWebSearchTool: "web_search",
 });
 export class OpenAiResponsesProvider {
     #options;
@@ -55,6 +57,7 @@ export class OpenAiResponsesProvider {
                 : {
                     ...this.#options,
                     tools: [],
+                    nativeWebSearch: false,
                     maxOutputTokens: Math.min(this.#options.maxOutputTokens ?? OPENAI_RESPONSES_DEFAULTS.maxOutputTokens, request.compaction.maxOutputTokens),
                 }, request.conversation)),
             ...(this.#options.trustedCaPem === undefined
@@ -91,6 +94,7 @@ export class OpenAiResponsesProvider {
                 : {
                     ...this.#options,
                     tools: [],
+                    nativeWebSearch: false,
                     maxOutputTokens: Math.min(this.#options.maxOutputTokens ?? OPENAI_RESPONSES_DEFAULTS.maxOutputTokens, request.compaction.maxOutputTokens),
                 }, request.conversation, true)),
             ...(this.#options.trustedCaPem === undefined
@@ -126,6 +130,7 @@ export class OpenAiResponsesProvider {
 }
 /** Exported for tests: the exact JSON that would be sent. */
 export function buildResponsesRequestBody(options, conversation, stream = false) {
+    const tools = toolsFor(options);
     return {
         model: options.model,
         max_output_tokens: options.maxOutputTokens ?? OPENAI_RESPONSES_DEFAULTS.maxOutputTokens,
@@ -135,17 +140,19 @@ export function buildResponsesRequestBody(options, conversation, stream = false)
             : { reasoning: { effort: options.reasoningEffort } }),
         ...(options.instructions === undefined ? {} : { instructions: options.instructions }),
         input: toResponsesInput(conversation),
-        ...(options.tools === undefined || options.tools.length === 0
-            ? {}
-            : {
-                tools: options.tools.map((tool) => ({
-                    type: "function",
-                    name: tool.name,
-                    description: tool.description,
-                    parameters: tool.inputSchema,
-                })),
-            }),
+        ...(tools.length === 0 ? {} : { tools }),
     };
+}
+function toolsFor(options) {
+    const functionTools = options.tools?.map((tool) => ({
+        type: "function",
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema,
+    })) ?? [];
+    if (options.nativeWebSearch !== true)
+        return functionTools;
+    return [{ type: OPENAI_RESPONSES_DEFAULTS.nativeWebSearchTool }, ...functionTools];
 }
 /**
  * Map neutral items to Responses input items.
@@ -295,6 +302,14 @@ export function interpretResponsesResponse(bodyText) {
                 toolName: name.value,
                 arguments: args,
             });
+            continue;
+        }
+        // Provider-run search is narration inside this response. The final message
+        // text is the content; the search call itself is not a Harness tool call.
+        if (type === "web_search_call") {
+            if (entry["status"] === "failed") {
+                return { kind: "invalid_response", safeCode: "openai_responses_web_search_failed" };
+            }
             continue;
         }
         // Provider narration this Harness does not record as content.

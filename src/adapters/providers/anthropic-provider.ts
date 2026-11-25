@@ -45,6 +45,8 @@ export const ANTHROPIC_DEFAULTS = Object.freeze({
   maxTokens: 4_096,
   /** Tool definitions are declared by the caller; this adapter never invents one. */
   providerLabel: "anthropic",
+  /** Bound on provider-side searches when native search is enabled. */
+  nativeWebSearchMaxUses: 5,
 });
 
 export type AnthropicToolDefinition = Readonly<{
@@ -64,6 +66,12 @@ export type AnthropicAdapterOptions = Readonly<{
   reasoningEffort?: ReasoningEffort;
   /** Tool definitions available for this Run. Empty means no tools. */
   tools?: readonly AnthropicToolDefinition[];
+  /**
+   * Ask Anthropic to run its server-side web search tool. The query is chosen
+   * inside the model request, so the Harness cannot approve it per call or bind
+   * it to the search ledger.
+   */
+  nativeWebSearch?: boolean;
   /** Optional system prompt. Trusted Harness rules only; never project text. */
   system?: string;
   /** Injected transport for tests. Production uses the real bounded POST. */
@@ -110,6 +118,7 @@ export class AnthropicProvider implements ModelProvider {
         : {
             ...this.#options,
             tools: [],
+            nativeWebSearch: false,
             maxTokens: Math.min(
               this.#options.maxTokens ?? ANTHROPIC_DEFAULTS.maxTokens,
               request.compaction.maxOutputTokens,
@@ -182,6 +191,7 @@ export class AnthropicProvider implements ModelProvider {
               : {
                   ...this.#options,
                   tools: [],
+                  nativeWebSearch: false,
                   maxTokens: Math.min(
                     this.#options.maxTokens ?? ANTHROPIC_DEFAULTS.maxTokens,
                     request.compaction.maxOutputTokens,
@@ -236,6 +246,7 @@ export function buildRequestBody(
   conversation: readonly ProviderConversationItem[],
   stream = false,
 ): Readonly<Record<string, unknown>> {
+  const tools = toolsFor(options);
   return {
     model: options.model,
     max_tokens: options.maxTokens ?? ANTHROPIC_DEFAULTS.maxTokens,
@@ -245,16 +256,26 @@ export function buildRequestBody(
       : { output_config: { effort: options.reasoningEffort } }),
     ...(options.system === undefined ? {} : { system: options.system }),
     messages: toAnthropicMessages(conversation),
-    ...(options.tools === undefined || options.tools.length === 0
-      ? {}
-      : {
-          tools: options.tools.map((tool) => ({
-            name: tool.name,
-            description: tool.description,
-            input_schema: tool.inputSchema,
-          })),
-        }),
+    ...(tools.length === 0 ? {} : { tools }),
   };
+}
+
+function toolsFor(options: AnthropicAdapterOptions): readonly Record<string, unknown>[] {
+  const functionTools =
+    options.tools?.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.inputSchema,
+    })) ?? [];
+  if (options.nativeWebSearch !== true) return functionTools;
+  return [
+    {
+      type: "web_search_20250305",
+      name: "web_search",
+      max_uses: ANTHROPIC_DEFAULTS.nativeWebSearchMaxUses,
+    },
+    ...functionTools,
+  ];
 }
 
 /**

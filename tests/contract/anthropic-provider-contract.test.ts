@@ -237,6 +237,28 @@ describe("anthropic request construction", () => {
     assert.equal(body["tools"], undefined);
   });
 
+  it("adds the server web search tool before function tools", () => {
+    const tools = [
+      {
+        name: "read_file",
+        description: "Read a file",
+        inputSchema: { type: "object", properties: { path: { type: "string" } } },
+      },
+    ];
+    const body = buildRequestBody(
+      { resolveApiKey: async () => null, model: "m", tools, nativeWebSearch: true },
+      [{ kind: "user", text: "x" }],
+    );
+    assert.deepEqual(body["tools"], [
+      { type: "web_search_20250305", name: "web_search", max_uses: 5 },
+      {
+        name: "read_file",
+        description: "Read a file",
+        input_schema: { type: "object", properties: { path: { type: "string" } } },
+      },
+    ]);
+  });
+
   it("includes a system prompt only when one is configured", () => {
     const withSystem = buildRequestBody(
       { resolveApiKey: async () => null, model: "m", system: "be careful" },
@@ -291,6 +313,26 @@ describe("anthropic response interpretation", () => {
     assert.equal(completion.kind, "completed");
     if (completion.kind !== "completed") return;
     assert.equal(completion.text, "answer");
+    assert.deepEqual(completion.toolCalls, []);
+  });
+
+  it("keeps the final text while ignoring server web search blocks", () => {
+    const completion = interpretMessageResponse(
+      JSON.stringify({
+        content: [
+          { type: "server_tool_use", id: "s1", name: "web_search", input: { query: "x" } },
+          {
+            type: "web_search_tool_result",
+            tool_use_id: "s1",
+            content: [{ type: "web_search_result", url: "https://e.com", title: "E" }],
+          },
+          { type: "text", text: "answer from search" },
+        ],
+      }),
+    );
+    assert.equal(completion.kind, "completed");
+    if (completion.kind !== "completed") return;
+    assert.equal(completion.text, "answer from search");
     assert.deepEqual(completion.toolCalls, []);
   });
 

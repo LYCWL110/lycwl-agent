@@ -44,6 +44,8 @@ export const OPENAI_RESPONSES_DEFAULTS = Object.freeze({
   path: "/v1/responses",
   maxOutputTokens: 4_096,
   providerLabel: "openai_responses",
+  /** Built-in tool type requested when provider-native search is enabled. */
+  nativeWebSearchTool: "web_search",
 });
 
 export type OpenAiResponsesToolDefinition = Readonly<{
@@ -59,6 +61,12 @@ export type OpenAiResponsesAdapterOptions = Readonly<{
   maxOutputTokens?: number;
   reasoningEffort?: ReasoningEffort;
   tools?: readonly OpenAiResponsesToolDefinition[];
+  /**
+   * Ask the Responses API to run its built-in web search tool. The query is
+   * chosen inside the model request, so the Harness cannot approve it per call
+   * or bind it to the search ledger.
+   */
+  nativeWebSearch?: boolean;
   /** Trusted Harness rules only; never project text. */
   instructions?: string;
   post?: (input: ProviderHttpRequest) => Promise<ProviderHttpResult>;
@@ -109,6 +117,7 @@ export class OpenAiResponsesProvider implements ModelProvider {
             : {
                 ...this.#options,
                 tools: [],
+                nativeWebSearch: false,
                 maxOutputTokens: Math.min(
                   this.#options.maxOutputTokens ?? OPENAI_RESPONSES_DEFAULTS.maxOutputTokens,
                   request.compaction.maxOutputTokens,
@@ -162,6 +171,7 @@ export class OpenAiResponsesProvider implements ModelProvider {
               : {
                   ...this.#options,
                   tools: [],
+                  nativeWebSearch: false,
                   maxOutputTokens: Math.min(
                     this.#options.maxOutputTokens ?? OPENAI_RESPONSES_DEFAULTS.maxOutputTokens,
                     request.compaction.maxOutputTokens,
@@ -214,6 +224,7 @@ export function buildResponsesRequestBody(
   conversation: readonly ProviderConversationItem[],
   stream = false,
 ): Readonly<Record<string, unknown>> {
+  const tools = toolsFor(options);
   return {
     model: options.model,
     max_output_tokens: options.maxOutputTokens ?? OPENAI_RESPONSES_DEFAULTS.maxOutputTokens,
@@ -223,17 +234,20 @@ export function buildResponsesRequestBody(
       : { reasoning: { effort: options.reasoningEffort } }),
     ...(options.instructions === undefined ? {} : { instructions: options.instructions }),
     input: toResponsesInput(conversation),
-    ...(options.tools === undefined || options.tools.length === 0
-      ? {}
-      : {
-          tools: options.tools.map((tool) => ({
-            type: "function",
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.inputSchema,
-          })),
-        }),
+    ...(tools.length === 0 ? {} : { tools }),
   };
+}
+
+function toolsFor(options: OpenAiResponsesAdapterOptions): readonly Record<string, unknown>[] {
+  const functionTools =
+    options.tools?.map((tool) => ({
+      type: "function",
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema,
+    })) ?? [];
+  if (options.nativeWebSearch !== true) return functionTools;
+  return [{ type: OPENAI_RESPONSES_DEFAULTS.nativeWebSearchTool }, ...functionTools];
 }
 
 /**
@@ -397,6 +411,14 @@ export function interpretResponsesResponse(bodyText: string): ProviderCompletion
       continue;
     }
 
+    // Provider-run search is narration inside this response. The final message
+    // text is the content; the search call itself is not a Harness tool call.
+    if (type === "web_search_call") {
+      if (entry["status"] === "failed") {
+        return { kind: "invalid_response", safeCode: "openai_responses_web_search_failed" };
+      }
+      continue;
+    }
     // Provider narration this Harness does not record as content.
     if (type === "reasoning") continue;
     return { kind: "invalid_response", safeCode: "openai_responses_item_unknown" };

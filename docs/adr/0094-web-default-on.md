@@ -12,8 +12,13 @@ is the explicit opt-out for writes, shell and network, so it passes
 Default availability does not weaken the call boundary. Both tools keep
 `sideEffectClass: "external_request"` and `requiresApproval: true`. The user sees
 the final query or URL, the result count, the destination addresses and the paid
-or external effect before anything is sent. Search keeps the C07 ledger
+or external effect before anything is sent. The Tavily path keeps the C07 ledger
 (10 calls per Run, 100 per UTC month) and fails closed on a corrupt ledger.
+
+ADR-0096 later made search protocol-dependent: Anthropic Messages and the OpenAI
+Responses API run their built-in search inside the model request, while Chat
+Completions keeps the Tavily tool and ledger. Native search does not have
+per-query approval or a C07 reservation.
 
 The search credential is read from the vault under the fixed reference
 `search-main` with purpose `search_api_key`. `lycwl --search-key` prompts without

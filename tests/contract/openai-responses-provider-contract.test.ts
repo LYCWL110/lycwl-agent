@@ -173,6 +173,26 @@ describe("openai responses request construction", () => {
       },
     ]);
   });
+
+  it("adds the built-in web search tool before function tools", () => {
+    const body = buildResponsesRequestBody(
+      {
+        ...BASE,
+        nativeWebSearch: true,
+        tools: [{ name: "read_file", description: "Read", inputSchema: { type: "object" } }],
+      },
+      [{ kind: "user", text: "go" }],
+    );
+    assert.deepEqual(body["tools"], [
+      { type: "web_search" },
+      {
+        type: "function",
+        name: "read_file",
+        description: "Read",
+        parameters: { type: "object" },
+      },
+    ]);
+  });
 });
 
 describe("openai responses interpretation", () => {
@@ -277,6 +297,41 @@ describe("openai responses interpretation", () => {
     if (completion.kind !== "completed") return;
     assert.equal(completion.text, "answer");
     assert.deepEqual(completion.toolCalls, []);
+  });
+
+  it("ignores a provider-run web search call", () => {
+    const completion = interpretResponsesResponse(
+      JSON.stringify({
+        status: "completed",
+        output: [
+          { type: "web_search_call", id: "ws1", status: "completed" },
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "answer from search" }],
+          },
+        ],
+      }),
+    );
+    assert.equal(completion.kind, "completed");
+    if (completion.kind !== "completed") return;
+    assert.equal(completion.text, "answer from search");
+    assert.deepEqual(completion.toolCalls, []);
+  });
+
+  it("rejects a failed provider-run web search", () => {
+    assert.deepEqual(
+      interpretResponsesResponse(
+        JSON.stringify({
+          status: "completed",
+          output: [{ type: "web_search_call", id: "ws1", status: "failed" }],
+        }),
+      ),
+      {
+        kind: "invalid_response",
+        safeCode: "openai_responses_web_search_failed",
+      },
+    );
   });
 
   it("rejects a refusal rather than presenting it as assistant content", () => {

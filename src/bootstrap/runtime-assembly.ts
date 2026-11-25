@@ -58,6 +58,8 @@ export type RuntimeAssembly =
       resolveCredentialRevision: () => Promise<number | null>;
       /** Read the Tavily key from the purpose-bound vault reference, or null. */
       resolveSearchApiKey: () => Promise<string | null>;
+      /** True when the Provider performs search inside the model request. */
+      nativeWebSearch: boolean;
       requestFingerprint: (value: unknown) => Promise<string>;
       /** Non-fatal notes worth showing, e.g. plaintext credential storage. */
       warnings: readonly string[];
@@ -90,6 +92,8 @@ export type AssembleOptions = Readonly<{
   streamPost?: ConstructorParameters<typeof AnthropicProvider>[0]["streamPost"];
   /** Trust a specific CA; used only by tests against a local self-signed server. */
   trustedCaPem?: string;
+  /** True when the selected protocol should run its built-in web search tool. */
+  nativeWebSearch?: boolean;
 }>;
 
 /**
@@ -107,6 +111,11 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
     return { ok: false, code: "config_invalid", detail: `${parsed.code}:${parsed.field ?? ""}` };
   }
   const config = parsed.value;
+  // The caller decides from the protocol; Chat Completions has no native tool and
+  // stays on the Harness Tavily path, so it never reaches this flag as true.
+  const nativeWebSearch =
+    options.nativeWebSearch === true &&
+    (config.protocol === "anthropic_messages" || config.protocol === "openai_responses");
   const outputTokens =
     config.contextWindow === null
       ? config.maxOutputTokens
@@ -309,6 +318,7 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
             ? {}
             : { reasoningEffort: config.reasoningEffort }),
           tools: options.toolDefinitions,
+          nativeWebSearch,
           post,
           streamPost,
           ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
@@ -338,6 +348,7 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
               ? {}
               : { reasoningEffort: config.reasoningEffort }),
             tools: options.toolDefinitions,
+            nativeWebSearch,
             post,
             streamPost,
             ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
@@ -353,6 +364,7 @@ export async function assembleRuntime(options: AssembleOptions): Promise<Runtime
     runBinding,
     resolveCredentialRevision,
     resolveSearchApiKey,
+    nativeWebSearch,
     requestFingerprint: async (value) => hash([config, options.toolDefinitions, value]),
   };
 }

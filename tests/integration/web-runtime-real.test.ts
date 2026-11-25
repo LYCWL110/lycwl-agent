@@ -62,6 +62,30 @@ describe("web tools through the composition root", () => {
     }
   });
 
+  it("keeps fetch but hides Harness search when the Provider searches natively", async () => {
+    const t = createWorkspaceTools({
+      workspaceRoot: root,
+      approvals: { decide: async () => "approved" },
+      ids: { create: () => "id" },
+      enableWrites: false,
+      enableProcesses: false,
+      enableWeb: true,
+      enableWebSearch: false,
+    });
+    assert.equal(t.getDefinition("web_search"), null);
+    assert.ok(t.getDefinition("web_fetch"));
+    const result = await t.execute({
+      toolCallId: "c1",
+      toolName: "web_search",
+      arguments: { query: "x" },
+    });
+    assert.deepEqual(result, {
+      status: "failed",
+      safeCode: "tool_unavailable_in_build",
+      text: null,
+    });
+  });
+
   it("stays unavailable when web is disabled", async () => {
     const t = tools(false);
     for (const toolName of ["web_fetch", "web_search"]) {

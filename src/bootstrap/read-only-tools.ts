@@ -78,6 +78,11 @@ export type WorkspaceToolsOptions = Readonly<{
    */
   enableWeb?: boolean;
   /**
+   * Expose the Harness `web_search` tool. Set false when the selected Provider
+   * performs search natively inside the model request; `web_fetch` stays.
+   */
+  enableWebSearch?: boolean;
+  /**
    * Register the `skill` tool. It loads a workspace Skill body into context as
    * untrusted project material; it grants no approval or permission.
    */
@@ -347,6 +352,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
     delegates.push(
       createWebTools({
         surchargeRulesReviewed: false,
+        enableSearch: options.enableWebSearch !== false,
         resolveAddresses: async (host) => {
           const resolved = await resolveWebFetchHost(host);
           if (!resolved.ok) throw new Error(resolved.code);

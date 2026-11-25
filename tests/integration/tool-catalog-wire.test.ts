@@ -25,6 +25,35 @@ before(async () => {
       request.on("end", () => {
         bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
         response.writeHead(200, { "content-type": "application/json" });
+        if (request.url === "/v1/chat/completions") {
+          response.end(
+            JSON.stringify({
+              id: "chat-1",
+              object: "chat.completion",
+              choices: [
+                { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
+              ],
+              usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+            }),
+          );
+          return;
+        }
+        if (request.url === "/v1/responses") {
+          response.end(
+            JSON.stringify({
+              id: "resp-1",
+              status: "completed",
+              output: [
+                {
+                  type: "message",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: "ok" }],
+                },
+              ],
+            }),
+          );
+          return;
+        }
         response.end(JSON.stringify({ content: [{ type: "text", text: "ok" }] }));
       });
     });
@@ -178,8 +207,17 @@ describe("tool schemas reach the wire", () => {
       const tools = body["tools"] as readonly Record<string, unknown>[] | undefined;
       assert.ok(Array.isArray(tools), "the request must carry tool definitions");
 
+      // Anthropic searches natively, so the Tavily function tool is not sent.
+      assert.equal(
+        tools?.some((tool) => tool["type"] === "web_search_20250305"),
+        true,
+        "the native search tool must be requested",
+      );
       // Writes are off by default, so the mutating tools must not be advertised.
-      const names = tools?.map((tool) => tool["name"]).sort();
+      const names = tools
+        ?.filter((tool) => tool["type"] === undefined)
+        .map((tool) => tool["name"])
+        .sort();
       assert.deepEqual(names, [
         "ask_user",
         "glob",
@@ -188,14 +226,13 @@ describe("tool schemas reach the wire", () => {
         "read_file",
         "todo",
         "web_fetch",
-        "web_search",
       ]);
       assert.equal(
         names?.includes("create_file"),
         false,
         "a write tool must not appear when writes are disabled",
       );
-      for (const tool of tools ?? []) {
+      for (const tool of tools?.filter((entry) => entry["type"] === undefined) ?? []) {
         assert.equal(typeof tool["description"], "string");
         assert.equal((tool["input_schema"] as { type?: string }).type, "object");
       }
@@ -247,7 +284,14 @@ describe("tool schemas reach the wire", () => {
       await selection.coordinator.run("hello");
 
       const tools = bodies[0]?.["tools"] as readonly Record<string, unknown>[] | undefined;
-      const names = tools?.map((tool) => tool["name"]).sort();
+      assert.equal(
+        tools?.some((tool) => tool["type"] === "web_search_20250305"),
+        true,
+      );
+      const names = tools
+        ?.filter((tool) => tool["type"] === undefined)
+        .map((tool) => tool["name"])
+        .sort();
       assert.deepEqual(names, [
         "apply_patch",
         "ask_user",
@@ -261,8 +305,128 @@ describe("tool schemas reach the wire", () => {
         "rename_path",
         "todo",
         "web_fetch",
-        "web_search",
       ]);
+    } finally {
+      await closeRuntimeSelections();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the Tavily search function for Chat Completions", async () => {
+    bodies.length = 0;
+    const directory = await mkdtemp(path.join(tmpdir(), "lycwl-tools-chat-"));
+    try {
+      const store = createConfigStore({ directory });
+      const vault = createFileVault({ directory });
+      const saved = await saveSetup({
+        draft: {
+          protocol: "openai_chat",
+          baseUrl: `https://localhost:${port}`,
+          model: "chat-local-test",
+          contextWindow: 128000,
+          credentialRef: "provider-main",
+          apiKey: "local-test-key",
+        },
+        vault,
+        store,
+      });
+      assert.equal(saved.ok, true, saved.ok ? "" : saved.code);
+
+      const loaded = await store.load();
+      assert.equal(loaded.ok, true);
+      if (!loaded.ok) return;
+      const { parseJsonc, toPlainValue } = await import("../../src/domain/config/jsonc.ts");
+      const parsed = parseJsonc(loaded.value.text);
+      assert.equal(parsed.ok, true);
+      if (!parsed.ok) return;
+
+      const selection = await selectRuntime({
+        workspaceRoot: directory,
+        dataDirectory: directory,
+        settings: toPlainValue(parsed.value),
+        hasSettings: true,
+        trustedCaPem: certPem,
+      });
+      assert.equal(selection.kind, "real", selection.kind === "demo" ? selection.reason : "");
+      if (selection.kind !== "real") return;
+      assert.equal(selection.webSearch, "harness");
+
+      await selection.coordinator.run("hello");
+
+      const tools = bodies[0]?.["tools"] as readonly Record<string, unknown>[] | undefined;
+      const names = tools
+        ?.map((tool) => {
+          const fn = tool["function"];
+          return fn === undefined || typeof fn !== "object" || fn === null
+            ? tool["name"]
+            : (fn as Record<string, unknown>)["name"];
+        })
+        .sort();
+      assert.equal(names?.includes("web_search"), true);
+      assert.equal(names?.includes("web_fetch"), true);
+      assert.equal(
+        tools?.some((tool) => tool["type"] === "web_search_20250305"),
+        false,
+      );
+    } finally {
+      await closeRuntimeSelections();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("requests built-in search and hides Tavily for the Responses protocol", async () => {
+    bodies.length = 0;
+    const directory = await mkdtemp(path.join(tmpdir(), "lycwl-tools-responses-"));
+    try {
+      const store = createConfigStore({ directory });
+      const vault = createFileVault({ directory });
+      const saved = await saveSetup({
+        draft: {
+          protocol: "openai_responses",
+          baseUrl: `https://localhost:${port}`,
+          model: "responses-local-test",
+          contextWindow: 128000,
+          credentialRef: "provider-main",
+          apiKey: "local-test-key",
+        },
+        vault,
+        store,
+      });
+      assert.equal(saved.ok, true, saved.ok ? "" : saved.code);
+
+      const loaded = await store.load();
+      assert.equal(loaded.ok, true);
+      if (!loaded.ok) return;
+      const { parseJsonc, toPlainValue } = await import("../../src/domain/config/jsonc.ts");
+      const parsed = parseJsonc(loaded.value.text);
+      assert.equal(parsed.ok, true);
+      if (!parsed.ok) return;
+
+      const selection = await selectRuntime({
+        workspaceRoot: directory,
+        dataDirectory: directory,
+        settings: toPlainValue(parsed.value),
+        hasSettings: true,
+        trustedCaPem: certPem,
+      });
+      assert.equal(selection.kind, "real", selection.kind === "demo" ? selection.reason : "");
+      if (selection.kind !== "real") return;
+      assert.equal(selection.webSearch, "native");
+
+      await selection.coordinator.run("hello");
+
+      const tools = bodies[0]?.["tools"] as readonly Record<string, unknown>[] | undefined;
+      assert.equal(
+        tools?.some((tool) => tool["type"] === "web_search"),
+        true,
+        "the built-in search tool must be requested",
+      );
+      const names = tools
+        ?.filter((tool) => tool["type"] === "function")
+        .map((tool) => tool["name"])
+        .sort();
+      assert.equal(names?.includes("web_search"), false);
+      assert.equal(names?.includes("web_fetch"), true);
     } finally {
       await closeRuntimeSelections();
       await rm(directory, { recursive: true, force: true });

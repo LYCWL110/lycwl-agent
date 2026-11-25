@@ -19,6 +19,8 @@ export const ANTHROPIC_DEFAULTS = Object.freeze({
     maxTokens: 4_096,
     /** Tool definitions are declared by the caller; this adapter never invents one. */
     providerLabel: "anthropic",
+    /** Bound on provider-side searches when native search is enabled. */
+    nativeWebSearchMaxUses: 5,
 });
 export class AnthropicProvider {
     #options;
@@ -46,6 +48,7 @@ export class AnthropicProvider {
             : {
                 ...this.#options,
                 tools: [],
+                nativeWebSearch: false,
                 maxTokens: Math.min(this.#options.maxTokens ?? ANTHROPIC_DEFAULTS.maxTokens, request.compaction.maxOutputTokens),
             }, request.conversation);
         if (request.signal?.aborted)
@@ -100,6 +103,7 @@ export class AnthropicProvider {
                 : {
                     ...this.#options,
                     tools: [],
+                    nativeWebSearch: false,
                     maxTokens: Math.min(this.#options.maxTokens ?? ANTHROPIC_DEFAULTS.maxTokens, request.compaction.maxOutputTokens),
                 }, request.conversation, true)),
             ...(this.#options.trustedCaPem === undefined
@@ -137,6 +141,7 @@ export class AnthropicProvider {
 }
 /** Exported for tests: the exact JSON that would be sent. */
 export function buildRequestBody(options, conversation, stream = false) {
+    const tools = toolsFor(options);
     return {
         model: options.model,
         max_tokens: options.maxTokens ?? ANTHROPIC_DEFAULTS.maxTokens,
@@ -146,16 +151,25 @@ export function buildRequestBody(options, conversation, stream = false) {
             : { output_config: { effort: options.reasoningEffort } }),
         ...(options.system === undefined ? {} : { system: options.system }),
         messages: toAnthropicMessages(conversation),
-        ...(options.tools === undefined || options.tools.length === 0
-            ? {}
-            : {
-                tools: options.tools.map((tool) => ({
-                    name: tool.name,
-                    description: tool.description,
-                    input_schema: tool.inputSchema,
-                })),
-            }),
+        ...(tools.length === 0 ? {} : { tools }),
     };
+}
+function toolsFor(options) {
+    const functionTools = options.tools?.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.inputSchema,
+    })) ?? [];
+    if (options.nativeWebSearch !== true)
+        return functionTools;
+    return [
+        {
+            type: "web_search_20250305",
+            name: "web_search",
+            max_uses: ANTHROPIC_DEFAULTS.nativeWebSearchMaxUses,
+        },
+        ...functionTools,
+    ];
 }
 /**
  * Map neutral items to Anthropic messages.

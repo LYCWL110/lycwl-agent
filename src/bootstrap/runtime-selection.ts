@@ -21,7 +21,7 @@ import { createSyntaxChecker, defaultTscEntry } from "../adapters/windows/syntax
 import type { RuntimeCoordinator } from "../application/coordinator/runtime-coordinator.ts";
 import { deriveTaskReport } from "../application/task-report/derive-task-report.ts";
 import { DEFAULT_CONTEXT_WINDOW } from "../domain/config/model-context.ts";
-import type { ProviderConfig } from "../domain/config/provider-config.ts";
+import { type ProviderConfig, readProviderConfig } from "../domain/config/provider-config.ts";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.ts";
 import { renderHarnessRules } from "../domain/context/harness-rules.ts";
 import {
@@ -71,6 +71,11 @@ export type RuntimeSelection =
       enableWrites: boolean;
       /** Whether shell and background tools are exposed for this session. */
       enableProcesses: boolean;
+      /**
+       * `native` means the Provider searches inside the model request; `harness`
+       * means the Tavily tool is exposed; `disabled` means no web access.
+       */
+      webSearch: "native" | "harness" | "disabled";
       /** Skill catalog state, for the launch summary. */
       skills: SkillsSummary;
       /** Rebuilt history, for the launch summary. */
@@ -152,6 +157,15 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
 
   const enableWrites = options.enableWrites === true;
   const enableProcesses = options.enableProcesses === true;
+  const enableWeb = options.enableWeb !== false;
+  // The protocol is readable before assembly; the tool catalog needs the same
+  // native/harness decision that the Provider will use.
+  const configured = readProviderConfig(options.settings);
+  const nativeWebSearch =
+    enableWeb &&
+    configured.ok &&
+    (configured.value.protocol === "anthropic_messages" ||
+      configured.value.protocol === "openai_responses");
 
   // MCP servers are third-party processes. They start only when a declaration
   // exists AND an approval channel was supplied; a build with no channel cannot
@@ -197,6 +211,8 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     ids: { create: () => "probe" },
     enableWrites,
     enableProcesses,
+    enableWeb,
+    enableWebSearch: !nativeWebSearch,
     enableSkills: options.enableSkills === true,
     ...(mcpExecutor === undefined ? {} : { mcp: mcpExecutor }),
     ...(discoverExecutor === undefined ? {} : { discover: discoverExecutor }),
@@ -263,6 +279,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   const assembly = await assembleRuntime({
     settings: options.settings,
     dataDirectory: options.dataDirectory,
+    nativeWebSearch,
     toolDefinitions,
     // The fixed Harness rules are the only text with application authority. Project
     // material arrives separately as a sourced user turn.
@@ -485,6 +502,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
       config: effectiveConfig,
       enableWrites,
       enableProcesses,
+      webSearch: !enableWeb ? "disabled" : assembly.nativeWebSearch ? "native" : "harness",
       warnings: [
         ...assembly.warnings,
         ...mcpWarnings,
@@ -525,7 +543,10 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
           enableWrites,
           enableProcesses,
           enableLsp: options.enableLsp === true,
-          enableWeb: options.enableWeb !== false,
+          enableWeb,
+          // A native-search Provider must not also offer the Tavily tool; that
+          // would give the model two search paths with different guarantees.
+          enableWebSearch: !assembly.nativeWebSearch,
           enableSkills: options.enableSkills === true,
           sessionId,
           resolveSearchApiKey: assembly.resolveSearchApiKey,
@@ -732,6 +753,11 @@ export function describeSelection(selection: RuntimeSelection): readonly string[
           ? "enabled (every command requires approval; no sandbox)"
           : "disabled"
       }`,
+      selection.webSearch === "native"
+        ? "web: fetch enabled (approval required); search is provider-native (no per-query approval or search ledger)"
+        : selection.webSearch === "harness"
+          ? "web: fetch and Tavily search enabled (every request requires approval)"
+          : "web: disabled",
       ...(selection.skills.kind === "loaded"
         ? [`skills: ${selection.skills.count} catalogued (~${selection.skills.tokens} tokens)`]
         : selection.skills.kind === "failed"

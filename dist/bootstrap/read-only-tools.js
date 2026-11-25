@@ -264,6 +264,7 @@ export function createWorkspaceTools(options) {
     if (enableWeb === true) {
         delegates.push(createWebTools({
             surchargeRulesReviewed: false,
+            enableSearch: options.enableWebSearch !== false,
             resolveAddresses: async (host) => {
                 const resolved = await resolveWebFetchHost(host);
                 if (!resolved.ok)

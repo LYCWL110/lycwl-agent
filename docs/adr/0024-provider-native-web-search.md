@@ -1,8 +1,9 @@
 # ADR-0024: Experimental Provider-Native Web Search Mode
 
-- Status: Experiment branch only. Not adopted for `main`. No merge without separate review.
+- Status: Historical experiment. `main` later adopted native search under ADR-0096 with a different policy.
 - Date: 2026-11-04
 - Supersedes: nothing. It conflicts with, and does not weaken, ADR-0002 and ADR-0023.
+- Superseded in part by: ADR-0096 (native search default for Anthropic and Responses).
 - Related: ADR-0002, ADR-0023, V1_CONTRACTS.md C07, V1_BEHAVIOR_CONTRACTS.md sections 2.5/2.6
 
 ## Context

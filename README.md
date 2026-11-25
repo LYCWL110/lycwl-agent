@@ -5,9 +5,11 @@ model permission-controlled tools: read and search files, edit them, run shell
 commands, and talk to LSP and MCP servers.
 
 Writes, shell and web access are enabled by default. Every write, command and
-web request is approved separately. Nothing is sandboxed: an approved command
-runs with your full user permissions. Web search needs a Tavily key; store one
-with `lycwl --search-key`.
+web fetch is approved separately. Nothing is sandboxed: an approved command runs
+with your full user permissions. Anthropic Messages and OpenAI Responses use
+their built-in web search; Chat Completions uses Tavily, whose key is stored with
+`lycwl --search-key`. Native search runs inside the model request, so it has no
+per-query approval or local quota ledger.
 
 Model replies stream into the terminal as they arrive. Tool calls still wait for
 the complete response and their own approval.

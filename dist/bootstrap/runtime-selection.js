@@ -10,6 +10,7 @@ import { createSkillLoader } from "../adapters/windows/skill-loader.js";
 import { createSyntaxChecker, defaultTscEntry } from "../adapters/windows/syntax-checker.js";
 import { deriveTaskReport } from "../application/task-report/derive-task-report.js";
 import { DEFAULT_CONTEXT_WINDOW } from "../domain/config/model-context.js";
+import { readProviderConfig } from "../domain/config/provider-config.js";
 import { computeContextBudget, conservativeEstimate } from "../domain/context/context-budget.js";
 import { renderHarnessRules } from "../domain/context/harness-rules.js";
 import { diffGuidanceSources, } from "../domain/context/project-guidance.js";
@@ -35,6 +36,14 @@ export async function selectRuntime(options) {
     }
     const enableWrites = options.enableWrites === true;
     const enableProcesses = options.enableProcesses === true;
+    const enableWeb = options.enableWeb !== false;
+    // The protocol is readable before assembly; the tool catalog needs the same
+    // native/harness decision that the Provider will use.
+    const configured = readProviderConfig(options.settings);
+    const nativeWebSearch = enableWeb &&
+        configured.ok &&
+        (configured.value.protocol === "anthropic_messages" ||
+            configured.value.protocol === "openai_responses");
     // MCP servers are third-party processes. They start only when a declaration
     // exists AND an approval channel was supplied; a build with no channel cannot
     // start one, which is the safe default for a scripted launch.
@@ -75,6 +84,8 @@ export async function selectRuntime(options) {
         ids: { create: () => "probe" },
         enableWrites,
         enableProcesses,
+        enableWeb,
+        enableWebSearch: !nativeWebSearch,
         enableSkills: options.enableSkills === true,
         ...(mcpExecutor === undefined ? {} : { mcp: mcpExecutor }),
         ...(discoverExecutor === undefined ? {} : { discover: discoverExecutor }),
@@ -131,6 +142,7 @@ export async function selectRuntime(options) {
     const assembly = await assembleRuntime({
         settings: options.settings,
         dataDirectory: options.dataDirectory,
+        nativeWebSearch,
         toolDefinitions,
         // The fixed Harness rules are the only text with application authority. Project
         // material arrives separately as a sourced user turn.
@@ -333,6 +345,7 @@ export async function selectRuntime(options) {
             config: effectiveConfig,
             enableWrites,
             enableProcesses,
+            webSearch: !enableWeb ? "disabled" : assembly.nativeWebSearch ? "native" : "harness",
             warnings: [
                 ...assembly.warnings,
                 ...mcpWarnings,
@@ -373,7 +386,10 @@ export async function selectRuntime(options) {
                     enableWrites,
                     enableProcesses,
                     enableLsp: options.enableLsp === true,
-                    enableWeb: options.enableWeb !== false,
+                    enableWeb,
+                    // A native-search Provider must not also offer the Tavily tool; that
+                    // would give the model two search paths with different guarantees.
+                    enableWebSearch: !assembly.nativeWebSearch,
                     enableSkills: options.enableSkills === true,
                     sessionId,
                     resolveSearchApiKey: assembly.resolveSearchApiKey,
@@ -575,6 +591,11 @@ export function describeSelection(selection) {
             `processes: ${selection.enableProcesses
                 ? "enabled (every command requires approval; no sandbox)"
                 : "disabled"}`,
+            selection.webSearch === "native"
+                ? "web: fetch enabled (approval required); search is provider-native (no per-query approval or search ledger)"
+                : selection.webSearch === "harness"
+                    ? "web: fetch and Tavily search enabled (every request requires approval)"
+                    : "web: disabled",
             ...(selection.skills.kind === "loaded"
                 ? [`skills: ${selection.skills.count} catalogued (~${selection.skills.tokens} tokens)`]
                 : selection.skills.kind === "failed"

@@ -56,6 +56,10 @@ export type WebToolDependencies = Readonly<{
     request: WebFetchRequest,
     approvedAddresses: readonly string[],
   ) => Promise<WebFetchRun>;
+  /** Set false when the Provider performs search inside the model request. */
+  enableSearch?: boolean;
+  /** Set false to leave only search exposed. */
+  enableFetch?: boolean;
 }>;
 
 export const WEB_SEARCH_DEFINITION: ToolDefinition = {
@@ -75,6 +79,12 @@ export const WEB_FETCH_DEFINITION: ToolDefinition = {
 };
 
 const DEFINITIONS: readonly ToolDefinition[] = [WEB_SEARCH_DEFINITION, WEB_FETCH_DEFINITION];
+
+function toolEnabled(dependencies: WebToolDependencies, toolName: string): boolean {
+  if (toolName === WEB_SEARCH_DEFINITION.name) return dependencies.enableSearch !== false;
+  if (toolName === WEB_FETCH_DEFINITION.name) return dependencies.enableFetch !== false;
+  return false;
+}
 
 /**
  * Search failure codes that prove the request was never sent, so they are
@@ -108,10 +118,12 @@ export function createWebTools(dependencies: WebToolDependencies): ToolExecutor 
   }
   return {
     getDefinition(toolName: string): ToolDefinition | null {
+      if (!toolEnabled(dependencies, toolName)) return null;
       return DEFINITIONS.find((definition) => definition.name === toolName) ?? null;
     },
 
     async preview(request: ToolExecutionRequest): Promise<string | null> {
+      if (!toolEnabled(dependencies, request.toolName)) return null;
       if (request.toolName === WEB_SEARCH_DEFINITION.name) {
         const validated = validateWebSearch(request.arguments, {
           surchargeRulesReviewed: dependencies.surchargeRulesReviewed,
@@ -166,6 +178,9 @@ export function createWebTools(dependencies: WebToolDependencies): ToolExecutor 
     },
 
     async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
+      if (!toolEnabled(dependencies, request.toolName)) {
+        return { status: "failed", safeCode: "tool_unavailable_in_build", text: null };
+      }
       if (request.toolName === WEB_SEARCH_DEFINITION.name) {
         return executeSearch(dependencies, request.arguments, request.toolCallId, request.owner);
       }

@@ -22,6 +22,10 @@ export async function assembleRuntime(options) {
         return { ok: false, code: "config_invalid", detail: `${parsed.code}:${parsed.field ?? ""}` };
     }
     const config = parsed.value;
+    // The caller decides from the protocol; Chat Completions has no native tool and
+    // stays on the Harness Tavily path, so it never reaches this flag as true.
+    const nativeWebSearch = options.nativeWebSearch === true &&
+        (config.protocol === "anthropic_messages" || config.protocol === "openai_responses");
     const outputTokens = config.contextWindow === null
         ? config.maxOutputTokens
         : Math.min(config.maxOutputTokens, Math.max(1024, Math.floor(0.2 * config.contextWindow)));
@@ -218,6 +222,7 @@ export async function assembleRuntime(options) {
                 ? {}
                 : { reasoningEffort: config.reasoningEffort }),
             tools: options.toolDefinitions,
+            nativeWebSearch,
             post,
             streamPost,
             ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
@@ -247,6 +252,7 @@ export async function assembleRuntime(options) {
                     ? {}
                     : { reasoningEffort: config.reasoningEffort }),
                 tools: options.toolDefinitions,
+                nativeWebSearch,
                 post,
                 streamPost,
                 ...(options.trustedCaPem === undefined ? {} : { trustedCaPem: options.trustedCaPem }),
@@ -261,6 +267,7 @@ export async function assembleRuntime(options) {
         runBinding,
         resolveCredentialRevision,
         resolveSearchApiKey,
+        nativeWebSearch,
         requestFingerprint: async (value) => hash([config, options.toolDefinitions, value]),
     };
 }
