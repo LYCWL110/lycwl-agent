@@ -1073,6 +1073,58 @@ describe("conversation scrolling and command suggestions", () => {
     }
   });
 
+  it("interrupts a running session on Escape instead of quitting", async () => {
+    let cancelled = 0;
+    let quit = false;
+    const instance = render(
+      createElement(App, {
+        ...actions,
+        view: {
+          ...EMPTY_VIEW,
+          runStatus: "active",
+          canSubmit: false,
+          queueingInput: true,
+        },
+        capabilities: MONO,
+        onCancelRun: () => {
+          cancelled += 1;
+        },
+        onQuit: () => {
+          quit = true;
+        },
+      }),
+    );
+    try {
+      await press(instance.stdin, "\u001b");
+      expect(cancelled).toBe(1);
+      expect(quit).toBe(false);
+    } finally {
+      instance.unmount();
+    }
+  });
+
+  it("does not quit on Escape when idle and keeps Ctrl+C as the exit key", async () => {
+    let quit = false;
+    const instance = render(
+      createElement(App, {
+        ...actions,
+        view: EMPTY_VIEW,
+        capabilities: MONO,
+        onQuit: () => {
+          quit = true;
+        },
+      }),
+    );
+    try {
+      await press(instance.stdin, "\u001b");
+      expect(quit).toBe(false);
+      await press(instance.stdin, "\u0003");
+      expect(quit).toBe(true);
+    } finally {
+      instance.unmount();
+    }
+  });
+
   it("dismisses suggestions on Escape and preserves ordinary slash input", async () => {
     let quit = false;
     const submitted: string[] = [];

@@ -488,7 +488,7 @@ describe("setup screen rendering", () => {
 });
 
 describe("terminal cell layout", () => {
-  it("enters an alternate screen for the main TUI and restores the terminal on Escape", async () => {
+  it("enters an alternate screen for the main TUI and restores the terminal on Ctrl+C", async () => {
     const stdout = Object.assign(new PassThrough(), { isTTY: true, columns: 80, rows: 24 });
     const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => undefined });
     const stderr = new PassThrough();
@@ -522,6 +522,9 @@ describe("terminal cell layout", () => {
       assert.ok(output.includes("\u001b[?1000h\u001b[?1006h"), "enable terminal mouse reports");
       assert.equal(output.includes("\u001b[?1049l"), false);
       stdin.write("\u001b");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(output.includes("\u001b[?1049l"), false, "Escape must not exit");
+      stdin.write("\u0003");
       await new Promise((resolve) => setTimeout(resolve, 100));
       assert.ok(output.includes("\u001b[?1049l"), "restore the primary screen on exit");
       assert.ok(output.includes("\u001b[?1000l\u001b[?1006l"), "release terminal mouse capture");

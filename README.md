@@ -63,7 +63,8 @@ lycwl --help
 `--write` and `--shell` are accepted for compatibility but ignored; the default
 already enables both. Use `--read-only` to opt out.
 
-Type `/` for commands (`/config`, `/model`, `/session`, `/new`, `/cancel`,
+While a Run is active, `Esc` cancels it. When idle, `Ctrl+C` exits; `/quit` also
+works. Type `/` for commands (`/config`, `/model`, `/session`, `/new`, `/cancel`,
 `/quit`). Each launch starts a new conversation; older ones stay on disk until
 you resume them by ID.
 

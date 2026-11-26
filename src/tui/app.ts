@@ -203,7 +203,9 @@ export function App(props: AppProps): ReactElement {
   useInput((input, key) => {
     if (view.localPanel != null) return;
     if (key.ctrl && input === "c") {
-      props.onCancelRun();
+      // Busy: stop the Run. Idle: this is the explicit exit shortcut.
+      if (view.runStatus === "active" || view.runStatus === "waiting") props.onCancelRun();
+      else props.onQuit();
       return;
     }
     if (approvalKey !== null) {
@@ -222,7 +224,7 @@ export function App(props: AppProps): ReactElement {
         if (canApprove) selectApproval("approve");
         return;
       }
-      if (input === "d") {
+      if (input === "d" || key.escape) {
         selectApproval("deny");
         return;
       }
@@ -273,7 +275,9 @@ export function App(props: AppProps): ReactElement {
         setDismissedCommands(true);
         return;
       }
-      props.onQuit();
+      // Escape interrupts; it is not the exit key. Quitting while idle is
+      // Ctrl+C, and /quit always works.
+      if (view.runStatus === "active" || view.runStatus === "waiting") props.onCancelRun();
       return;
     }
     if (key.pageUp) {
@@ -821,10 +825,10 @@ function Composer(props: {
     view.pendingQuestion !== null
       ? "Enter answer"
       : view.queueingInput
-        ? "queued as supplementary input for the running run"
+        ? "queued as supplementary input · Esc cancels the run"
         : view.canSubmit
-          ? "Enter submits · / commands · Ctrl+C cancels"
-          : "run is busy";
+          ? "Enter submits · / commands · Ctrl+C exits"
+          : "run is busy · Esc cancels";
   return h(
     Box,
     { flexDirection: "column", marginTop: 1, flexShrink: 0 },
