@@ -168,7 +168,7 @@ describe("guidance removal", () => {
       const thirdText = thirdMessages.map(messageText).join("\n");
       assert.match(thirdText, /\(removed;/);
       assert.match(thirdText, /earlier guidance from this path is withdrawn/);
-      assert.match(thirdText, /src\/api\/AGENTS\.md/);
+      assert.ok(thirdText.includes(`${path.join(workspace, "src", "api", "AGENTS.md")} (removed;`));
       // The earlier block remains, but the removal names the path as withdrawn.
       assert.match(thirdText, /api rule/);
       assert.equal((thirdText.match(/root rule/gu) ?? []).length, 1);
