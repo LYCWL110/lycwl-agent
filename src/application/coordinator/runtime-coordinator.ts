@@ -16,6 +16,7 @@ import type { RunModelBinding } from "../../domain/model-request/run-binding.ts"
 import { bindAttempt } from "../../domain/model-request/run-binding.ts";
 import { addUsage } from "../../domain/model-request/token-usage.ts";
 import { describeSyntaxFailure } from "../../domain/mutation/syntax-check.ts";
+import type { SnapshotEntry } from "../../domain/persistence/snapshot.ts";
 import { emptyTodoList, replaceTodoList, type TodoList } from "../../domain/planning/todo.ts";
 import {
   type AnswerFailure,
@@ -65,7 +66,7 @@ import type {
 import type { SensitiveSource } from "../../ports/sensitive-context.ts";
 import type { SnapshotStore } from "../../ports/snapshot-store.ts";
 import type { SpillStore } from "../../ports/spill-store.ts";
-import type { ChangeReverter, SyntaxChecker } from "../../ports/syntax-checker.ts";
+import type { SyntaxChecker } from "../../ports/syntax-checker.ts";
 import type { ToolExecutionRequest, ToolExecutor } from "../../ports/tool-executor.ts";
 import {
   assertProtectedValue,
@@ -178,10 +179,6 @@ export type CoordinatorDependencies = Readonly<{
    * pre-existing behaviour.
    */
   argumentSchemas?: ReadonlyMap<string, Readonly<Record<string, unknown>>>;
-  /** Workspace root, needed to revert an edit through the snapshot store. */
-  workspaceRoot?: string;
-  /** Reverts a Run's file changes; supplied by the composition root. */
-  revertChanges?: ChangeReverter;
   /** Resolve a workspace-relative path to an absolute one, for the formatter. */
   resolveWorkspacePath?: (relativePath: string) => string;
   /**
@@ -425,6 +422,18 @@ type MutableRunContext = {
   runBinding: RunModelBinding | null;
   /** Tool call fingerprints for no-progress detection, oldest first. */
   callHistory: CallRecord[];
+  /** Immediate pre-edit snapshots, keyed by provider tool call id. */
+  editSnapshots: Map<
+    string,
+    {
+      path: string;
+      before: SnapshotEntry;
+      /** Digest after the edit, used to detect a later concurrent change. */
+      afterSha256: string | null;
+      /** False when the post-edit file state could not be read. */
+      afterKnown: boolean;
+    }
+  >;
   /** True once queued user input was consumed since the last recorded call. */
   newInputSinceLastCall: boolean;
   /** Paths this Run has touched, for scoped guidance refresh. */
@@ -913,6 +922,7 @@ export class RuntimeCoordinator {
       usage: undefined,
       streamingText: "",
       spilledPreviews: new Map<string, string>(),
+      editSnapshots: new Map(),
       lastBudgetTick: this.#nowMs(),
       accountingActive: true,
       costUnknown: false,
@@ -2484,45 +2494,66 @@ export class RuntimeCoordinator {
     originalText: string | null,
   ): Promise<Readonly<{ status: "succeeded" | "failed"; text: string | null }>> {
     const checker = this.#deps.syntaxChecker;
+    const store = this.#deps.snapshotStore;
     // Returning the original text matters: the verifier replaces the tool result, so
     // a null here would silently discard what the tool actually reported.
     const keep = { status: "succeeded" as const, text: originalText };
-    if (checker === undefined) return keep;
+    const edit = context.editSnapshots.get(call.providerToolCallId);
+    const finish = (): typeof keep => {
+      context.editSnapshots.delete(call.providerToolCallId);
+      return keep;
+    };
+    if (checker === undefined) return finish();
 
     // Only a single-path edit is checked. A batch has no single target to verify,
     // and checking every target is the expensive case this deliberately avoids.
     const targets = snapshotTargets(call.arguments);
-    if (targets.length !== 1) return keep;
+    if (targets.length !== 1) return finish();
     const relativePath = targets[0];
-    if (relativePath === undefined) return keep;
+    if (relativePath === undefined) return finish();
 
-    const absolutePath = this.#deps.resolveWorkspacePath?.(relativePath);
-    if (absolutePath === undefined) return keep;
-
-    const checked = await checker.check(absolutePath);
-    if (checked.kind !== "failed") {
-      if (checked.kind === "skipped") {
-        await this.#record(context, "syntax_check_skipped", {
-          kind: "syntax_check_skipped",
-          toolCallId: call.providerToolCallId,
-          path: relativePath,
-          reason: checked.reason,
-        });
+    if (edit !== undefined && store !== undefined) {
+      const current = await store.currentDigest(edit.path);
+      if (current.ok) {
+        edit.afterSha256 = current.sha256;
+        edit.afterKnown = true;
       }
-      return keep;
     }
 
-    // Revert from the snapshot taken before dispatch. Without one there is nothing
-    // to restore, so the edit stands and the failure is reported without a rollback
-    // claim.
-    let reverted = false;
-    const revert = this.#deps.revertChanges;
-    if (revert !== undefined && this.#deps.workspaceRoot !== undefined) {
-      const undone = await revert({
-        runId: context.runId,
-        workspaceRoot: this.#deps.workspaceRoot,
+    const absolutePath = this.#deps.resolveWorkspacePath?.(relativePath);
+    if (absolutePath === undefined) return finish();
+
+    const checked = await checker.check(absolutePath);
+    if (checked.kind === "ok") {
+      await this.#record(context, "syntax_check_passed", {
+        kind: "syntax_check_passed",
+        toolCallId: call.providerToolCallId,
+        path: relativePath,
       });
-      reverted = undone.ok;
+      return finish();
+    }
+    if (checked.kind === "skipped") {
+      await this.#record(context, "syntax_check_skipped", {
+        kind: "syntax_check_skipped",
+        toolCallId: call.providerToolCallId,
+        path: relativePath,
+        reason: checked.reason,
+      });
+      return finish();
+    }
+
+    // Restore only this edit's immediate pre-change snapshot. The whole-Run undo
+    // keeps the first capture per path and is intentionally not used here: it would
+    // discard earlier successful edits in the same Run.
+    let rollback: "reverted" | "conflict" | "unavailable" = "unavailable";
+    if (edit !== undefined && edit.afterKnown && store !== undefined) {
+      const restored = await store.restoreEdit({
+        runId: context.runId,
+        entry: edit.before,
+        expectedCurrentSha256: edit.afterSha256,
+      });
+      if (restored.ok) rollback = "reverted";
+      else if (restored.code === "conflict") rollback = "conflict";
     }
 
     await this.#record(context, "syntax_check_failed", {
@@ -2531,14 +2562,20 @@ export class RuntimeCoordinator {
       path: relativePath,
       line: checked.line,
       message: checked.message,
-      reverted,
+      reverted: rollback === "reverted",
+      rollback,
     });
+    context.editSnapshots.delete(call.providerToolCallId);
 
+    const suffix =
+      rollback === "reverted"
+        ? "\nThe edit was reverted; earlier changes in this Run are untouched."
+        : rollback === "conflict"
+          ? "\nThe file changed after this edit; it was not reverted. Inspect the newer change before retrying."
+          : "\nThe edit could not be reverted; inspect the file before retrying.";
     return {
       status: "failed",
-      text:
-        describeSyntaxFailure(relativePath, checked) +
-        (reverted ? "" : "\nThe revert could not be completed; inspect the file before retrying."),
+      text: describeSyntaxFailure(relativePath, checked) + suffix,
     };
   }
 
@@ -2599,9 +2636,37 @@ export class RuntimeCoordinator {
     const definition = this.#deps.tools.getDefinition(call.toolName);
     if (definition?.sideEffectClass !== "filesystem_mutation") return;
 
-    for (const relativePath of snapshotTargets(call.arguments)) {
+    const targets = snapshotTargets(call.arguments);
+    for (const relativePath of targets) {
       const captured = await store.capture({ runId: context.runId, relativePath });
       if (!captured.ok) {
+        await this.#record(context, "snapshot_unavailable", {
+          kind: "snapshot_unavailable",
+          toolCallId: call.providerToolCallId,
+          path: relativePath,
+          reason: captured.code,
+        });
+      }
+    }
+
+    // A single-file edit also gets an immediate snapshot. The whole-Run entry
+    // above is first-wins per path and is meant for a user undo; it cannot restore
+    // only the edit that just failed after an earlier success.
+    if (this.#deps.syntaxChecker !== undefined && targets.length === 1) {
+      const relativePath = targets[0];
+      if (relativePath === undefined) return;
+      const captured = await store.captureEdit({
+        runId: context.runId,
+        relativePath,
+      });
+      if (captured.ok) {
+        context.editSnapshots.set(call.providerToolCallId, {
+          path: relativePath,
+          before: captured.entry,
+          afterSha256: null,
+          afterKnown: false,
+        });
+      } else {
         await this.#record(context, "snapshot_unavailable", {
           kind: "snapshot_unavailable",
           toolCallId: call.providerToolCallId,

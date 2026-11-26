@@ -336,6 +336,49 @@ describe("TUI rendering", () => {
     instance.unmount();
   });
 
+  it("defaults high-risk shell approvals to Cancel", async () => {
+    let approved = 0;
+    let denied = 0;
+    const instance = render(
+      createElement(App, {
+        ...actions,
+        view: {
+          ...EMPTY_VIEW,
+          runStatus: "waiting",
+          waitingKind: "approval",
+          canSubmit: false,
+          queueingInput: true,
+          pendingApproval: {
+            approvalId: "danger",
+            toolCallId: "danger-call",
+            toolName: "shell",
+            requestVersion: 1,
+          },
+          pendingApprovalPreview: [
+            "shell",
+            "command=Remove-Item -Recurse -Force .",
+            "risk=deletion: removes files or directories without prompting",
+          ],
+        },
+        capabilities: MONO,
+        onApprove: () => {
+          approved += 1;
+        },
+        onDeny: () => {
+          denied += 1;
+        },
+      }),
+    );
+    try {
+      expect(instance.lastFrame()).toMatch(/▶ Cancel/);
+      await press(instance.stdin, "\r");
+      expect(approved).toBe(0);
+      expect(denied).toBe(1);
+    } finally {
+      instance.unmount();
+    }
+  });
+
   it("defaults tool approval to Approve and moves to Cancel with the right arrow", async () => {
     const view: TuiViewState = {
       ...EMPTY_VIEW,

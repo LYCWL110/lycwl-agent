@@ -351,10 +351,30 @@ export function renderReport(report: ReportSnapshot): string {
   if (report.latestChange !== null) lines.push(`latestChange=${report.latestChange}`);
 
   for (const entry of report.verification.perAssertion) {
-    lines.push(`- ${entry.assertionId}: ${entry.status}`);
+    const assertion = report.assertions.find(
+      (candidate) => candidate.assertionId === entry.assertionId,
+    );
+    const detail =
+      assertion !== undefined && assertion.kind === "supporting_check"
+        ? ` (${assertion.description.slice(0, 160)})`
+        : "";
+    lines.push(`- ${entry.assertionId}: ${entry.status}${detail}`);
   }
   for (const blocker of report.verification.blockers) {
     lines.push(`  blocker: ${blocker.assertionId} ${blocker.reason}`);
+  }
+  if (report.changes.length > 0) {
+    const shown = report.changes.slice(0, 12).map((change) => change.path);
+    const suffix =
+      report.changes.length > shown.length
+        ? ` (+${report.changes.length - shown.length} more)`
+        : "";
+    lines.push(`changes=${shown.join(",")}${suffix}`);
+  }
+  if (report.tests.length > 0) {
+    lines.push(
+      `tests=${report.tests.map((test) => `${test.command}:${test.outcome}`).join(" | ")}`,
+    );
   }
   if (report.unknownSideEffects.length > 0) {
     lines.push(`unknownSideEffects=${report.unknownSideEffects.join(",")}`);

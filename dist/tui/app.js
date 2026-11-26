@@ -36,7 +36,10 @@ export function App(props) {
      * for tool calls and on Cancel for sensitive redisclosure.
      */
     const approvalKey = view.pendingApproval?.approvalId ?? view.pendingDisclosure?.disclosureId ?? null;
-    const approvalDefault = view.pendingDisclosure === null ? "approve" : "deny";
+    const approvalDefault = view.pendingDisclosure !== null ||
+        highRiskApproval(view.pendingApproval?.toolName, view.pendingApprovalPreview)
+        ? "deny"
+        : "approve";
     const [approvalSelection, setApprovalSelection] = useState(null);
     const canApprove = view.pendingDisclosure !== null || view.pendingApprovalPreview !== null;
     const selectedApproval = approvalKey !== null && approvalSelection?.key === approvalKey
@@ -579,6 +582,22 @@ function marker(state) {
     if (state === "cancelled")
         return "[-]";
     return "[ ]";
+}
+/**
+ * High-consequence operations start on Cancel.
+ *
+ * The preview's structured `risk=` lines are the source, not the command text.
+ * Ordinary shell commands keep the previous one-Enter approve path.
+ */
+function highRiskApproval(toolName, preview) {
+    if (toolName === "delete_path")
+        return true;
+    if (toolName !== "shell" || preview === null)
+        return false;
+    return preview.some((line) => line.startsWith("risk=destruction:") ||
+        line.startsWith("risk=history_rewrite:") ||
+        line.startsWith("risk=privilege_change:") ||
+        (line.startsWith("risk=deletion:") && line.includes("without prompting")));
 }
 /**
  * The approval box that replaces the composer while a decision is pending.

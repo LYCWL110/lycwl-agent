@@ -148,6 +148,21 @@ describe("shell request validation", () => {
 });
 
 describe("shell preview", () => {
+  it("marks a declared verification command in the preview", () => {
+    const validated = validateShellRequest(
+      { command: "npm test", cwd: "D:\\repo", verification: true },
+      { sessionMode: "workspace_write" },
+    );
+    assert.equal(validated.ok, true);
+    if (!validated.ok) return;
+    const preview = renderShellPreview(validated.value, {
+      environment: {},
+      removedNames: [],
+      missingGrantNames: [],
+    });
+    assert.match(formatShellPreview(preview), /purpose=declared verification command/);
+  });
+
   it("shows the normalized timeout and redacted grant names", () => {
     const validated = validateShellRequest(
       { command: "npm test", cwd: "D:\\repo", timeoutMs: 5000, environmentGrants: ["B", "A"] },

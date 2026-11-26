@@ -25,7 +25,6 @@ import { hostPlatform } from "./platform.js";
 import { createWorkspaceTools } from "./read-only-tools.js";
 import { assembleRuntime } from "./runtime-assembly.js";
 import { readMcpDeclarations } from "./terminal-approval.js";
-import { undoSessionChanges } from "./undo.js";
 export async function selectRuntime(options) {
     if (!options.hasSettings) {
         return {
@@ -435,20 +434,6 @@ export async function selectRuntime(options) {
                     // The same C09 filter every other child process gets.
                     environment: formatterEnvironment(),
                 }),
-                workspaceRoot: options.workspaceRoot,
-                revertChanges: async ({ runId, workspaceRoot }) => {
-                    const undone = await undoSessionChanges({
-                        store: createSnapshotStore({
-                            sessionDirectory: path.join(sessionRoot, "sessions", sessionId),
-                            workspaceRoot,
-                        }),
-                        workspaceRoot,
-                        runIds: [runId],
-                    });
-                    return undone.ok
-                        ? { ok: true, files: undone.files }
-                        : { ok: false, code: undone.code };
-                },
                 formatter: createFormatterRunner({
                     workspaceRoot: options.workspaceRoot,
                     // The same C09 filter every other child process gets: a formatter has no

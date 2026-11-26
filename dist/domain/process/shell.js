@@ -154,6 +154,11 @@ export function validateShellRequest(args, options) {
         timeoutMs > SHELL_LIMITS.maxTimeoutMs) {
         return { ok: false, code: "invalid_timeout" };
     }
+    const rawVerification = record["verification"];
+    if (rawVerification !== undefined && typeof rawVerification !== "boolean") {
+        return { ok: false, code: "invalid_arguments" };
+    }
+    const verification = rawVerification === true;
     const rawGrants = record["environmentGrants"];
     const environmentGrants = [];
     if (rawGrants !== undefined) {
@@ -176,7 +181,7 @@ export function validateShellRequest(args, options) {
     }
     return {
         ok: true,
-        value: { command, cwd, timeoutMs, environmentGrants },
+        value: { command, cwd, timeoutMs, environmentGrants, verification },
     };
 }
 /**
@@ -190,6 +195,7 @@ export function renderShellPreview(request, filter) {
         command: request.command,
         cwd: request.cwd,
         timeoutMs: request.timeoutMs,
+        ...(request.verification === true ? { verification: true } : {}),
         grantedVariableNames: [...request.environmentGrants].sort(),
         filteredVariableCount: filter.removedNames.length,
     };
@@ -203,6 +209,7 @@ export function formatShellPreview(preview, platform = "win32") {
         `timeoutMs=${preview.timeoutMs}`,
         `envGrants=${preview.grantedVariableNames.length === 0 ? "(none)" : preview.grantedVariableNames.join(",")}`,
         `filteredEnv=${preview.filteredVariableCount} name(s) removed`,
+        ...(preview.verification === true ? ["purpose=declared verification command"] : []),
         ...(preview.singleStatement === false
             ? ["statements=more than one; each part runs, not only the first"]
             : []),

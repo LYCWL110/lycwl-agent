@@ -468,9 +468,9 @@ export const TOOL_CATALOG = Object.freeze([
         name: "shell",
         description: toolCard({
             purpose: "Run one command in a fresh Windows PowerShell 5.1 process with -NoProfile and -NonInteractive, and return bounded stdout and stderr.",
-            useWhen: "No dedicated tool can express the operation, or the task genuinely needs a shell such as build, test, package-manager or git commands.",
+            useWhen: "No dedicated tool can express the operation, or the task genuinely needs a shell such as build, test, package-manager or git commands. Set verification=true only when the command is the project's declared check.",
             avoidWhen: "read_file, list_dir, glob, grep, edit_file, apply_patch, create_file, web_fetch or web_search covers it. A dedicated call is easier to review. Use background tools for long-running work.",
-            returns: "Combined stdout and stderr, exit status, and truncation facts. Oversized output may be spilled and replaced by a bounded preview.",
+            returns: "Combined stdout and stderr, exit status, truncation facts and, for verification=true, a declared test result. Oversized output may be spilled and replaced by a bounded preview.",
             errors: "invalid_arguments, environment_grant_missing, shell_timeout, nonzero_exit, output_limit_exceeded, capture_incomplete, shell_outcome_unknown. Do not retry an unknown outcome without checking.",
             security: "Every command needs its own approval and runs with the current Windows user's permissions; there is no OS sandbox. A shell `curl` is allowed only when no dedicated tool can express the request and never to bypass a denial or policy refusal.",
         }),
@@ -483,6 +483,10 @@ export const TOOL_CATALOG = Object.freeze([
                     type: "integer",
                     minimum: 1000,
                     description: "Timeout in milliseconds. Defaults to 120000, maximum 600000.",
+                },
+                verification: {
+                    type: "boolean",
+                    description: "Set true only when this command is the project's declared verification check. Its result is reported as a test result; never infer this from the command name.",
                 },
             },
             required: ["command", "cwd"],

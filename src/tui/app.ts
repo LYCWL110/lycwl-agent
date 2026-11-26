@@ -100,7 +100,11 @@ export function App(props: AppProps): ReactElement {
    */
   const approvalKey =
     view.pendingApproval?.approvalId ?? view.pendingDisclosure?.disclosureId ?? null;
-  const approvalDefault: ApprovalChoice = view.pendingDisclosure === null ? "approve" : "deny";
+  const approvalDefault: ApprovalChoice =
+    view.pendingDisclosure !== null ||
+    highRiskApproval(view.pendingApproval?.toolName, view.pendingApprovalPreview)
+      ? "deny"
+      : "approve";
   const [approvalSelection, setApprovalSelection] = useState<{
     key: string;
     choice: ApprovalChoice;
@@ -719,6 +723,27 @@ function marker(state: string): string {
   if (state === "in_progress") return "[>]";
   if (state === "cancelled") return "[-]";
   return "[ ]";
+}
+
+/**
+ * High-consequence operations start on Cancel.
+ *
+ * The preview's structured `risk=` lines are the source, not the command text.
+ * Ordinary shell commands keep the previous one-Enter approve path.
+ */
+function highRiskApproval(
+  toolName: string | undefined,
+  preview: readonly string[] | null,
+): boolean {
+  if (toolName === "delete_path") return true;
+  if (toolName !== "shell" || preview === null) return false;
+  return preview.some(
+    (line) =>
+      line.startsWith("risk=destruction:") ||
+      line.startsWith("risk=history_rewrite:") ||
+      line.startsWith("risk=privilege_change:") ||
+      (line.startsWith("risk=deletion:") && line.includes("without prompting")),
+  );
 }
 
 /**

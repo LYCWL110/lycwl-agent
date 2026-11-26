@@ -282,13 +282,21 @@ const payloadChecks = {
     toolCallId: id,
     verdict: oneOf("applied", "not_applied", "unresolved"),
   }),
-  syntax_check_failed: object({
+  syntax_check_failed: object(
+    {
+      kind: text,
+      toolCallId: id,
+      path: text,
+      line: nullable(integer),
+      message: text,
+      reverted: (value) => typeof value === "boolean",
+    },
+    { rollback: oneOf("reverted", "conflict", "unavailable") },
+  ),
+  syntax_check_passed: object({
     kind: text,
     toolCallId: id,
     path: text,
-    line: nullable(integer),
-    message: text,
-    reverted: (value) => typeof value === "boolean",
   }),
   syntax_check_skipped: object({
     kind: text,

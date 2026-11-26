@@ -43,12 +43,19 @@ export type InternalEventPayload =
       message: string;
       /** Whether the edit was reverted; false means the file still holds the edit. */
       reverted: boolean;
+      /** Why the edit is or is not in the file after the failed check. */
+      rollback?: "reverted" | "conflict" | "unavailable";
     }>
   | Readonly<{
       kind: "syntax_check_skipped";
       toolCallId: string;
       path: string;
       reason: "not_supported" | "too_large" | "checker_unavailable";
+    }>
+  | Readonly<{
+      kind: "syntax_check_passed";
+      toolCallId: string;
+      path: string;
     }>
   | Readonly<{
       kind: "tool_output_formatted";

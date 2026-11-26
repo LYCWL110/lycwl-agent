@@ -10,14 +10,3 @@ import type { SyntaxCheckOutcome } from "../domain/mutation/syntax-check.ts";
 export type SyntaxChecker = Readonly<{
   check: (absolutePath: string) => Promise<SyntaxCheckOutcome>;
 }>;
-
-/**
- * Reverts the files a Run changed.
- *
- * The coordinator needs to undo an edit that failed verification, but the file
- * system belongs to an adapter. The application layer depends on this shape.
- */
-export type ChangeReverter = (input: {
-  runId: string;
-  workspaceRoot: string;
-}) => Promise<Readonly<{ ok: true; files: number }> | Readonly<{ ok: false; code: string }>>;

@@ -48,7 +48,6 @@ import { hostPlatform } from "./platform.ts";
 import { createWorkspaceTools } from "./read-only-tools.ts";
 import { assembleRuntime, type RuntimeAssemblyFailure } from "./runtime-assembly.ts";
 import { readMcpDeclarations } from "./terminal-approval.ts";
-import { undoSessionChanges } from "./undo.ts";
 
 /**
  * Choose and build the runtime for a launch.
@@ -593,20 +592,6 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
           // The same C09 filter every other child process gets.
           environment: formatterEnvironment(),
         }),
-        workspaceRoot: options.workspaceRoot,
-        revertChanges: async ({ runId, workspaceRoot }) => {
-          const undone = await undoSessionChanges({
-            store: createSnapshotStore({
-              sessionDirectory: path.join(sessionRoot, "sessions", sessionId),
-              workspaceRoot,
-            }),
-            workspaceRoot,
-            runIds: [runId],
-          });
-          return undone.ok
-            ? { ok: true as const, files: undone.files }
-            : { ok: false as const, code: undone.code };
-        },
         formatter: createFormatterRunner({
           workspaceRoot: options.workspaceRoot,
           // The same C09 filter every other child process gets: a formatter has no

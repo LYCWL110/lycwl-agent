@@ -119,6 +119,85 @@ describe("snapshot store", () => {
   });
 });
 
+describe("single-edit snapshots", () => {
+  it("captures the immediate pre-edit version even after a whole-Run capture", async () => {
+    const ws = workspace();
+    writeFileSync(path.join(ws, "a.txt"), "v0", "utf8");
+    const snapshots = store(ws);
+    await snapshots.capture({ runId: "r1", relativePath: "a.txt" });
+    writeFileSync(path.join(ws, "a.txt"), "v1", "utf8");
+
+    const captured = await snapshots.captureEdit({ runId: "r1", relativePath: "a.txt" });
+    assert.equal(captured.ok, true);
+    if (!captured.ok) return;
+    const bytes = await snapshots.read("r1", captured.entry);
+    assert.equal(Buffer.from(bytes ?? new Uint8Array()).toString("utf8"), "v1");
+  });
+
+  it("refuses to restore over a file changed after the edit", async () => {
+    const ws = workspace();
+    writeFileSync(path.join(ws, "a.txt"), "before", "utf8");
+    const snapshots = store(ws);
+    const captured = await snapshots.captureEdit({ runId: "r1", relativePath: "a.txt" });
+    assert.equal(captured.ok, true);
+    if (!captured.ok) return;
+    writeFileSync(path.join(ws, "a.txt"), "after edit", "utf8");
+    const after = await snapshots.currentDigest("a.txt");
+    assert.equal(after.ok, true);
+    if (!after.ok) return;
+
+    writeFileSync(path.join(ws, "a.txt"), "newer change", "utf8");
+    const conflict = await snapshots.restoreEdit({
+      runId: "r1",
+      entry: captured.entry,
+      expectedCurrentSha256: after.sha256,
+    });
+    assert.deepEqual(conflict, { ok: false, code: "conflict" });
+    assert.equal(readFileSync(path.join(ws, "a.txt"), "utf8"), "newer change");
+  });
+
+  it("restores only the captured edit when the current digest matches", async () => {
+    const ws = workspace();
+    writeFileSync(path.join(ws, "a.txt"), "before", "utf8");
+    const snapshots = store(ws);
+    const captured = await snapshots.captureEdit({ runId: "r1", relativePath: "a.txt" });
+    assert.equal(captured.ok, true);
+    if (!captured.ok) return;
+    writeFileSync(path.join(ws, "a.txt"), "broken", "utf8");
+    const after = await snapshots.currentDigest("a.txt");
+    assert.equal(after.ok, true);
+    if (!after.ok) return;
+
+    const restored = await snapshots.restoreEdit({
+      runId: "r1",
+      entry: captured.entry,
+      expectedCurrentSha256: after.sha256,
+    });
+    assert.deepEqual(restored, { ok: true });
+    assert.equal(readFileSync(path.join(ws, "a.txt"), "utf8"), "before");
+  });
+
+  it("deletes a file whose single edit created it", async () => {
+    const ws = workspace();
+    const snapshots = store(ws);
+    const captured = await snapshots.captureEdit({ runId: "r1", relativePath: "new.txt" });
+    assert.equal(captured.ok, true);
+    if (!captured.ok) return;
+    writeFileSync(path.join(ws, "new.txt"), "created", "utf8");
+    const after = await snapshots.currentDigest("new.txt");
+    assert.equal(after.ok, true);
+    if (!after.ok) return;
+
+    const restored = await snapshots.restoreEdit({
+      runId: "r1",
+      entry: captured.entry,
+      expectedCurrentSha256: after.sha256,
+    });
+    assert.deepEqual(restored, { ok: true });
+    assert.equal(existsSync(path.join(ws, "new.txt")), false);
+  });
+});
+
 describe("undo", () => {
   it("restores a modified file", async () => {
     const ws = workspace();

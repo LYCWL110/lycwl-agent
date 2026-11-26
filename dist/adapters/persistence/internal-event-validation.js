@@ -213,6 +213,11 @@ const payloadChecks = {
         line: nullable(integer),
         message: text,
         reverted: (value) => typeof value === "boolean",
+    }, { rollback: oneOf("reverted", "conflict", "unavailable") }),
+    syntax_check_passed: object({
+        kind: text,
+        toolCallId: id,
+        path: text,
     }),
     syntax_check_skipped: object({
         kind: text,

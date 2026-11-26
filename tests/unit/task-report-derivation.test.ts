@@ -6,6 +6,7 @@ import { RuntimeCoordinator } from "../../src/application/coordinator/runtime-co
 import { deriveTaskReport } from "../../src/application/task-report/derive-task-report.ts";
 import { aggregateVerification } from "../../src/domain/evidence/verification.ts";
 import { InMemoryEventLog } from "../../src/ports/event-log.ts";
+import type { ToolExecutor } from "../../src/ports/tool-executor.ts";
 import { JsonDigest, RecordingTools, SequenceIds } from "../fakes/deterministic-services.ts";
 
 describe("reported token usage is not an unknown charge", () => {
@@ -68,6 +69,69 @@ describe("reported token usage is not an unknown charge", () => {
     const event = result.events.at(-1);
     assert.ok(event?.payload.kind === "task_report_snapshot");
     assert.equal(event.payload.report.usage.unknownChargeCount, 1);
+  });
+});
+
+describe("declared verification commands", () => {
+  it("records an explicitly marked shell command as a test result", async () => {
+    const log = new InMemoryEventLog(new SequenceIds("event"), new JsonDigest());
+    const tools: ToolExecutor = {
+      getDefinition(name) {
+        return name === "shell"
+          ? {
+              name: "shell",
+              version: "1",
+              sideEffectClass: "process_execution" as const,
+              requiresApproval: true,
+              concurrencySafe: false,
+            }
+          : null;
+      },
+      async execute() {
+        return { status: "succeeded", text: "tests passed" };
+      },
+    };
+    let runtimeCalls = 0;
+    const runtime = new RuntimeCoordinator({
+      ids: new SequenceIds(),
+      eventLog: log,
+      nowUtc: () => "2026-11-26T00:00:00.000Z",
+      tools,
+      approvals: { decide: async () => "approved" },
+      provider: {
+        complete: async () => {
+          if (runtimeCalls++ === 0) {
+            return {
+              kind: "completed",
+              text: null,
+              toolCalls: [
+                {
+                  providerToolCallId: "verify",
+                  toolName: "shell",
+                  arguments: { command: "npm test", cwd: ".", verification: true },
+                },
+              ],
+            };
+          }
+          return { kind: "completed", text: "done", toolCalls: [] };
+        },
+      },
+      persistReports: true,
+    });
+    const result = await runtime.run("run the project verification");
+    const event = result.events.findLast(
+      (candidate) => candidate.payload.kind === "task_report_snapshot",
+    );
+    assert.ok(event?.payload.kind === "task_report_snapshot");
+    const test = event.payload.report.tests[0];
+    assert.equal(event.payload.report.tests.length, 1);
+    assert.equal(test?.command, "npm test");
+    assert.equal(test?.approved, true);
+    assert.equal(test?.outcome, "passed");
+    assert.equal(test?.coveredVersion, null);
+    assert.ok(test?.executionId);
+    assert.equal(event.payload.report.changes.length, 0);
+    await runtime.closeSession("close");
   });
 });
 
