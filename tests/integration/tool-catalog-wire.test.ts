@@ -116,6 +116,38 @@ describe("tool catalog", () => {
     }
   });
 
+  it("gives high-risk tools a structured Tool Card", () => {
+    for (const name of [
+      "shell",
+      "web_search",
+      "web_fetch",
+      "create_file",
+      "edit_file",
+      "apply_patch",
+      "delete_path",
+      "rename_path",
+      "background_start",
+      "background_status",
+      "background_output",
+      "background_stop",
+      "ask_user",
+      "skill",
+    ]) {
+      const entry = TOOL_CATALOG.find((candidate) => candidate.name === name);
+      assert.ok(entry, `missing ${name}`);
+      for (const label of [
+        "Purpose:",
+        "Use when:",
+        "Do not use when:",
+        "Returns:",
+        "Errors:",
+        "Security:",
+      ]) {
+        assert.ok(entry.description.includes(label), `${name} is missing ${label}`);
+      }
+    }
+  });
+
   it("does not advertise a tool that is unavailable", () => {
     const filtered = availableTools((name) => name !== "read_file");
     assert.equal(

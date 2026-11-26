@@ -91,6 +91,12 @@ describe("content matches real capabilities", () => {
     assert.match(text, /shell command/i);
   });
 
+  it("allows shell fallback only when a dedicated tool cannot express the operation", () => {
+    assert.match(text, /curl/);
+    assert.match(text, /bypass/i);
+    assert.match(text, /no dedicated tool can express/i);
+  });
+
   it("explains partial and unconfirmed results", () => {
     // These come from ADR-0081 and the model must not confuse them: partial invites a
     // continuation, unconfirmed forbids a retry.

@@ -16,7 +16,7 @@
  * dead text: a rule the model cannot act on is context spent for nothing.
  */
 /** Bumped whenever the text below changes, so a rendered prompt is identifiable. */
-export const HARNESS_RULES_VERSION = 5;
+export const HARNESS_RULES_VERSION = 6;
 /**
  * The sections, in order.
  *
@@ -139,6 +139,10 @@ export const HARNESS_RULES_SECTIONS = Object.freeze([
             "- Reserve `shell` for commands that genuinely need a shell. If a dedicated tool",
             "  exists, use it: a dedicated call is easier for the user to review than a",
             "  command whose effect is buried in a shell line.",
+            "- If no dedicated tool can express the operation, a shell command such as",
+            "  `curl` is allowed with its normal approval. Do not use shell to bypass a",
+            "  denial, a policy refusal, or an address/header restriction: fix the request",
+            "  or report the limit.",
             "- A single-file edit is compiled after it is written; an edit that does not",
             "  compile is reverted and the file is left unchanged.",
             "- Use `todo` to track multi-step work. Mark an item complete as soon as it is",
