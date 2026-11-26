@@ -16,6 +16,7 @@ import { CredentialScreen } from "./credential-screen.ts";
 import { InitPanel } from "./init-panel.ts";
 import { LocalPanel } from "./local-panel.ts";
 import { McpPanel } from "./mcp-panel.ts";
+import { MemoryPanel } from "./memory-panel.ts";
 import { type Capabilities, colorFor, detectCapabilities } from "./palette.ts";
 import { SessionList } from "./session-list.ts";
 import { useTerminalWheel } from "./terminal-wheel.ts";
@@ -73,6 +74,8 @@ export type AppProps = Readonly<{
     entry: Readonly<{ serverId: string; command: string; args: readonly string[] }>,
   ) => void;
   onMcpRemove?: (serverId: string) => void;
+  /** Forget one saved memory entry. */
+  onDeleteMemory?: (id: string) => void;
   /** AGENTS.md draft confirmation. */
   onInitConfirm?: () => void;
   initBusy?: boolean;
@@ -387,6 +390,16 @@ export function App(props: AppProps): ReactElement {
       onResume: (sessionId) => props.onSessionResume?.(sessionId),
       onRename: (sessionId, title) => props.onSessionRename?.(sessionId, title),
       onDelete: (sessionId) => props.onSessionDelete?.(sessionId),
+      onClose: () => props.onClosePanel?.(),
+    });
+  if (view.localPanel === "memory")
+    return h(MemoryPanel, {
+      viewport,
+      capabilities,
+      entries: view.memoryEntries ?? null,
+      error: view.memoryError ?? null,
+      busy: view.memoryBusy === true,
+      onDelete: (id) => props.onDeleteMemory?.(id),
       onClose: () => props.onClosePanel?.(),
     });
   if (view.localPanel === "mcp")

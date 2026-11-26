@@ -1,4 +1,5 @@
 import { readContextMeter } from "../domain/context/context-meter.js";
+import { purgeExpiredMemory } from "../domain/memory/memory.js";
 import { emptyTodoList, replaceTodoList } from "../domain/planning/todo.js";
 import { resolveAnswer } from "./answer-input.js";
 import { deriveView, interpretComposer } from "./view-model.js";
@@ -41,6 +42,9 @@ export function createTuiController(deps) {
     let mcpServers = null;
     let mcpError = null;
     let mcpBusy = false;
+    let memoryEntries = null;
+    let memoryError = null;
+    let memoryBusy = false;
     let sessionList = null;
     let sessionListError = null;
     let sessionListBusy = false;
@@ -222,6 +226,93 @@ export function createTuiController(deps) {
             mcpBusy = false;
         }
     }
+    async function loadMemoryEntries() {
+        const store = deps.memory;
+        if (store === undefined) {
+            memoryEntries = null;
+            memoryError = "long-term memory is unavailable in this build";
+            return;
+        }
+        memoryBusy = true;
+        memoryError = null;
+        try {
+            const loaded = await store.load();
+            if (loaded.ok) {
+                memoryEntries = purgeExpiredMemory(loaded.entries, new Date().toISOString());
+            }
+            else {
+                memoryEntries = null;
+                memoryError = loaded.code;
+            }
+        }
+        catch {
+            memoryEntries = null;
+            memoryError = "memory could not be read";
+        }
+        finally {
+            memoryBusy = false;
+        }
+    }
+    async function rememberMemory(intent) {
+        const store = deps.memory;
+        if (store === undefined) {
+            commandNotice = "Long-term memory is unavailable in this build.";
+            return;
+        }
+        memoryBusy = true;
+        commandNotice = null;
+        try {
+            const result = intent.replaceId === undefined
+                ? await store.add({
+                    type: intent.type,
+                    scope: intent.type === "user" ? "global" : "project",
+                    projectRoot: intent.type === "user" ? null : (deps.workspaceRoot ?? null),
+                    content: intent.text,
+                })
+                : await store.replace(intent.replaceId, { content: intent.text });
+            if (result.ok) {
+                commandNotice =
+                    intent.replaceId === undefined
+                        ? `remembered ${result.entry.id.slice(0, 8)}`
+                        : `updated ${result.entry.id.slice(0, 8)}`;
+                await loadMemoryEntries();
+            }
+            else {
+                commandNotice = `memory not saved: ${result.code}`;
+            }
+        }
+        catch {
+            commandNotice = "memory could not be saved";
+        }
+        finally {
+            memoryBusy = false;
+        }
+    }
+    async function forgetMemory(id) {
+        const store = deps.memory;
+        if (store === undefined) {
+            commandNotice = "Long-term memory is unavailable in this build.";
+            return;
+        }
+        memoryBusy = true;
+        commandNotice = null;
+        try {
+            const result = await store.remove(id);
+            if (result.ok) {
+                commandNotice = `forgot ${result.entry.id.slice(0, 8)}`;
+                await loadMemoryEntries();
+            }
+            else {
+                commandNotice = `memory not removed: ${result.code}`;
+            }
+        }
+        catch {
+            commandNotice = "memory could not be removed";
+        }
+        finally {
+            memoryBusy = false;
+        }
+    }
     function view() {
         const live = deps.coordinator.currentRunProjection();
         const derived = deriveView({
@@ -247,6 +338,9 @@ export function createTuiController(deps) {
             mcpServers,
             mcpError,
             mcpBusy,
+            memoryEntries,
+            memoryError,
+            memoryBusy,
             sessionList,
             sessionListError,
             sessionListBusy,
@@ -354,6 +448,16 @@ export function createTuiController(deps) {
                 await loadMcpServers();
             if (intent.panel === "sessions")
                 await loadSessionList();
+            if (intent.panel === "memory")
+                await loadMemoryEntries();
+            return;
+        }
+        if (intent.kind === "remember_memory") {
+            await rememberMemory(intent);
+            return;
+        }
+        if (intent.kind === "forget_memory") {
+            await forgetMemory(intent.id);
             return;
         }
         if (intent.kind === "switch_session") {
@@ -619,6 +723,9 @@ export function createTuiController(deps) {
             ok: false,
             code: "unavailable",
         }, "session deleted"),
+        deleteMemory: async (id) => {
+            await forgetMemory(id);
+        },
         takeNavigationRequest: () => {
             const requested = navigation;
             navigation = null;

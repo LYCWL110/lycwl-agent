@@ -7,6 +7,7 @@ import { CredentialScreen } from "./credential-screen.js";
 import { InitPanel } from "./init-panel.js";
 import { LocalPanel } from "./local-panel.js";
 import { McpPanel } from "./mcp-panel.js";
+import { MemoryPanel } from "./memory-panel.js";
 import { colorFor, detectCapabilities } from "./palette.js";
 import { SessionList } from "./session-list.js";
 import { useTerminalWheel } from "./terminal-wheel.js";
@@ -319,6 +320,16 @@ export function App(props) {
             onResume: (sessionId) => props.onSessionResume?.(sessionId),
             onRename: (sessionId, title) => props.onSessionRename?.(sessionId, title),
             onDelete: (sessionId) => props.onSessionDelete?.(sessionId),
+            onClose: () => props.onClosePanel?.(),
+        });
+    if (view.localPanel === "memory")
+        return h(MemoryPanel, {
+            viewport,
+            capabilities,
+            entries: view.memoryEntries ?? null,
+            error: view.memoryError ?? null,
+            busy: view.memoryBusy === true,
+            onDelete: (id) => props.onDeleteMemory?.(id),
             onClose: () => props.onClosePanel?.(),
         });
     if (view.localPanel === "mcp")

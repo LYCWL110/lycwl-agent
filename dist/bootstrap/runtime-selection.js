@@ -1,5 +1,6 @@
 import path from "node:path";
 import { createFileEvidenceStore } from "../adapters/persistence/file-evidence-store.js";
+import { createMemoryStore } from "../adapters/persistence/memory-store.js";
 import { createSnapshotStore } from "../adapters/persistence/snapshot-store.js";
 import { createSpillStore } from "../adapters/persistence/spill-store.js";
 import { createDiscoverToolsTool, DISCOVER_TOOLS_NAME, DISCOVERY_TOOL_DESCRIPTION, DISCOVERY_TOOL_SCHEMA, } from "../adapters/tools/discover-tools.js";
@@ -36,6 +37,9 @@ export async function selectRuntime(options) {
     const enableWrites = options.enableWrites === true;
     const enableProcesses = options.enableProcesses === true;
     const enableWeb = options.enableWeb !== false;
+    const memory = createMemoryStore({
+        directory: path.join(options.stateDirectory ?? options.dataDirectory, "memory"),
+    });
     // The protocol is readable before assembly; the tool catalog needs the same
     // native/harness decision that the Provider will use.
     const configured = readProviderConfig(options.settings);
@@ -345,6 +349,7 @@ export async function selectRuntime(options) {
             enableWrites,
             enableProcesses,
             webSearch: !enableWeb ? "disabled" : assembly.nativeWebSearch ? "native" : "harness",
+            memory,
             warnings: [
                 ...assembly.warnings,
                 ...mcpWarnings,
@@ -376,6 +381,8 @@ export async function selectRuntime(options) {
                     }
                     : {}),
                 refreshOwnedKeys: assembly.refreshOwnedKeys,
+                memory,
+                memoryProjectRoot: options.workspaceRoot,
                 tools: createWorkspaceTools({
                     workspaceRoot: options.workspaceRoot,
                     // No interactive channel is attached to this gate, so it denies. Tools

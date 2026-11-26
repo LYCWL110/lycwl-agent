@@ -1,5 +1,6 @@
 import path from "node:path";
 import { createFileEvidenceStore } from "../adapters/persistence/file-evidence-store.ts";
+import { createMemoryStore } from "../adapters/persistence/memory-store.ts";
 import { createSnapshotStore } from "../adapters/persistence/snapshot-store.ts";
 import { createSpillStore } from "../adapters/persistence/spill-store.ts";
 import {
@@ -39,6 +40,7 @@ import { availableTools, COORDINATOR_TOOL_NAMES } from "../domain/tool-catalog/t
 import { checkSchemaSupport } from "../domain/tool-invocation/argument-validation.ts";
 import type { ApprovalGate } from "../ports/approval-gate.ts";
 import type { InternalEvent } from "../ports/event-log.ts";
+import type { MemoryStore } from "../ports/memory-store.ts";
 import type { ProviderConversationItem } from "../ports/model-provider.ts";
 import type { SensitiveSource } from "../ports/sensitive-context.ts";
 import { assertProtectedValue } from "../services/security/guarded-delivery.ts";
@@ -75,6 +77,8 @@ export type RuntimeSelection =
        * means the Tavily tool is exposed; `disabled` means no web access.
        */
       webSearch: "native" | "harness" | "disabled";
+      /** User-authored memory store, shared with the TUI memory commands. */
+      memory: MemoryStore;
       /** Skill catalog state, for the launch summary. */
       skills: SkillsSummary;
       /** Rebuilt history, for the launch summary. */
@@ -157,6 +161,9 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   const enableWrites = options.enableWrites === true;
   const enableProcesses = options.enableProcesses === true;
   const enableWeb = options.enableWeb !== false;
+  const memory = createMemoryStore({
+    directory: path.join(options.stateDirectory ?? options.dataDirectory, "memory"),
+  });
   // The protocol is readable before assembly; the tool catalog needs the same
   // native/harness decision that the Provider will use.
   const configured = readProviderConfig(options.settings);
@@ -502,6 +509,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
       enableWrites,
       enableProcesses,
       webSearch: !enableWeb ? "disabled" : assembly.nativeWebSearch ? "native" : "harness",
+      memory,
       warnings: [
         ...assembly.warnings,
         ...mcpWarnings,
@@ -533,6 +541,8 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
             }
           : {}),
         refreshOwnedKeys: assembly.refreshOwnedKeys,
+        memory,
+        memoryProjectRoot: options.workspaceRoot,
         tools: createWorkspaceTools({
           workspaceRoot: options.workspaceRoot,
           // No interactive channel is attached to this gate, so it denies. Tools

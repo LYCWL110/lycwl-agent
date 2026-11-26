@@ -4,9 +4,11 @@ import type {
   RuntimeCoordinator,
 } from "../application/coordinator/runtime-coordinator.ts";
 import { readContextMeter } from "../domain/context/context-meter.ts";
+import { type MemoryEntry, purgeExpiredMemory } from "../domain/memory/memory.ts";
 import type { TodoList } from "../domain/planning/todo.ts";
 import { emptyTodoList, replaceTodoList } from "../domain/planning/todo.ts";
 import type { InternalEvent } from "../ports/event-log.ts";
+import type { MemoryStore } from "../ports/memory-store.ts";
 import type { ProviderImage } from "../ports/model-provider.ts";
 import { resolveAnswer } from "./answer-input.ts";
 import type { McpPanelEntry } from "./mcp-panel.ts";
@@ -33,6 +35,10 @@ export type TuiSessionDeps = Readonly<{
   canResumeSession?: (sessionId: string) => Promise<boolean>;
   /** Trusted composition corrects only the current fixed-route key reference. */
   correctCredential?: (secret: string) => Promise<boolean>;
+  /** User-authored long-term memory. Absent disables the memory commands. */
+  memory?: MemoryStore;
+  /** Absolute workspace root used to scope project memory entries. */
+  workspaceRoot?: string;
   /**
    * Workspace Skill catalog for the `/skills` panel. Absent means skills are
    * disabled; a failure is reported rather than shown as an empty catalog.
@@ -123,6 +129,7 @@ export type TuiController = Readonly<{
   removeMcpServer: (serverId: string) => Promise<void>;
   renameSession: (sessionId: string, title: string | null) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
+  deleteMemory: (id: string) => Promise<void>;
   correctCredential?: (secret: string) => Promise<boolean>;
 }>;
 
@@ -166,6 +173,7 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     | "mcp"
     | "sessions"
     | "init"
+    | "memory"
     | null = null;
   /** Loaded once per panel open, so the view never performs I/O. */
   let skillCatalog: readonly SkillCatalogEntry[] | null = null;
@@ -173,6 +181,9 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
   let mcpServers: readonly McpPanelEntry[] | null = null;
   let mcpError: string | null = null;
   let mcpBusy = false;
+  let memoryEntries: readonly MemoryEntry[] | null = null;
+  let memoryError: string | null = null;
+  let memoryBusy = false;
   let sessionList: readonly SessionListEntry[] | null = null;
   let sessionListError: string | null = null;
   let sessionListBusy = false;
@@ -353,6 +364,92 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
     }
   }
 
+  async function loadMemoryEntries(): Promise<void> {
+    const store = deps.memory;
+    if (store === undefined) {
+      memoryEntries = null;
+      memoryError = "long-term memory is unavailable in this build";
+      return;
+    }
+    memoryBusy = true;
+    memoryError = null;
+    try {
+      const loaded = await store.load();
+      if (loaded.ok) {
+        memoryEntries = purgeExpiredMemory(loaded.entries, new Date().toISOString());
+      } else {
+        memoryEntries = null;
+        memoryError = loaded.code;
+      }
+    } catch {
+      memoryEntries = null;
+      memoryError = "memory could not be read";
+    } finally {
+      memoryBusy = false;
+    }
+  }
+
+  async function rememberMemory(intent: {
+    type: MemoryEntry["type"];
+    text: string;
+    replaceId?: string;
+  }): Promise<void> {
+    const store = deps.memory;
+    if (store === undefined) {
+      commandNotice = "Long-term memory is unavailable in this build.";
+      return;
+    }
+    memoryBusy = true;
+    commandNotice = null;
+    try {
+      const result =
+        intent.replaceId === undefined
+          ? await store.add({
+              type: intent.type,
+              scope: intent.type === "user" ? "global" : "project",
+              projectRoot: intent.type === "user" ? null : (deps.workspaceRoot ?? null),
+              content: intent.text,
+            })
+          : await store.replace(intent.replaceId, { content: intent.text });
+      if (result.ok) {
+        commandNotice =
+          intent.replaceId === undefined
+            ? `remembered ${result.entry.id.slice(0, 8)}`
+            : `updated ${result.entry.id.slice(0, 8)}`;
+        await loadMemoryEntries();
+      } else {
+        commandNotice = `memory not saved: ${result.code}`;
+      }
+    } catch {
+      commandNotice = "memory could not be saved";
+    } finally {
+      memoryBusy = false;
+    }
+  }
+
+  async function forgetMemory(id: string): Promise<void> {
+    const store = deps.memory;
+    if (store === undefined) {
+      commandNotice = "Long-term memory is unavailable in this build.";
+      return;
+    }
+    memoryBusy = true;
+    commandNotice = null;
+    try {
+      const result = await store.remove(id);
+      if (result.ok) {
+        commandNotice = `forgot ${result.entry.id.slice(0, 8)}`;
+        await loadMemoryEntries();
+      } else {
+        commandNotice = `memory not removed: ${result.code}`;
+      }
+    } catch {
+      commandNotice = "memory could not be removed";
+    } finally {
+      memoryBusy = false;
+    }
+  }
+
   function view(): TuiViewState {
     const live = deps.coordinator.currentRunProjection();
     const derived = deriveView({
@@ -378,6 +475,9 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       mcpServers,
       mcpError,
       mcpBusy,
+      memoryEntries,
+      memoryError,
+      memoryBusy,
       sessionList,
       sessionListError,
       sessionListBusy,
@@ -487,6 +587,15 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
       if (intent.panel === "skills") await loadSkillCatalog();
       if (intent.panel === "mcp") await loadMcpServers();
       if (intent.panel === "sessions") await loadSessionList();
+      if (intent.panel === "memory") await loadMemoryEntries();
+      return;
+    }
+    if (intent.kind === "remember_memory") {
+      await rememberMemory(intent);
+      return;
+    }
+    if (intent.kind === "forget_memory") {
+      await forgetMemory(intent.id);
       return;
     }
     if (intent.kind === "switch_session") {
@@ -763,6 +872,9 @@ export function createTuiController(deps: TuiSessionDeps): TuiController {
           },
         "session deleted",
       ),
+    deleteMemory: async (id) => {
+      await forgetMemory(id);
+    },
     takeNavigationRequest: () => {
       const requested = navigation;
       navigation = null;

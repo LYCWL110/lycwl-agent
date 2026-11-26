@@ -57,6 +57,22 @@ describe("local composer commands", () => {
     ["/session new", { kind: "switch_session", sessionId: null }],
     ["/session saved-1", { kind: "switch_session", sessionId: "saved-1" }],
     ["/session resume new", { kind: "switch_session", sessionId: "new" }],
+    ["/memory", { kind: "open_panel", panel: "memory" }],
+    [
+      "/remember Show the failing evidence first",
+      { kind: "remember_memory", type: "feedback", text: "Show the failing evidence first" },
+    ],
+    ["/remember user Use Chinese", { kind: "remember_memory", type: "user", text: "Use Chinese" }],
+    [
+      "/remember --replace abc123 Use the shorter answer",
+      {
+        kind: "remember_memory",
+        type: "feedback",
+        text: "Use the shorter answer",
+        replaceId: "abc123",
+      },
+    ],
+    ["/forget abc123", { kind: "forget_memory", id: "abc123" }],
     ["/cancel", { kind: "cancel_run" }],
     ["/quit", { kind: "quit" }],
   ] as const;
@@ -81,6 +97,10 @@ describe("local composer commands", () => {
     "/session resume NUL",
     "/model changed",
     "/quit extra",
+    "/remember",
+    "/remember --replace abc",
+    "/forget",
+    "/forget a b",
   ]) {
     it(`rejects invalid arguments ${text}`, () => {
       assert.deepEqual(interpretComposer(EMPTY_VIEW, text), {

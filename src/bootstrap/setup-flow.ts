@@ -103,7 +103,13 @@ export function startSetupFlow(options: SetupFlowOptions): SetupFlow {
       hasSettings: loaded.ok,
     });
     options.onReady(describeSelection(selection));
-    startTui(createTuiController({ coordinator: selection.coordinator }));
+    startTui(
+      createTuiController({
+        coordinator: selection.coordinator,
+        ...(selection.kind === "real" ? { memory: selection.memory } : {}),
+        workspaceRoot: options.workspaceRoot,
+      }),
+    );
     settle("saved");
   }
 

@@ -93,6 +93,9 @@ export function startTui(
       onMcpRemove: (serverId) => {
         void controller.removeMcpServer(serverId).then(refresh);
       },
+      onDeleteMemory: (id) => {
+        void controller.deleteMemory(id).then(refresh);
+      },
       onInitConfirm: () => {
         void controller.confirmInit().then(refresh);
       },

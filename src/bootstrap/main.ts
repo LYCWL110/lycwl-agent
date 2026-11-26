@@ -240,6 +240,8 @@ async function startSession(): Promise<void> {
   process.stderr.write(`${describeSelection(chosen).join("\n")}\n\n`);
   startTui(
     createTuiController({
+      ...(chosen.kind === "real" ? { memory: chosen.memory } : {}),
+      workspaceRoot: process.cwd(),
       ...(args.includes("--skills")
         ? {
             skillCatalog: async () => {

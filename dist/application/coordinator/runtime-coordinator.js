@@ -1,6 +1,7 @@
 import { computeContextBudget, conservativeEstimate, decideRequestFit, } from "../../domain/context/context-budget.js";
 import { mergeTouchedPaths, touchedPaths, } from "../../domain/context/touched-paths.js";
 import { exceedsSpillThreshold, spillToolOutput } from "../../domain/evidence/tool-spill.js";
+import { renderMemoryBlock, selectMemoryForTask } from "../../domain/memory/memory.js";
 import { bindAttempt } from "../../domain/model-request/run-binding.js";
 import { addUsage } from "../../domain/model-request/token-usage.js";
 import { describeSyntaxFailure } from "../../domain/mutation/syntax-check.js";
@@ -404,6 +405,20 @@ export class RuntimeCoordinator {
     }
     async #startRun(input, options) {
         const projectContext = this.#deps.projectContext;
+        // Memory is read at Run start, not at process start, so a `/remember` issued
+        // before the next task is visible without restarting the Session.
+        let memoryBlock = null;
+        if (this.#deps.memory !== undefined && this.#deps.memoryProjectRoot !== undefined) {
+            const loaded = await this.#deps.memory.load();
+            if (loaded.ok) {
+                memoryBlock = renderMemoryBlock(selectMemoryForTask(loaded.entries, {
+                    projectRoot: this.#deps.memoryProjectRoot,
+                    task: input,
+                    nowUtc: this.#deps.nowUtc(),
+                }));
+            }
+            // A store failure omits memory rather than substituting a guessed entry.
+        }
         // A requested skill is loaded before the Run starts, so a failure is a clean
         // refusal rather than a Run that fails partway. The body becomes a user
         // message with a provenance header; it grants nothing.
@@ -440,6 +455,7 @@ export class RuntimeCoordinator {
                 ...(projectContext === undefined ? [] : [{ kind: "user", text: projectContext }]),
                 ...this.#conversation,
                 ...(skillBlock === null ? [] : [{ kind: "user", text: skillBlock }]),
+                ...(memoryBlock === null ? [] : [{ kind: "user", text: memoryBlock }]),
                 // Images ride on the task turn, not on a separate one: the model must read
                 // them as part of the request, and a separate turn would be a second task.
                 options.images === undefined || options.images.length === 0

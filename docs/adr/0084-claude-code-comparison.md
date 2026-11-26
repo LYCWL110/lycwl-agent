@@ -1,7 +1,7 @@
 # ADR-0084: Comparison against the Claude Code snapshot, and what was acted on
 
-- Status: Accepted (2026-11-08)
-- Related: ADR-0013 (prompt provenance), ADR-0044 (AGENTS.md as untrusted), ADR-0083 (Harness rules)
+- Status: Accepted (2026-11-08); the memory exclusion is superseded by ADR-0104.
+- Related: ADR-0013 (prompt provenance), ADR-0044 (AGENTS.md as untrusted), ADR-0083 (Harness rules), ADR-0104 (explicit memory)
 
 ## Context
 

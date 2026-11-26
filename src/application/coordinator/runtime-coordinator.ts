@@ -12,6 +12,7 @@ import {
   touchedPaths,
 } from "../../domain/context/touched-paths.ts";
 import { exceedsSpillThreshold, spillToolOutput } from "../../domain/evidence/tool-spill.ts";
+import { renderMemoryBlock, selectMemoryForTask } from "../../domain/memory/memory.ts";
 import type { RunModelBinding } from "../../domain/model-request/run-binding.ts";
 import { bindAttempt } from "../../domain/model-request/run-binding.ts";
 import { addUsage } from "../../domain/model-request/token-usage.ts";
@@ -55,6 +56,7 @@ import {
 import type { ApprovalGate } from "../../ports/approval-gate.ts";
 import type { FormatterRunner } from "../../ports/formatter.ts";
 import type { IdentifierFactory } from "../../ports/identity.ts";
+import type { MemoryStore } from "../../ports/memory-store.ts";
 import type {
   ModelProvider,
   ProviderConversationItem,
@@ -161,6 +163,10 @@ export type CoordinatorDependencies = Readonly<{
    * Pre-change file snapshots, so a Run can be reverted. Absent disables undo.
    */
   snapshotStore?: SnapshotStore;
+  /** User-authored long-term memory. Absent disables injection. */
+  memory?: MemoryStore;
+  /** Absolute workspace root used to scope project memory. */
+  memoryProjectRoot?: string;
   /**
    * The project's formatter, run after a successful file mutation. Absent leaves
    * written files exactly as the tool produced them.
@@ -896,6 +902,23 @@ export class RuntimeCoordinator {
   ): Promise<CoordinatorResult> {
     const projectContext = this.#deps.projectContext;
 
+    // Memory is read at Run start, not at process start, so a `/remember` issued
+    // before the next task is visible without restarting the Session.
+    let memoryBlock: string | null = null;
+    if (this.#deps.memory !== undefined && this.#deps.memoryProjectRoot !== undefined) {
+      const loaded = await this.#deps.memory.load();
+      if (loaded.ok) {
+        memoryBlock = renderMemoryBlock(
+          selectMemoryForTask(loaded.entries, {
+            projectRoot: this.#deps.memoryProjectRoot,
+            task: input,
+            nowUtc: this.#deps.nowUtc(),
+          }),
+        );
+      }
+      // A store failure omits memory rather than substituting a guessed entry.
+    }
+
     // A requested skill is loaded before the Run starts, so a failure is a clean
     // refusal rather than a Run that fails partway. The body becomes a user
     // message with a provenance header; it grants nothing.
@@ -933,6 +956,7 @@ export class RuntimeCoordinator {
         ...(projectContext === undefined ? [] : [{ kind: "user" as const, text: projectContext }]),
         ...this.#conversation,
         ...(skillBlock === null ? [] : [{ kind: "user" as const, text: skillBlock }]),
+        ...(memoryBlock === null ? [] : [{ kind: "user" as const, text: memoryBlock }]),
         // Images ride on the task turn, not on a separate one: the model must read
         // them as part of the request, and a separate turn would be a second task.
         options.images === undefined || options.images.length === 0

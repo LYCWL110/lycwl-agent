@@ -61,7 +61,11 @@ export function startSetupFlow(options) {
             hasSettings: loaded.ok,
         });
         options.onReady(describeSelection(selection));
-        startTui(createTuiController({ coordinator: selection.coordinator }));
+        startTui(createTuiController({
+            coordinator: selection.coordinator,
+            ...(selection.kind === "real" ? { memory: selection.memory } : {}),
+            workspaceRoot: options.workspaceRoot,
+        }));
         settle("saved");
     }
     instance = render(element());

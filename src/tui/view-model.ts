@@ -4,6 +4,7 @@ import type {
   PendingQuestionView,
 } from "../application/coordinator/runtime-coordinator.ts";
 import { isSessionId } from "../domain/identity/session-id.ts";
+import type { MemoryEntry, MemoryType } from "../domain/memory/memory.ts";
 import type { TodoList } from "../domain/planning/todo.ts";
 import type { InternalEvent } from "../ports/event-log.ts";
 import type { ProviderImage } from "../ports/model-provider.ts";
@@ -28,7 +29,16 @@ export type WaitingKind = "approval" | "question" | "configuration" | "other";
 export type RunActivity = "thinking" | "working";
 
 export type TuiViewState = Readonly<{
-  localPanel?: "help" | "session" | "credential" | "skills" | "mcp" | "sessions" | "init" | null;
+  localPanel?:
+    | "help"
+    | "session"
+    | "credential"
+    | "skills"
+    | "mcp"
+    | "sessions"
+    | "init"
+    | "memory"
+    | null;
   /** Workspace Skill catalog, when discovery ran and succeeded. */
   skillCatalog?:
     | readonly Readonly<{
@@ -39,6 +49,10 @@ export type TuiViewState = Readonly<{
     | null;
   /** Why the catalog is unavailable, when it is. */
   skillCatalogError?: string | null;
+  /** Active user-authored memory entries, loaded when the panel opens. */
+  memoryEntries?: readonly MemoryEntry[] | null;
+  memoryError?: string | null;
+  memoryBusy?: boolean;
   /** Declared MCP servers, loaded when the panel opens. */
   mcpServers?:
     | readonly Readonly<{
@@ -513,7 +527,17 @@ export type ComposerIntent =
   /** Generate an AGENTS.md draft for the workspace. */
   | Readonly<{ kind: "project_init" }>
   | Readonly<{ kind: "open_model" }>
-  | Readonly<{ kind: "open_panel"; panel: "help" | "session" | "skills" | "mcp" | "sessions" }>
+  | Readonly<{
+      kind: "open_panel";
+      panel: "help" | "session" | "skills" | "mcp" | "sessions" | "memory";
+    }>
+  | Readonly<{
+      kind: "remember_memory";
+      type: MemoryType;
+      text: string;
+      replaceId?: string;
+    }>
+  | Readonly<{ kind: "forget_memory"; id: string }>
   | Readonly<{ kind: "undo_changes" }>
   | Readonly<{ kind: "rename_session"; sessionId: string; title: string | null }>
   | Readonly<{ kind: "delete_session"; sessionId: string }>
@@ -536,6 +560,9 @@ export const COMPOSER_COMMANDS = [
   { name: "/init", description: "Draft an AGENTS.md for this project", idleOnly: true },
   { name: "/skill", description: "Run with a workspace skill loaded", idleOnly: true },
   { name: "/skills", description: "List the workspace skill catalog", idleOnly: false },
+  { name: "/memory", description: "List, correct or forget saved memory", idleOnly: false },
+  { name: "/remember", description: "Save an explicit memory entry", idleOnly: false },
+  { name: "/forget", description: "Forget a memory entry by id", idleOnly: false },
   { name: "/mcp", description: "Declare MCP servers", idleOnly: true },
   { name: "/undo", description: "Revert the files this session changed", idleOnly: true },
   { name: "/help", description: "Show commands", idleOnly: false },
@@ -578,7 +605,13 @@ export function interpretComposer(
     if (!commandEnabled(view, command)) {
       return { kind: "reject", reason: "run_active" };
     }
-    if (args.length > 0 && name !== "/session" && name !== "/skill")
+    if (
+      args.length > 0 &&
+      name !== "/session" &&
+      name !== "/skill" &&
+      name !== "/remember" &&
+      name !== "/forget"
+    )
       return { kind: "reject", reason: "invalid_command" };
     switch (name) {
       case "/config":
@@ -602,6 +635,36 @@ export function interpretComposer(
         return { kind: "project_init" };
       case "/skills":
         return { kind: "open_panel", panel: "skills" };
+      case "/memory":
+        return { kind: "open_panel", panel: "memory" };
+      case "/remember": {
+        let rest = trimmed.slice("/remember".length).trim();
+        if (rest.length === 0) return { kind: "reject", reason: "invalid_command" };
+        let replaceId: string | undefined;
+        if (rest.startsWith("--replace ")) {
+          const match = /^--replace\s+(\S+)\s+([\s\S]+)$/u.exec(rest);
+          if (match === null) return { kind: "reject", reason: "invalid_command" };
+          replaceId = match[1];
+          rest = match[2] ?? "";
+        }
+        const typeMatch = /^(user|feedback|project|reference)\s+([\s\S]+)$/u.exec(rest);
+        const type = (typeMatch?.[1] ?? "feedback") as MemoryType;
+        const text = typeMatch?.[2]?.trim() ?? rest;
+        if (text.length === 0) return { kind: "reject", reason: "invalid_command" };
+        return {
+          kind: "remember_memory",
+          type,
+          text,
+          ...(replaceId === undefined ? {} : { replaceId }),
+        };
+      }
+      case "/forget": {
+        const id = args[0] ?? "";
+        if (args.length !== 1 || id.length === 0) {
+          return { kind: "reject", reason: "invalid_command" };
+        }
+        return { kind: "forget_memory", id };
+      }
       case "/mcp":
         return { kind: "open_panel", panel: "mcp" };
       case "/undo":

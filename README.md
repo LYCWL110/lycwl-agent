@@ -68,6 +68,12 @@ works. Type `/` for commands (`/config`, `/model`, `/session`, `/new`, `/cancel`
 `/quit`). Each launch starts a new conversation; older ones stay on disk until
 you resume them by ID.
 
+Long-term memory is explicit only. `/remember <text>` saves feedback for the
+current project; `/remember user <text>` saves a global preference;
+`/remember --replace <id> <text>` corrects an entry; `/memory` lists saved
+entries; `/forget <id>` removes one. Memory is never extracted from a
+conversation automatically.
+
 ## Configuration
 
 Set the Provider connection, key and model in `/config`. The model browser reads

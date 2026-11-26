@@ -454,6 +454,45 @@ describe("TUI rendering", () => {
     }
   });
 
+  it("lists saved memory and forgets the selected entry", async () => {
+    let forgotten = "";
+    const instance = render(
+      createElement(App, {
+        ...actions,
+        view: {
+          ...EMPTY_VIEW,
+          localPanel: "memory",
+          memoryEntries: [
+            {
+              id: "abcdef12-0000",
+              type: "feedback",
+              scope: "project",
+              projectRoot: "/workspace/project",
+              content: "Show evidence before editing.",
+              source: "user_explicit",
+              createdAtUtc: "2026-11-26T00:00:00.000Z",
+              updatedAtUtc: "2026-11-26T00:00:00.000Z",
+              expiresAtUtc: null,
+            },
+          ],
+          memoryError: null,
+          memoryBusy: false,
+        },
+        capabilities: MONO,
+        onDeleteMemory: (id) => {
+          forgotten = id;
+        },
+      }),
+    );
+    try {
+      expect(instance.lastFrame()).toMatch(/Show evidence before editing/);
+      await press(instance.stdin, "d");
+      expect(forgotten).toBe("abcdef12-0000");
+    } finally {
+      instance.unmount();
+    }
+  });
+
   it("renders the question panel with its options", () => {
     const instance = renderApp({
       ...EMPTY_VIEW,
