@@ -18,8 +18,10 @@ Run has facts to show:
   command, the report includes `project-tests: not_run` rather than implying a
   pass;
 - `shell` accepts an explicit `verification: true` argument. Such a command is
-  recorded in `tests` with its command, approval fact, execution id and
-  passed/failed/not_run outcome. The name of the command is never used to guess;
+  recorded in `tests` with `basis: caller_declared`, its command, approval fact,
+  execution id and passed/failed/not_run outcome. The name of the command is never
+  used to guess, and the basis makes clear this is a caller declaration rather than
+  a verified project acceptance command;
 - the required goal remains `unknown` unless independent goal evidence exists.
 
 Syntax passing is not goal verification. The report keeps those dimensions

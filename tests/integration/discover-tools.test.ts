@@ -60,6 +60,7 @@ describe("discover_tools execution", () => {
     // The schema is the point of discovery: without it the call is a guess.
     assert.match(text, /schema:/);
     assert.match(text, /"path"/);
+    assert.deepEqual(result.discoveredTools, ["mcp__github__list_contributors"]);
   });
 
   it("explains why each tool matched", async () => {

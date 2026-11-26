@@ -123,6 +123,7 @@ export function deriveTaskReport(
           if (isDeclaredVerification(call)) {
             tests.push({
               command: shellCommandOf(call),
+              basis: "caller_declared",
               approved: approved.has(fact.toolCallId),
               executionId: fact.toolCallId,
               outcome:
@@ -143,6 +144,7 @@ export function deriveTaskReport(
         if (call !== undefined && isDeclaredVerification(call)) {
           tests.push({
             command: shellCommandOf(call),
+            basis: "caller_declared",
             approved: false,
             executionId: fact.toolCallId,
             outcome: "not_run",

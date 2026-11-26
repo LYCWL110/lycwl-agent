@@ -4,6 +4,7 @@ import { createBackgroundRegistry } from "../adapters/platform-background.ts";
 import { createProcessSupervisor } from "../adapters/platform-process.ts";
 import { createBackgroundTools } from "../adapters/tools/background-tools.ts";
 import { createLspTools } from "../adapters/tools/lsp-tools.ts";
+import { createMemorySearchTool } from "../adapters/tools/memory-tool.ts";
 import { createMutationTools } from "../adapters/tools/mutation-tools.ts";
 import { createApplyPatchTool } from "../adapters/tools/patch-tool.ts";
 import { createReadFileTool } from "../adapters/tools/read-file-tool.ts";
@@ -26,6 +27,7 @@ import type { ApprovalGate } from "../ports/approval-gate.ts";
 import type { BackgroundObserver } from "../ports/background-task.ts";
 import type { EvidenceStore } from "../ports/evidence-store.ts";
 import type { IdentifierFactory } from "../ports/identity.ts";
+import type { MemoryStore } from "../ports/memory-store.ts";
 import type {
   ToolDefinition,
   ToolExecutionRequest,
@@ -98,6 +100,11 @@ export type WorkspaceToolsOptions = Readonly<{
    * secrets live in Credential Manager behind a purpose-bound reference.
    */
   resolveSearchApiKey?: () => Promise<string | null>;
+  /** User-authored memory; when present, the explicit `memory_search` tool is available. */
+  memory?: MemoryStore;
+  memoryProjectRoot?: string;
+  /** Injected clock for memory expiry checks. */
+  nowUtc?: () => string;
   ownedKeys?: OwnedKeyRegistry;
   refreshOwnedKeys?: () => Promise<void>;
   evidenceStore?: EvidenceStore;
@@ -451,6 +458,16 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolExecut
             rawBytes: fetched.wireBytes,
           };
         },
+      }),
+    );
+  }
+
+  if (options.memory !== undefined && options.memoryProjectRoot !== undefined) {
+    delegates.push(
+      createMemorySearchTool({
+        store: options.memory,
+        projectRoot: options.memoryProjectRoot,
+        nowUtc: options.nowUtc ?? (() => new Date().toISOString()),
       }),
     );
   }

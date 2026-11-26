@@ -8,6 +8,7 @@ import { createConfigStore } from "../../src/adapters/windows/config-store.ts";
 import { createFileVault } from "../../src/adapters/windows/file-credential-vault.ts";
 import { saveSetup } from "../../src/bootstrap/setup-save.ts";
 import { availableTools, TOOL_CATALOG } from "../../src/domain/tool-catalog/tool-catalog.ts";
+import { validateValue } from "../../src/domain/tool-invocation/argument-validation.ts";
 import { closeRuntimeSelections, selectRuntime } from "../fakes/owned-runtime.ts";
 
 let server: Server | null = null;
@@ -88,6 +89,7 @@ describe("tool catalog", () => {
       "lsp_definition",
       "lsp_diagnostics",
       "lsp_references",
+      "memory_search",
       "read_file",
       "rename_path",
       "shell",
@@ -148,6 +150,30 @@ describe("tool catalog", () => {
     }
   });
 
+  it("matches read_file and edit_file limits to the executor", () => {
+    const read = TOOL_CATALOG.find((entry) => entry.name === "read_file");
+    assert.ok(read);
+    const readProperties = read.inputSchema.properties as Record<string, Record<string, unknown>>;
+    assert.equal(readProperties["lineCount"]?.["maximum"], 2_000);
+    assert.match(read.description, /200 lines/);
+    assert.match(read.description, /2,000/);
+
+    const edit = TOOL_CATALOG.find((entry) => entry.name === "edit_file");
+    assert.ok(edit);
+    const editProperties = edit.inputSchema.properties as Record<string, Record<string, unknown>>;
+    assert.deepEqual(editProperties["insertedLineEnding"]?.["enum"], ["lf", "crlf"]);
+    assert.equal(
+      validateValue(edit.inputSchema, {
+        path: "a.ts",
+        oldText: "old",
+        newText: "new\nline",
+        insertedLineEnding: "crlf",
+      }).ok,
+      true,
+    );
+    assert.equal(validateValue(read.inputSchema, { path: "a.ts", lineCount: 2_001 }).ok, false);
+  });
+
   it("does not advertise a tool that is unavailable", () => {
     const filtered = availableTools((name) => name !== "read_file");
     assert.equal(
@@ -182,6 +208,7 @@ describe("tool catalog", () => {
         "background_output",
         "background_stop",
         "skill",
+        "memory_search",
       ],
     );
   });
@@ -223,6 +250,7 @@ describe("tool schemas reach the wire", () => {
         dataDirectory: directory,
         settings,
         hasSettings: true,
+        enableLsp: true,
         // Trust the local self-signed fixture certificate.
         trustedCaPem: certPem,
       });
@@ -255,6 +283,10 @@ describe("tool schemas reach the wire", () => {
         "glob",
         "grep",
         "list_dir",
+        "lsp_definition",
+        "lsp_diagnostics",
+        "lsp_references",
+        "memory_search",
         "read_file",
         "todo",
         "web_fetch",
@@ -333,6 +365,7 @@ describe("tool schemas reach the wire", () => {
         "glob",
         "grep",
         "list_dir",
+        "memory_search",
         "read_file",
         "rename_path",
         "todo",

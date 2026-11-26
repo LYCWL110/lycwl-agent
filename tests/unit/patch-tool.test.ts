@@ -105,6 +105,41 @@ describe("apply_patch execution", () => {
     assert.match(result.text ?? "", /batch: succeeded/);
   });
 
+  it("preserves a UTF-8 BOM when the patch changes another line", async () => {
+    const original = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from("keep\nold\n", "utf8"),
+    ]);
+    const writes: Buffer[] = [];
+    const tool = createApplyPatchTool({
+      inspectTargets: async (): Promise<readonly PatchTargetSnapshot[]> => [
+        {
+          path: "a.ts",
+          exists: true,
+          sha256: sha(original),
+          encoding: "utf-8",
+          lineEnding: "lf",
+          bom: true,
+          bytes: original,
+        },
+      ],
+      writeBytes: async (_path, bytes) => {
+        writes.push(Buffer.from(bytes));
+      },
+    });
+    const result = await tool.execute({
+      toolCallId: "call-bom",
+      toolName: "apply_patch",
+      arguments: { patch: ONE_TARGET_PATCH },
+    });
+
+    assert.equal(result.status, "succeeded");
+    const written = writes[0];
+    assert.ok(written);
+    assert.deepEqual([...written.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+    assert.equal(written.subarray(3).toString("utf8"), "keep\nnew\n");
+  });
+
   it("applies multiple targets serially", async () => {
     const f = fixture({ "a.ts": "a1\n", "b.ts": "b1\n" });
     const result = await f.tool.execute({

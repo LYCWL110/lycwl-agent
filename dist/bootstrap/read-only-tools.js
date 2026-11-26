@@ -4,6 +4,7 @@ import { createBackgroundRegistry } from "../adapters/platform-background.js";
 import { createProcessSupervisor } from "../adapters/platform-process.js";
 import { createBackgroundTools } from "../adapters/tools/background-tools.js";
 import { createLspTools } from "../adapters/tools/lsp-tools.js";
+import { createMemorySearchTool } from "../adapters/tools/memory-tool.js";
 import { createMutationTools } from "../adapters/tools/mutation-tools.js";
 import { createApplyPatchTool } from "../adapters/tools/patch-tool.js";
 import { createReadFileTool } from "../adapters/tools/read-file-tool.js";
@@ -359,6 +360,13 @@ export function createWorkspaceTools(options) {
                     rawBytes: fetched.wireBytes,
                 };
             },
+        }));
+    }
+    if (options.memory !== undefined && options.memoryProjectRoot !== undefined) {
+        delegates.push(createMemorySearchTool({
+            store: options.memory,
+            projectRoot: options.memoryProjectRoot,
+            nowUtc: options.nowUtc ?? (() => new Date().toISOString()),
         }));
     }
     if (options.mcp !== undefined)

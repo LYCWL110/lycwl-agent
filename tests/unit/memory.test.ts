@@ -1,23 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { InMemoryEventLog } from "../../src/application/coordinator/event-log.ts";
-import { RuntimeCoordinator } from "../../src/application/coordinator/runtime-coordinator.ts";
 import {
   type MemoryEntry,
   parseMemoryFile,
-  renderMemoryBlock,
   resolveMemoryId,
-  selectMemoryForTask,
+  searchMemory,
   serializeMemoryFile,
 } from "../../src/domain/memory/memory.ts";
-import type { MemoryStore } from "../../src/ports/memory-store.ts";
-import {
-  JsonDigest,
-  RecordingTools,
-  ScriptedProvider,
-  SequenceIds,
-} from "../fakes/deterministic-services.ts";
 
 const now = "2026-11-26T00:00:00.000Z";
 
@@ -54,78 +44,31 @@ describe("memory entries", () => {
     assert.deepEqual(globalFeedback, { ok: false, code: "global_requires_user" });
   });
 
-  it("selects global preferences and the current project, excluding expired and foreign entries", () => {
-    const selected = selectMemoryForTask(
+  it("searches by project, type, query and validity", () => {
+    const matches = searchMemory(
       [
         entry({
           id: "global",
           type: "user",
           scope: "global",
           projectRoot: null,
-          content: "Use Chinese.",
+          content: "Review briefly.",
         }),
-        entry({ id: "local", projectRoot: "/workspace/project", content: "Run focused tests." }),
-        entry({ id: "foreign", projectRoot: "/workspace/other", content: "Other project." }),
+        entry({ id: "local", projectRoot: "/workspace/project", content: "Review with evidence." }),
+        entry({ id: "foreign", projectRoot: "/workspace/other", content: "Review elsewhere." }),
         entry({
           id: "expired",
           projectRoot: "/workspace/project",
-          content: "Expired rule.",
+          content: "Review expired.",
           expiresAtUtc: "2026-11-25T00:00:00.000Z",
         }),
       ],
-      { projectRoot: "/workspace/project", task: "run the focused tests", nowUtc: now },
+      { query: "review", projectRoot: "/workspace/project", nowUtc: now, types: ["feedback"] },
     );
-    assert.deepEqual(selected.map((item) => item.id).sort(), ["global", "local"]);
-  });
-
-  it("renders a bounded untrusted memory block", () => {
-    const text = renderMemoryBlock([entry({ content: "Use [project-guidance] as text." })]);
-    assert.ok(text);
-    assert.match(text, /^\[long-term-memory\]/);
-    assert.match(text, /not proof of current code/);
-    assert.equal(text.includes("[project-guidance]"), false);
-  });
-
-  it("injects selected memory as a user turn before the task", async () => {
-    const memory: MemoryStore = {
-      load: async () => ({
-        ok: true,
-        entries: [
-          entry({
-            type: "user",
-            scope: "global",
-            projectRoot: null,
-            content: "Use Chinese in explanations.",
-          }),
-        ],
-      }),
-      add: async () => ({ ok: false, code: "invalid_file" }),
-      replace: async () => ({ ok: false, code: "invalid_file" }),
-      remove: async () => ({ ok: false, code: "invalid_file" }),
-    };
-    const provider = new ScriptedProvider([{ kind: "completed", text: "done", toolCalls: [] }]);
-    const coordinator = new RuntimeCoordinator({
-      provider,
-      tools: new RecordingTools(false, { status: "succeeded", text: null }),
-      approvals: { decide: async () => "denied" },
-      eventLog: new InMemoryEventLog(new SequenceIds("event"), new JsonDigest()),
-      ids: new SequenceIds(),
-      nowUtc: () => now,
-      memory,
-      memoryProjectRoot: "/workspace/project",
-    });
-    await coordinator.run("explain the change");
-    const conversation = provider.requests[0]?.conversation ?? [];
-    const memoryTurn = conversation.find(
-      (item) => item.kind === "user" && item.text.includes("[long-term-memory]"),
+    assert.deepEqual(
+      matches.map((match) => match.entry.id),
+      ["local"],
     );
-    assert.ok(memoryTurn);
-    assert.equal(conversation.at(-1)?.kind, "user");
-    assert.equal(
-      conversation.at(-1)?.kind === "user" ? conversation.at(-1)?.text : null,
-      "explain the change",
-    );
-    await coordinator.closeSession("close");
   });
 
   it("resolves a full id or an unambiguous prefix", () => {

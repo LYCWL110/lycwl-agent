@@ -126,6 +126,7 @@ describe("declared verification commands", () => {
     const test = event.payload.report.tests[0];
     assert.equal(event.payload.report.tests.length, 1);
     assert.equal(test?.command, "npm test");
+    assert.equal(test?.basis, "caller_declared");
     assert.equal(test?.approved, true);
     assert.equal(test?.outcome, "passed");
     assert.equal(test?.coveredVersion, null);

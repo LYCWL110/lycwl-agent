@@ -77,6 +77,7 @@ export function createWindowsWriteAdapter(options) {
                     sha256: null,
                     encoding: "utf-8",
                     lineEnding: "lf",
+                    bom: false,
                     bytes: new Uint8Array(),
                     ...(before.stateKey === undefined ? {} : { stateKey: before.stateKey }),
                 };
@@ -92,6 +93,7 @@ export function createWindowsWriteAdapter(options) {
             sha256,
             encoding: format.encoding,
             lineEnding: format.lineEnding,
+            bom: format.bom,
             bytes,
             ...(before.stateKey === undefined ? {} : { stateKey: before.stateKey }),
         };
@@ -214,5 +216,5 @@ function detectFormat(bytes) {
     const cr = (text.match(/\r(?!\n)/g) ?? []).length;
     const kinds = [crlf > 0, lf > 0, cr > 0].filter(Boolean).length;
     const lineEnding = kinds === 0 ? "none" : kinds > 1 ? "mixed" : crlf > 0 ? "crlf" : lf > 0 ? "lf" : "cr";
-    return { encoding, lineEnding };
+    return { encoding, lineEnding, bom: hasUtf8Bom || hasUtf16Le || hasUtf16Be };
 }

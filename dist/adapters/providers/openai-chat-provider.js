@@ -51,7 +51,10 @@ export class OpenAiChatProvider {
                 authorization: `Bearer ${apiKey}`,
             },
             bodyText: JSON.stringify(buildChatRequestBody(request.compaction === undefined
-                ? this.#options
+                ? {
+                    ...this.#options,
+                    ...(request.tools === undefined ? {} : { tools: request.tools }),
+                }
                 : {
                     ...this.#options,
                     tools: [],
@@ -87,7 +90,10 @@ export class OpenAiChatProvider {
                 authorization: `Bearer ${apiKey}`,
             },
             bodyText: JSON.stringify(buildChatRequestBody(request.compaction === undefined
-                ? this.#options
+                ? {
+                    ...this.#options,
+                    ...(request.tools === undefined ? {} : { tools: request.tools }),
+                }
                 : {
                     ...this.#options,
                     tools: [],

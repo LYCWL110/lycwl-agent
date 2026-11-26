@@ -217,9 +217,13 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     ids: { create: () => "probe" },
     enableWrites,
     enableProcesses,
+    enableLsp: options.enableLsp === true,
     enableWeb,
     enableWebSearch: !nativeWebSearch,
     enableSkills: options.enableSkills === true,
+    memory,
+    memoryProjectRoot: options.workspaceRoot,
+    nowUtc: () => new Date().toISOString(),
     ...(mcpExecutor === undefined ? {} : { mcp: mcpExecutor }),
     ...(discoverExecutor === undefined ? {} : { discover: discoverExecutor }),
   });
@@ -541,8 +545,8 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
             }
           : {}),
         refreshOwnedKeys: assembly.refreshOwnedKeys,
-        memory,
-        memoryProjectRoot: options.workspaceRoot,
+        toolDefinitions,
+        extraToolDefinitions: mcpDefinitions,
         tools: createWorkspaceTools({
           workspaceRoot: options.workspaceRoot,
           // No interactive channel is attached to this gate, so it denies. Tools
@@ -558,6 +562,9 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
           enableWebSearch: !assembly.nativeWebSearch,
           enableSkills: options.enableSkills === true,
           sessionId,
+          memory,
+          memoryProjectRoot: options.workspaceRoot,
+          nowUtc: () => new Date().toISOString(),
           resolveSearchApiKey: assembly.resolveSearchApiKey,
           ownedKeys: assembly.ownedKeys,
           refreshOwnedKeys: assembly.refreshOwnedKeys,

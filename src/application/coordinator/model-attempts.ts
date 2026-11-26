@@ -5,6 +5,7 @@ import type {
   ProviderDelta,
   ProviderRequest,
   ProviderToolCall,
+  ProviderToolDefinition,
   TokenUsage,
 } from "../../ports/model-provider.ts";
 
@@ -24,6 +25,8 @@ export type ModelAttemptOutcome =
 
 export type ModelAttemptDependencies = Readonly<{
   provider: ModelProvider;
+  /** Tool declarations for this request; absent uses the adapter's defaults. */
+  tools?: readonly ProviderToolDefinition[];
   sleep: (delayMs: number, signal?: AbortSignal) => Promise<void>;
   signal?: AbortSignal;
   /**
@@ -110,6 +113,7 @@ export async function completeWithBoundedRetries(
       // provider that held the live reference would observe later turns inside a
       // request it already sent. A retry must also see exactly what was sent.
       conversation: [...conversation],
+      ...(dependencies.tools === undefined ? {} : { tools: dependencies.tools }),
       ...(dependencies.compaction === undefined ? {} : { compaction: dependencies.compaction }),
       ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
     };

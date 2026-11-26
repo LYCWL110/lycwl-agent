@@ -123,10 +123,15 @@ export function createDiscoverToolsTool(options: DiscoverToolsOptions): ToolExec
             catalog.length === 0
               ? "No MCP tools are connected."
               : `No tool matched "${query}".\nConnected servers:\n${catalog}\nRetry with a term from these names.`,
+          discoveredTools: [],
         };
       }
 
-      return { status: "succeeded", text: renderMatches(result.matches, result.servers) };
+      return {
+        status: "succeeded",
+        text: renderMatches(result.matches, result.servers),
+        discoveredTools: result.matches.map((match) => match.tool.name),
+      };
     },
   };
 }

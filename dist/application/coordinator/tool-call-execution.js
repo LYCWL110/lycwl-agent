@@ -390,6 +390,7 @@ async function dispatchAndExecute(dependencies, call, toolCallId, invocation, ap
         toolName: call.toolName,
         status: result.status,
         text: delivery.text,
+        ...(result.discoveredTools === undefined ? {} : { discoveredTools: result.discoveredTools }),
         deliveryBlocked: delivery.deliveryBlocked,
         ...(delivery.deliveryBlocked ? { deliveryBlockReason: delivery.reason } : {}),
     };

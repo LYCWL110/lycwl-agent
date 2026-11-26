@@ -113,7 +113,10 @@ export class OpenAiResponsesProvider implements ModelProvider {
       bodyText: JSON.stringify(
         buildResponsesRequestBody(
           request.compaction === undefined
-            ? this.#options
+            ? {
+                ...this.#options,
+                ...(request.tools === undefined ? {} : { tools: request.tools }),
+              }
             : {
                 ...this.#options,
                 tools: [],
@@ -167,7 +170,10 @@ export class OpenAiResponsesProvider implements ModelProvider {
         bodyText: JSON.stringify(
           buildResponsesRequestBody(
             request.compaction === undefined
-              ? this.#options
+              ? {
+                  ...this.#options,
+                  ...(request.tools === undefined ? {} : { tools: request.tools }),
+                }
               : {
                   ...this.#options,
                   tools: [],

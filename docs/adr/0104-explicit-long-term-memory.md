@@ -22,11 +22,17 @@ available. `/remember --replace <id> <text>` corrects an entry, `/memory` lists
 active entries, and `/forget <id>` removes one. A deleted or expired entry is
 never recreated by scanning history.
 
-At Run start the coordinator loads active entries, keeps global user preferences
-and entries for the current workspace, orders them by task-term overlap and
-recency, and injects a bounded `[long-term-memory]` user turn. The block states
-that memory explains preferences and past corrections but is not proof of current
-code, permission, or approval. It is not a system prompt.
+Memory is retrieved just in time through the read-only `memory_search` tool. The
+model decides that prior intent is missing and searches with a query; the tool
+hard-filters by active state, project/global scope and requested type, then
+lexically ranks matches. It returns a small set with id, type, scope, date and
+content, or an explicit no-match result. There is no automatic recall on every
+turn and no vector store.
+
+The result is a normal tool result, not a system prompt. It states that memory
+explains preferences and past corrections but is not proof of current code,
+permission, or approval. If multiple entries conflict, the text tells the model
+to report the conflict rather than selecting one by score.
 
 ## Consequences
 

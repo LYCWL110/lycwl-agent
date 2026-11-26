@@ -213,7 +213,9 @@ export function renderReport(report) {
         lines.push(`changes=${shown.join(",")}${suffix}`);
     }
     if (report.tests.length > 0) {
-        lines.push(`tests=${report.tests.map((test) => `${test.command}:${test.outcome}`).join(" | ")}`);
+        lines.push(`tests=${report.tests
+            .map((test) => `${test.command}:${test.outcome}(${test.basis})`)
+            .join(" | ")}`);
     }
     if (report.unknownSideEffects.length > 0) {
         lines.push(`unknownSideEffects=${report.unknownSideEffects.join(",")}`);

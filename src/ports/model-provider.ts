@@ -84,10 +84,21 @@ export type ProviderConversationItem =
       text: string | null;
     }>;
 
+export type ProviderToolDefinition = Readonly<{
+  name: string;
+  description: string;
+  inputSchema: Readonly<Record<string, unknown>>;
+}>;
+
 export type ProviderRequest = Readonly<{
   modelRequestId: string;
   attemptNo: number;
   conversation: readonly ProviderConversationItem[];
+  /**
+   * The declarations for this request. Absent keeps the adapter's composition-time
+   * tools. Discovery uses this to add schemas returned by a previous round.
+   */
+  tools?: readonly ProviderToolDefinition[];
   signal?: AbortSignal;
   /** Trusted Runtime auxiliary mode; disables tool declarations and caps output. */
   compaction?: Readonly<{ maxOutputTokens: number }>;

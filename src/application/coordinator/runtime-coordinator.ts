@@ -12,7 +12,6 @@ import {
   touchedPaths,
 } from "../../domain/context/touched-paths.ts";
 import { exceedsSpillThreshold, spillToolOutput } from "../../domain/evidence/tool-spill.ts";
-import { renderMemoryBlock, selectMemoryForTask } from "../../domain/memory/memory.ts";
 import type { RunModelBinding } from "../../domain/model-request/run-binding.ts";
 import { bindAttempt } from "../../domain/model-request/run-binding.ts";
 import { addUsage } from "../../domain/model-request/token-usage.ts";
@@ -56,13 +55,13 @@ import {
 import type { ApprovalGate } from "../../ports/approval-gate.ts";
 import type { FormatterRunner } from "../../ports/formatter.ts";
 import type { IdentifierFactory } from "../../ports/identity.ts";
-import type { MemoryStore } from "../../ports/memory-store.ts";
 import type {
   ModelProvider,
   ProviderConversationItem,
   ProviderDelta,
   ProviderImage,
   ProviderToolCall,
+  ProviderToolDefinition,
   TokenUsage,
 } from "../../ports/model-provider.ts";
 import type { SensitiveSource } from "../../ports/sensitive-context.ts";
@@ -119,6 +118,10 @@ export type CheckpointWriter = Readonly<{
 export type CoordinatorDependencies = Readonly<{
   provider: ModelProvider;
   tools: ToolExecutor;
+  /** Base declarations for every main request. */
+  toolDefinitions?: readonly ProviderToolDefinition[];
+  /** Extra declarations, currently MCP tools, admitted only after discovery. */
+  extraToolDefinitions?: readonly ProviderToolDefinition[];
   approvals: ApprovalGate;
   eventLog: EventLog;
   ids: IdentifierFactory;
@@ -163,10 +166,6 @@ export type CoordinatorDependencies = Readonly<{
    * Pre-change file snapshots, so a Run can be reverted. Absent disables undo.
    */
   snapshotStore?: SnapshotStore;
-  /** User-authored long-term memory. Absent disables injection. */
-  memory?: MemoryStore;
-  /** Absolute workspace root used to scope project memory. */
-  memoryProjectRoot?: string;
   /**
    * The project's formatter, run after a successful file mutation. Absent leaves
    * written files exactly as the tool produced them.
@@ -428,6 +427,8 @@ type MutableRunContext = {
   runBinding: RunModelBinding | null;
   /** Tool call fingerprints for no-progress detection, oldest first. */
   callHistory: CallRecord[];
+  /** MCP tool schemas discovered for this Run. */
+  discoveredTools: Set<string>;
   /** Immediate pre-edit snapshots, keyed by provider tool call id. */
   editSnapshots: Map<
     string,
@@ -902,23 +903,6 @@ export class RuntimeCoordinator {
   ): Promise<CoordinatorResult> {
     const projectContext = this.#deps.projectContext;
 
-    // Memory is read at Run start, not at process start, so a `/remember` issued
-    // before the next task is visible without restarting the Session.
-    let memoryBlock: string | null = null;
-    if (this.#deps.memory !== undefined && this.#deps.memoryProjectRoot !== undefined) {
-      const loaded = await this.#deps.memory.load();
-      if (loaded.ok) {
-        memoryBlock = renderMemoryBlock(
-          selectMemoryForTask(loaded.entries, {
-            projectRoot: this.#deps.memoryProjectRoot,
-            task: input,
-            nowUtc: this.#deps.nowUtc(),
-          }),
-        );
-      }
-      // A store failure omits memory rather than substituting a guessed entry.
-    }
-
     // A requested skill is loaded before the Run starts, so a failure is a clean
     // refusal rather than a Run that fails partway. The body becomes a user
     // message with a provenance header; it grants nothing.
@@ -956,7 +940,6 @@ export class RuntimeCoordinator {
         ...(projectContext === undefined ? [] : [{ kind: "user" as const, text: projectContext }]),
         ...this.#conversation,
         ...(skillBlock === null ? [] : [{ kind: "user" as const, text: skillBlock }]),
-        ...(memoryBlock === null ? [] : [{ kind: "user" as const, text: memoryBlock }]),
         // Images ride on the task turn, not on a separate one: the model must read
         // them as part of the request, and a separate turn would be a second task.
         options.images === undefined || options.images.length === 0
@@ -985,6 +968,7 @@ export class RuntimeCoordinator {
       todoList: emptyTodoList(),
       runBinding: this.#deps.runBinding ?? null,
       callHistory: [],
+      discoveredTools: new Set(),
       newInputSinceLastCall: false,
       touchedPaths: [],
       guidanceSources: new Map<string, string>(
@@ -1324,6 +1308,18 @@ export class RuntimeCoordinator {
     });
   }
 
+  /** Declarations for the next request, including tools discovered earlier. */
+  #providerTools(context: MutableRunContext): readonly ProviderToolDefinition[] {
+    const byName = new Map<string, ProviderToolDefinition>();
+    for (const definition of this.#deps.toolDefinitions ?? []) {
+      byName.set(definition.name, definition);
+    }
+    for (const definition of this.#deps.extraToolDefinitions ?? []) {
+      if (context.discoveredTools.has(definition.name)) byName.set(definition.name, definition);
+    }
+    return [...byName.values()];
+  }
+
   async #completeWithRetries(
     context: MutableRunContext,
     modelRequestId: string,
@@ -1357,6 +1353,7 @@ export class RuntimeCoordinator {
         },
         ...(auxiliaryAttempts === undefined
           ? {
+              tools: this.#providerTools(context),
               onDelta: (delta: ProviderDelta) => {
                 if (delta.kind === "text") context.streamingText += delta.text;
               },
@@ -2126,6 +2123,9 @@ export class RuntimeCoordinator {
       call,
     );
     context.cancelledDuring = null;
+    if (outcome.kind === "continue" && outcome.discoveredTools !== undefined) {
+      for (const toolName of outcome.discoveredTools) context.discoveredTools.add(toolName);
+    }
     if ("deliveryBlocked" in outcome && outcome.deliveryBlocked) {
       context.deliveryBlocked = true;
       context.deliveryBlockReason = outcome.deliveryBlockReason ?? "owned_key_detected";
@@ -2274,6 +2274,9 @@ export class RuntimeCoordinator {
         decision,
       },
     );
+    if (outcome.kind === "continue" && outcome.discoveredTools !== undefined) {
+      for (const toolName of outcome.discoveredTools) context.discoveredTools.add(toolName);
+    }
     if ("deliveryBlocked" in outcome && outcome.deliveryBlocked) {
       context.deliveryBlocked = true;
       context.deliveryBlockReason = outcome.deliveryBlockReason ?? "owned_key_detected";

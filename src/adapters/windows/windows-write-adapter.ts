@@ -99,6 +99,7 @@ export function createWindowsWriteAdapter(options: Readonly<{ workspaceRoot: str
           sha256: null,
           encoding: "utf-8",
           lineEnding: "lf",
+          bom: false,
           bytes: new Uint8Array(),
           ...(before.stateKey === undefined ? {} : { stateKey: before.stateKey }),
         };
@@ -113,6 +114,7 @@ export function createWindowsWriteAdapter(options: Readonly<{ workspaceRoot: str
       sha256,
       encoding: format.encoding,
       lineEnding: format.lineEnding,
+      bom: format.bom,
       bytes,
       ...(before.stateKey === undefined ? {} : { stateKey: before.stateKey }),
     };
@@ -232,6 +234,7 @@ function mapWriteError(error: unknown): WriteFailure {
 function detectFormat(bytes: Uint8Array): {
   encoding: "utf-8" | "utf-16le" | "utf-16be";
   lineEnding: "none" | "lf" | "crlf" | "cr" | "mixed";
+  bom: boolean;
 } {
   const hasUtf8Bom = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
   const hasUtf16Le = bytes[0] === 0xff && bytes[1] === 0xfe;
@@ -245,7 +248,7 @@ function detectFormat(bytes: Uint8Array): {
   const kinds = [crlf > 0, lf > 0, cr > 0].filter(Boolean).length;
   const lineEnding =
     kinds === 0 ? "none" : kinds > 1 ? "mixed" : crlf > 0 ? "crlf" : lf > 0 ? "lf" : "cr";
-  return { encoding, lineEnding };
+  return { encoding, lineEnding, bom: hasUtf8Bom || hasUtf16Le || hasUtf16Be };
 }
 
 export type { FileSnapshotFacts };

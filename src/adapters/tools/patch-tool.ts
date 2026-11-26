@@ -34,6 +34,8 @@ export type PatchTargetSnapshot = Readonly<{
   sha256: string | null;
   encoding: TextFileEncoding;
   lineEnding: string;
+  /** The original file carried a byte-order mark; preserve it on write. */
+  bom?: boolean;
   bytes: Uint8Array;
   stateKey?: string;
 }>;
@@ -229,7 +231,26 @@ function buildTargetBytes(
   const updated = joinLines(applied.lines, ending);
   const encoded = encode(updated, snapshot.encoding);
   if (encoded === null) return { ok: false, code: "unrepresentable_character" };
-  return { ok: true, value: encoded };
+  return {
+    ok: true,
+    value: snapshot.bom === true ? withBom(encoded, snapshot.encoding) : encoded,
+  };
+}
+
+function withBom(bytes: Uint8Array, encoding: TextFileEncoding): Uint8Array {
+  const bom =
+    encoding === "utf-8"
+      ? [0xef, 0xbb, 0xbf]
+      : encoding === "utf-16le"
+        ? [0xff, 0xfe]
+        : encoding === "utf-16be"
+          ? [0xfe, 0xff]
+          : [];
+  if (bom.length === 0) return bytes;
+  const result = new Uint8Array(bom.length + bytes.byteLength);
+  result.set(bom, 0);
+  result.set(bytes, bom.length);
+  return result;
 }
 
 function decode(bytes: Uint8Array, encoding: TextFileEncoding): string | null {

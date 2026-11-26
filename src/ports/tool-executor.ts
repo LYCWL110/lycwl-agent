@@ -55,6 +55,12 @@ export type ToolExecutionResult = Readonly<{
   completeness?: ResultCompleteness;
   /** Early capture protection; preserves execution status and withholds payload. */
   deliveryBlocked?: "owned_key_detected" | "guard_failure";
+  /**
+   * Tool names whose schemas were discovered by this call. The coordinator adds
+   * them to the next provider request, because a schema returned as text is not a
+   * declared function.
+   */
+  discoveredTools?: readonly string[];
   /** Trusted adapter provenance, not model-supplied sensitivity labels. */
   sensitiveSources?: readonly Readonly<{
     sourceId: string;

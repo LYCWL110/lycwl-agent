@@ -44,7 +44,10 @@ export class AnthropicProvider {
             return { kind: "authentication_failure", safeCode: "anthropic_key_not_configured" };
         }
         const body = buildRequestBody(request.compaction === undefined
-            ? this.#options
+            ? {
+                ...this.#options,
+                ...(request.tools === undefined ? {} : { tools: request.tools }),
+            }
             : {
                 ...this.#options,
                 tools: [],
@@ -99,7 +102,10 @@ export class AnthropicProvider {
                 "x-api-key": apiKey,
             },
             bodyText: JSON.stringify(buildRequestBody(request.compaction === undefined
-                ? this.#options
+                ? {
+                    ...this.#options,
+                    ...(request.tools === undefined ? {} : { tools: request.tools }),
+                }
                 : {
                     ...this.#options,
                     tools: [],

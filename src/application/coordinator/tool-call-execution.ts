@@ -28,6 +28,8 @@ export type ToolCallOutcome =
       toolName: string;
       status: "succeeded" | "failed" | "denied";
       text: string | null;
+      /** Schemas discovered by this call, for the next provider request. */
+      discoveredTools?: readonly string[];
       deliveryBlocked?: boolean;
       deliveryBlockReason?: "owned_key_detected" | "guard_failure";
     }>
@@ -521,6 +523,7 @@ async function dispatchAndExecute(
     toolName: call.toolName,
     status: result.status,
     text: delivery.text,
+    ...(result.discoveredTools === undefined ? {} : { discoveredTools: result.discoveredTools }),
     deliveryBlocked: delivery.deliveryBlocked,
     ...(delivery.deliveryBlocked ? { deliveryBlockReason: delivery.reason } : {}),
   };

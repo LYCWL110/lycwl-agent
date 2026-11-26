@@ -41,6 +41,7 @@ export async function completeWithBoundedRetries(dependencies, modelRequestId, c
             // provider that held the live reference would observe later turns inside a
             // request it already sent. A retry must also see exactly what was sent.
             conversation: [...conversation],
+            ...(dependencies.tools === undefined ? {} : { tools: dependencies.tools }),
             ...(dependencies.compaction === undefined ? {} : { compaction: dependencies.compaction }),
             ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
         };

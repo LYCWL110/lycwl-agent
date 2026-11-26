@@ -107,7 +107,10 @@ export class OpenAiChatProvider implements ModelProvider {
       bodyText: JSON.stringify(
         buildChatRequestBody(
           request.compaction === undefined
-            ? this.#options
+            ? {
+                ...this.#options,
+                ...(request.tools === undefined ? {} : { tools: request.tools }),
+              }
             : {
                 ...this.#options,
                 tools: [],
@@ -160,7 +163,10 @@ export class OpenAiChatProvider implements ModelProvider {
         bodyText: JSON.stringify(
           buildChatRequestBody(
             request.compaction === undefined
-              ? this.#options
+              ? {
+                  ...this.#options,
+                  ...(request.tools === undefined ? {} : { tools: request.tools }),
+                }
               : {
                   ...this.#options,
                   tools: [],

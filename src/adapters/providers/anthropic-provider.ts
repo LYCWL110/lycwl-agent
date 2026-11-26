@@ -114,7 +114,10 @@ export class AnthropicProvider implements ModelProvider {
 
     const body = buildRequestBody(
       request.compaction === undefined
-        ? this.#options
+        ? {
+            ...this.#options,
+            ...(request.tools === undefined ? {} : { tools: request.tools }),
+          }
         : {
             ...this.#options,
             tools: [],
@@ -187,7 +190,10 @@ export class AnthropicProvider implements ModelProvider {
         bodyText: JSON.stringify(
           buildRequestBody(
             request.compaction === undefined
-              ? this.#options
+              ? {
+                  ...this.#options,
+                  ...(request.tools === undefined ? {} : { tools: request.tools }),
+                }
               : {
                   ...this.#options,
                   tools: [],

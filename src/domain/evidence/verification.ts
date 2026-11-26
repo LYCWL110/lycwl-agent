@@ -240,6 +240,11 @@ export type ReportSnapshot = Readonly<{
   changes: readonly Readonly<{ path: string; applied: boolean; scope: string }>[];
   tests: readonly Readonly<{
     command: string;
+    /**
+     * `caller_declared` means the model marked the command as verification; it
+     * does not prove the project declares or requires that command.
+     */
+    basis: "caller_declared";
     approved: boolean;
     executionId: string | null;
     outcome: "passed" | "failed" | "not_run" | "outcome_unknown";
@@ -373,7 +378,9 @@ export function renderReport(report: ReportSnapshot): string {
   }
   if (report.tests.length > 0) {
     lines.push(
-      `tests=${report.tests.map((test) => `${test.command}:${test.outcome}`).join(" | ")}`,
+      `tests=${report.tests
+        .map((test) => `${test.command}:${test.outcome}(${test.basis})`)
+        .join(" | ")}`,
     );
   }
   if (report.unknownSideEffects.length > 0) {

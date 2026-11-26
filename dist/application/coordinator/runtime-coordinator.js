@@ -1,7 +1,6 @@
 import { computeContextBudget, conservativeEstimate, decideRequestFit, } from "../../domain/context/context-budget.js";
 import { mergeTouchedPaths, touchedPaths, } from "../../domain/context/touched-paths.js";
 import { exceedsSpillThreshold, spillToolOutput } from "../../domain/evidence/tool-spill.js";
-import { renderMemoryBlock, selectMemoryForTask } from "../../domain/memory/memory.js";
 import { bindAttempt } from "../../domain/model-request/run-binding.js";
 import { addUsage } from "../../domain/model-request/token-usage.js";
 import { describeSyntaxFailure } from "../../domain/mutation/syntax-check.js";
@@ -405,20 +404,6 @@ export class RuntimeCoordinator {
     }
     async #startRun(input, options) {
         const projectContext = this.#deps.projectContext;
-        // Memory is read at Run start, not at process start, so a `/remember` issued
-        // before the next task is visible without restarting the Session.
-        let memoryBlock = null;
-        if (this.#deps.memory !== undefined && this.#deps.memoryProjectRoot !== undefined) {
-            const loaded = await this.#deps.memory.load();
-            if (loaded.ok) {
-                memoryBlock = renderMemoryBlock(selectMemoryForTask(loaded.entries, {
-                    projectRoot: this.#deps.memoryProjectRoot,
-                    task: input,
-                    nowUtc: this.#deps.nowUtc(),
-                }));
-            }
-            // A store failure omits memory rather than substituting a guessed entry.
-        }
         // A requested skill is loaded before the Run starts, so a failure is a clean
         // refusal rather than a Run that fails partway. The body becomes a user
         // message with a provenance header; it grants nothing.
@@ -455,7 +440,6 @@ export class RuntimeCoordinator {
                 ...(projectContext === undefined ? [] : [{ kind: "user", text: projectContext }]),
                 ...this.#conversation,
                 ...(skillBlock === null ? [] : [{ kind: "user", text: skillBlock }]),
-                ...(memoryBlock === null ? [] : [{ kind: "user", text: memoryBlock }]),
                 // Images ride on the task turn, not on a separate one: the model must read
                 // them as part of the request, and a separate turn would be a second task.
                 options.images === undefined || options.images.length === 0
@@ -484,6 +468,7 @@ export class RuntimeCoordinator {
             todoList: emptyTodoList(),
             runBinding: this.#deps.runBinding ?? null,
             callHistory: [],
+            discoveredTools: new Set(),
             newInputSinceLastCall: false,
             touchedPaths: [],
             guidanceSources: new Map((this.#deps.initialGuidanceSources ?? []).map((source) => [source.path, source.sha256])),
@@ -803,6 +788,18 @@ export class RuntimeCoordinator {
             return true;
         });
     }
+    /** Declarations for the next request, including tools discovered earlier. */
+    #providerTools(context) {
+        const byName = new Map();
+        for (const definition of this.#deps.toolDefinitions ?? []) {
+            byName.set(definition.name, definition);
+        }
+        for (const definition of this.#deps.extraToolDefinitions ?? []) {
+            if (context.discoveredTools.has(definition.name))
+                byName.set(definition.name, definition);
+        }
+        return [...byName.values()];
+    }
     async #completeWithRetries(context, modelRequestId, 
     /** Overrides the conversation; used by the auxiliary compaction request. */
     overrideConversation, auxiliaryAttempts) {
@@ -819,6 +816,7 @@ export class RuntimeCoordinator {
             },
             ...(auxiliaryAttempts === undefined
                 ? {
+                    tools: this.#providerTools(context),
                     onDelta: (delta) => {
                         if (delta.kind === "text")
                             context.streamingText += delta.text;
@@ -1511,6 +1509,10 @@ export class RuntimeCoordinator {
             },
         }, call);
         context.cancelledDuring = null;
+        if (outcome.kind === "continue" && outcome.discoveredTools !== undefined) {
+            for (const toolName of outcome.discoveredTools)
+                context.discoveredTools.add(toolName);
+        }
         if ("deliveryBlocked" in outcome && outcome.deliveryBlocked) {
             context.deliveryBlocked = true;
             context.deliveryBlockReason = outcome.deliveryBlockReason ?? "owned_key_detected";
@@ -1640,6 +1642,10 @@ export class RuntimeCoordinator {
             requestVersion: pending.requestVersion,
             decision,
         });
+        if (outcome.kind === "continue" && outcome.discoveredTools !== undefined) {
+            for (const toolName of outcome.discoveredTools)
+                context.discoveredTools.add(toolName);
+        }
         if ("deliveryBlocked" in outcome && outcome.deliveryBlocked) {
             context.deliveryBlocked = true;
             context.deliveryBlockReason = outcome.deliveryBlockReason ?? "owned_key_detected";

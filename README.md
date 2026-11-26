@@ -71,8 +71,9 @@ you resume them by ID.
 Long-term memory is explicit only. `/remember <text>` saves feedback for the
 current project; `/remember user <text>` saves a global preference;
 `/remember --replace <id> <text>` corrects an entry; `/memory` lists saved
-entries; `/forget <id>` removes one. Memory is never extracted from a
-conversation automatically.
+entries; `/forget <id>` removes one. The model searches memory on demand with
+the read-only `memory_search` tool; it is not injected on every turn, and memory
+is never extracted from a conversation automatically.
 
 ## Configuration
 
