@@ -51,7 +51,7 @@ export async function selectRuntime(options) {
     // exists AND an approval channel was supplied; a build with no channel cannot
     // start one, which is the safe default for a scripted launch.
     const mcpDeclared = readMcpDeclarations(options.settings);
-    const mcpStarted = mcpDeclared === undefined || options.mcpApprovals === undefined
+    const mcpStarted = options.readOnly === true || mcpDeclared === undefined || options.mcpApprovals === undefined
         ? null
         : await startMcpServers({
             declared: mcpDeclared,
@@ -70,13 +70,15 @@ export async function selectRuntime(options) {
     const discoverExecutor = useDiscovery
         ? createDiscoverToolsTool({ tools: () => discoverable })
         : undefined;
-    const mcpWarnings = mcpStarted === null
-        ? mcpDeclared === undefined
-            ? []
-            : ["mcp: servers are declared but no approval channel is available; none started"]
-        : mcpStarted.ok
-            ? mcpStarted.warnings
-            : [`mcp: no server started (${mcpStarted.code})`];
+    const mcpWarnings = options.readOnly === true && mcpDeclared !== undefined
+        ? ["mcp: disabled in read-only mode; no MCP process was started"]
+        : mcpStarted === null
+            ? mcpDeclared === undefined
+                ? []
+                : ["mcp: servers are declared but no approval channel is available; none started"]
+            : mcpStarted.ok
+                ? mcpStarted.warnings
+                : [`mcp: no server started (${mcpStarted.code})`];
     const tools = createWorkspaceTools({
         workspaceRoot: options.workspaceRoot,
         // This gate answers inline requests that do not go through the suspend path,

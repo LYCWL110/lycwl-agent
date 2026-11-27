@@ -306,6 +306,71 @@ describe("tool schemas reach the wire", () => {
     }
   });
 
+  it("does not start MCP or advertise its tools in read-only mode", async () => {
+    bodies.length = 0;
+    const directory = await mkdtemp(path.join(tmpdir(), "lycwl-tools-readonly-mcp-"));
+    try {
+      const store = createConfigStore({ directory });
+      const vault = createFileVault({ directory });
+      const saved = await saveSetup({
+        draft: {
+          baseUrl: `https://localhost:${port}`,
+          model: "claude-local-test",
+          contextWindow: 128000,
+          credentialRef: "provider-main",
+          apiKey: "local-test-key",
+        },
+        vault,
+        store,
+      });
+      assert.equal(saved.ok, true, saved.ok ? "" : saved.code);
+      const loaded = await store.load();
+      assert.equal(loaded.ok, true);
+      if (!loaded.ok) return;
+      const { parseJsonc, toPlainValue } = await import("../../src/domain/config/jsonc.ts");
+      const parsed = parseJsonc(loaded.value.text);
+      assert.equal(parsed.ok, true);
+      if (!parsed.ok) return;
+      const settings = toPlainValue(parsed.value) as Record<string, unknown>;
+      settings["mcp"] = {
+        servers: [{ serverId: "fixture", command: "node", args: ["-e", "process.exit(0)"] }],
+      };
+
+      let spawned = 0;
+      const selection = await selectRuntime({
+        workspaceRoot: directory,
+        dataDirectory: directory,
+        settings,
+        hasSettings: true,
+        readOnly: true,
+        enableWrites: false,
+        enableProcesses: false,
+        enableWeb: false,
+        mcpApprovals: { decide: async () => "approved" },
+        spawnMcp: (() => {
+          spawned += 1;
+          throw new Error("must not spawn in read-only mode");
+        }) as never,
+        trustedCaPem: certPem,
+      });
+      assert.equal(selection.kind, "real", selection.kind === "demo" ? selection.reason : "");
+      if (selection.kind !== "real") return;
+      assert.equal(spawned, 0);
+      assert.match(selection.warnings.join("\n"), /mcp: disabled in read-only mode/);
+
+      await selection.coordinator.run("hello");
+      const tools = bodies[0]?.["tools"] as readonly Record<string, unknown>[] | undefined;
+      const names = tools?.map((tool) => tool["name"]).filter((name) => typeof name === "string");
+      assert.equal(
+        names?.some((name) => String(name).startsWith("mcp__")),
+        false,
+      );
+    } finally {
+      await closeRuntimeSelections();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("advertises the write tools when writes are enabled", async () => {
     bodies.length = 0;
     const directory = await mkdtemp(path.join(tmpdir(), "lycwl-tools-write-"));

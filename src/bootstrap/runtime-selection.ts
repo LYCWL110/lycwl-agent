@@ -103,6 +103,11 @@ export type SelectRuntimeOptions = Readonly<{
   /** True when a settings document exists at all. */
   hasSettings: boolean;
   /**
+   * Read-only launch. MCP child processes are external execution, so they are
+   * neither started nor advertised even when the settings declare them.
+   */
+  readOnly?: boolean;
+  /**
    * Enable filesystem mutation tools. Off by default so a session cannot write
    * unless the caller explicitly opts in; every write still requires one-shot
    * approval through the coordinator's suspend path.
@@ -178,7 +183,7 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
   // start one, which is the safe default for a scripted launch.
   const mcpDeclared = readMcpDeclarations(options.settings);
   const mcpStarted =
-    mcpDeclared === undefined || options.mcpApprovals === undefined
+    options.readOnly === true || mcpDeclared === undefined || options.mcpApprovals === undefined
       ? null
       : await startMcpServers({
           declared: mcpDeclared,
@@ -199,13 +204,15 @@ export async function selectRuntime(options: SelectRuntimeOptions): Promise<Runt
     ? createDiscoverToolsTool({ tools: () => discoverable })
     : undefined;
   const mcpWarnings =
-    mcpStarted === null
-      ? mcpDeclared === undefined
-        ? []
-        : ["mcp: servers are declared but no approval channel is available; none started"]
-      : mcpStarted.ok
-        ? mcpStarted.warnings
-        : [`mcp: no server started (${mcpStarted.code})`];
+    options.readOnly === true && mcpDeclared !== undefined
+      ? ["mcp: disabled in read-only mode; no MCP process was started"]
+      : mcpStarted === null
+        ? mcpDeclared === undefined
+          ? []
+          : ["mcp: servers are declared but no approval channel is available; none started"]
+        : mcpStarted.ok
+          ? mcpStarted.warnings
+          : [`mcp: no server started (${mcpStarted.code})`];
 
   const tools = createWorkspaceTools({
     workspaceRoot: options.workspaceRoot,

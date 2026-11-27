@@ -41,7 +41,7 @@ if (args.includes("--help") || args.includes("-h")) {
       "",
       "Usage:",
       "  lycwl               start the interactive TUI (writes, shell and web enabled)",
-      "  lycwl --read-only   disable writes, shell and web; read and local search only",
+      "  lycwl --read-only   disable writes, shell, web and MCP; read and local search only",
       "  lycwl --skills      enable the .agents/skills catalog (default off)",
       "  lycwl --resume ID   explicitly continue a recorded conversation",
       "  lycwl --search-key  store or replace the Tavily key (input hidden)",
@@ -63,7 +63,7 @@ if (args.includes("--help") || args.includes("-h")) {
       "read permission beyond ordinary file access.",
       "",
       "--write and --shell are accepted for compatibility but ignored. Use",
-      "--read-only to opt out of writes, process execution and web access.",
+      "--read-only to opt out of writes, process execution, web and MCP access.",
       "",
       "An interactive terminal is required.",
       "",
@@ -225,6 +225,7 @@ async function startSession(): Promise<void> {
     enableSkills: args.includes("--skills"),
     enableProcesses: permissionMode === "full",
     enableWeb: permissionMode === "full",
+    readOnly: permissionMode === "read-only",
     sessionId,
     // A declared MCP server must be approved before its process is spawned, which
     // is before the TUI exists. This gate is denial-by-default and is not remembered

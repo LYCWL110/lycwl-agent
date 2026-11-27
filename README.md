@@ -52,7 +52,7 @@ workspace.
 
 ```
 lycwl                  read, write, shell and web, each action approved
-lycwl --read-only      disable writes, shell and web; read and local search only
+lycwl --read-only      disable writes, shell, web and MCP; read and local search only
 lycwl --skills         enable the .agents/skills catalog
 lycwl --resume <id>    continue a recorded conversation
 lycwl --search-key     store or replace the Tavily key (input hidden)
