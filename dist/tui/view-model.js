@@ -49,7 +49,7 @@ export function deriveView(input) {
         todo: input.todo,
         pendingApproval: input.pendingApproval,
         pendingDisclosure: input.pendingDisclosure ?? null,
-        pendingApprovalPreview: deriveApprovalPreview(input),
+        ...deriveApprovalPreview(input),
         answerError: input.answerError ?? null,
         meter: null,
         pendingQuestion: input.pendingQuestion,
@@ -90,7 +90,7 @@ function deriveActivity(input, waiting) {
 function deriveApprovalPreview(input) {
     const pending = input.pendingApproval;
     if (pending === null)
-        return null;
+        return { pendingApprovalPreview: null };
     for (let index = input.events.length - 1; index >= 0; index -= 1) {
         const payload = input.events[index]?.payload;
         if (payload === undefined)
@@ -99,11 +99,24 @@ function deriveApprovalPreview(input) {
             continue;
         if (payload.approvalId !== pending.approvalId)
             continue;
-        return payload.safePreview.split("\n");
+        const call = pending.toolName === "shell"
+            ? input.events.findLast(({ runId, payload: fact }) => runId === input.events[index]?.runId &&
+                fact.kind === "tool_call_received" &&
+                fact.toolCallId === pending.toolCallId &&
+                fact.toolName === "shell")?.payload
+            : null;
+        const args = call?.kind === "tool_call_received" ? call.arguments : null;
+        return {
+            pendingApprovalPreview: payload.safePreview.split("\n"),
+            pendingVerificationCommand: typeof args === "object" &&
+                args !== null &&
+                "verification" in args &&
+                args.verification === true,
+        };
     }
     // No recorded preview: the panel cannot describe the operation, so it offers
     // no preview rather than inventing one.
-    return null;
+    return { pendingApprovalPreview: null };
 }
 function deriveWaitingKind(input) {
     if (input.pendingDisclosure != null)

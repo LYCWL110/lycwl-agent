@@ -1,5 +1,5 @@
 import { Box, Text, useInput, usePaste } from "ink";
-import { createElement, type ReactElement, useState } from "react";
+import { createElement, type ReactElement, useMemo, useState } from "react";
 import type { ProviderImage } from "../ports/model-provider.ts";
 import { ActivityIndicator } from "./activity-indicator.ts";
 import {
@@ -41,6 +41,20 @@ import { COMPOSER_COMMANDS, commandEnabled, type TuiViewState } from "./view-mod
 const h = createElement;
 
 type ApprovalChoice = "approve" | "deny";
+
+const APPROVAL_PURPOSES: Readonly<Record<string, string>> = {
+  shell: "在指定目录运行命令",
+  background_start: "在后台启动命令",
+  background_stop: "停止后台任务",
+  edit_file: "修改文件内容",
+  create_file: "创建文件",
+  apply_patch: "应用文件补丁",
+  delete_path: "删除路径",
+  rename_path: "重命名或移动路径",
+  read_file: "读取文件内容",
+  web_fetch: "获取网页内容",
+  web_search: "搜索网络",
+};
 
 export type AppProps = Readonly<{
   view: TuiViewState;
@@ -135,7 +149,11 @@ export function App(props: AppProps): ReactElement {
   const [selectedTool, setSelectedTool] = useState<string | null>(null);
   const viewport = useViewport(props.viewport);
   const width = Math.max(1, viewport.columns - 4);
-  const lobby = view.runStatus === "idle" && view.transcript.length === 0 && view.todo === null;
+  const lobby =
+    approvalKey === null &&
+    view.runStatus === "idle" &&
+    view.transcript.length === 0 &&
+    view.todo === null;
   const lobbyWidth = Math.max(1, Math.min(84, Math.max(50, Math.floor((width * 2) / 3)), width));
   const commands =
     !dismissedCommands &&
@@ -148,7 +166,14 @@ export function App(props: AppProps): ReactElement {
   const selectedCommand = Math.min(commandIndex, Math.max(0, commands.length - 1));
   // The approval box is taller than the ordinary composer; reserve its lines so
   // the title bar and the decision controls stay on screen together.
-  const bodyRows = Math.max(1, viewport.rows - (approvalKey === null ? 9 : 14));
+  const previewLines = useMemo(() => {
+    const preview = view.pendingDisclosure?.safePreview.split("\n") ?? view.pendingApprovalPreview;
+    if (preview === null) return wrapText("缺少已记录的操作预览，只能拒绝。", width - 4);
+    const details = preview[0] === view.pendingApproval?.toolName ? preview.slice(1) : preview;
+    return details.flatMap((line) => wrapText(displayText(line), width - 4));
+  }, [view.pendingApprovalPreview, view.pendingDisclosure, view.pendingApproval?.toolName, width]);
+  const previewRows = Math.max(1, Math.min(previewLines.length, 9, viewport.rows - 13));
+  const bodyRows = Math.max(1, viewport.rows - (approvalKey === null ? 9 : 13 + previewRows));
   const lines = documentLines(view, width, expandedTools);
   const maxStart = Math.max(0, lines.length - bodyRows);
   const start = scroll === null ? maxStart : Math.min(scroll, maxStart);
@@ -240,7 +265,8 @@ export function App(props: AppProps): ReactElement {
         else props.onDeny();
         return;
       }
-      if (!(key.pageUp || key.pageDown || (key.ctrl && (key.home || key.end)))) return;
+      if (key.upArrow || key.downArrow) scrollBy(key.upArrow ? -1 : 1);
+      return;
     }
     if (key.ctrl && input === "v") {
       // A terminal delivers the key, not the image. Reading the clipboard here is
@@ -461,8 +487,6 @@ export function App(props: AppProps): ReactElement {
           commandRows: Math.max(1, Math.min(6, Math.floor((viewport.rows - 5) / 2))),
           attachedImages: pastedImages.length,
           imageNotice,
-          approvalChoice,
-          canApprove,
           animated: props.animated,
         }),
         h(Footer, {
@@ -501,7 +525,7 @@ export function App(props: AppProps): ReactElement {
           Text,
           {
             key: `${start + index}`,
-            ...colorProps(colorFor(line.role, capabilities)),
+            ...(line.role === "body" ? {} : colorProps(colorFor(line.role, capabilities))),
             ...(line.bold ? { bold: true } : {}),
             ...(line.background === true && capabilities.depth !== "mono"
               ? { backgroundColor: "black" }
@@ -516,25 +540,34 @@ export function App(props: AppProps): ReactElement {
       colorProps(colorFor("faint", capabilities)),
       lines.length > bodyRows
         ? clipText(
-            `${start + 1}–${Math.min(start + bodyRows, lines.length)} / ${lines.length}  ·  Scroll / PgUp / PgDn`,
+            `${start + 1}–${Math.min(start + bodyRows, lines.length)} / ${lines.length}  ·  ${approvalKey === null ? "Scroll / PgUp / PgDn" : "↑↓ 对话"}`,
             width,
           )
         : "─".repeat(width),
     ),
-    h(Composer, {
-      view,
-      editor,
-      capabilities,
-      width,
-      commands,
-      selectedCommand,
-      commandRows: Math.max(1, Math.min(6, viewport.rows - 6)),
-      attachedImages: pastedImages.length,
-      imageNotice,
-      approvalChoice,
-      canApprove,
-      animated: props.animated,
-    }),
+    approvalKey !== null
+      ? h(ApprovalBox, {
+          key: approvalKey,
+          view,
+          capabilities,
+          width,
+          choice: approvalChoice,
+          canApprove,
+          previewRows,
+          previewLines,
+        })
+      : h(Composer, {
+          view,
+          editor,
+          capabilities,
+          width,
+          commands,
+          selectedCommand,
+          commandRows: Math.max(1, Math.min(6, viewport.rows - 6)),
+          attachedImages: pastedImages.length,
+          imageNotice,
+          animated: props.animated,
+        }),
     h(Footer, {
       view,
       capabilities,
@@ -547,7 +580,7 @@ export function App(props: AppProps): ReactElement {
 
 type DocumentLine = Readonly<{
   text: string;
-  role: "primary" | "secondary" | "tertiary" | "success" | "dim" | "faint";
+  role: "body" | "primary" | "secondary" | "tertiary" | "success" | "dim" | "faint";
   bold?: boolean;
   toolId?: string;
   /** Fill the terminal background to make a tool box read as one block. */
@@ -644,22 +677,18 @@ function documentLines(
       append("", "faint");
       continue;
     }
-    const role =
-      entry.kind === "user"
-        ? "primary"
-        : entry.kind === "assistant"
-          ? "success"
-          : entry.status === "failed" || entry.status === "denied"
-            ? "tertiary"
-            : "dim";
-    const label =
-      entry.kind === "user"
-        ? `you${entry.status === null ? "" : ` · ${entry.status}`}`
-        : entry.kind === "assistant"
-          ? `agent${entry.status === "streaming" ? " · streaming" : ""}`
-          : "[sys]";
-    append(`▌ ${label}`, entry.kind === "system" ? "secondary" : role, true);
-    append(entry.status === "streaming" ? `${entry.text}▍` : entry.text, "dim");
+    if (entry.kind === "system") {
+      const failed = entry.status === "failed" || entry.status === "denied";
+      append(`[系统${failed ? " · 错误" : ""}] ${entry.text}`, failed ? "tertiary" : "dim");
+    } else if (entry.kind === "user") {
+      append(`› 你${entry.status === null ? "" : ` · ${entry.status}`}`, "primary", true);
+      for (const text of wrapText(displayText(entry.text), width - 2)) {
+        lines.push({ text: `  ${text}`, role: "primary" });
+      }
+    } else {
+      append(`▌ Agent${entry.status === "streaming" ? " · 回复中" : ""}`, "body", true);
+      append(entry.status === "streaming" ? `${entry.text}▍` : entry.text, "body");
+    }
     append("", "faint");
   }
   if (view.todo !== null) {
@@ -669,18 +698,6 @@ function documentLines(
         `${marker(item.state)} ${item.content}`,
         item.state === "completed" ? "success" : "dim",
       );
-  }
-  if (view.pendingDisclosure != null) {
-    append("Sensitive context redisclosure", "secondary", true);
-    for (const line of view.pendingDisclosure.safePreview.split("\n")) append(line, "dim");
-    append("decision: use the consent box below", "faint");
-  }
-  if (view.pendingApproval !== null) {
-    append(`▌ approval required · ${view.pendingApproval.toolName}`, "secondary", true);
-    if (view.pendingApprovalPreview === null)
-      append("preview unavailable: the exact operation is not recorded", "tertiary");
-    else for (const line of view.pendingApprovalPreview) append(line, "dim");
-    append("decision: use the approval box below", "faint");
   }
   if (view.pendingQuestion !== null) {
     const question = view.pendingQuestion;
@@ -762,9 +779,7 @@ function highRiskApproval(
 /**
  * The approval box that replaces the composer while a decision is pending.
  *
- * The full operation preview stays in the transcript, where it is scrollable.
- * This box owns the decision, so ordinary input cannot be typed or queued until
- * Approve or Cancel is confirmed.
+ * Keep the recorded preview pageable independently of the decision controls.
  */
 function ApprovalBox(props: {
   view: TuiViewState;
@@ -772,42 +787,64 @@ function ApprovalBox(props: {
   width: number;
   choice: ApprovalChoice;
   canApprove: boolean;
+  previewRows: number;
+  previewLines: readonly string[];
 }): ReactElement {
-  const { view, capabilities, choice, canApprove } = props;
+  const { view, capabilities, choice, canApprove, previewRows, previewLines } = props;
+  const [offset, setOffset] = useState(0);
+  const last = Math.max(0, previewLines.length - previewRows);
+  const start = Math.min(offset, last);
+  useInput((_input, key) => {
+    if (key.pageDown) setOffset(Math.min(last, start + previewRows));
+    if (key.pageUp) setOffset(Math.max(0, start - previewRows));
+    if (key.ctrl && key.home) setOffset(0);
+    if (key.ctrl && key.end) setOffset(last);
+  });
   const disclosure = view.pendingDisclosure !== null;
-  const title = disclosure
-    ? "sensitive context redisclosure"
-    : `approval required · ${view.pendingApproval?.toolName ?? "tool"}`;
-  const approveLabel = disclosure ? "Consent" : "Approve";
-  const approveText = canApprove
-    ? `${choice === "approve" ? "▶ " : "  "}${approveLabel}`
-    : `  ${approveLabel} (unavailable)`;
-  const cancelText = `${choice === "deny" ? "▶ " : "  "}Cancel`;
+  const name = view.pendingApproval?.toolName ?? "";
+  const title = disclosure ? "确认再次发送敏感内容" : `工具审批 · ${name}`;
+  const purpose = disclosure
+    ? "向预览中的目标发送敏感上下文"
+    : view.pendingVerificationCommand
+      ? "Agent 请求运行项目验证"
+      : (APPROVAL_PURPOSES[name] ??
+        (name.startsWith("mcp__") ? "调用外部 MCP 工具" : "执行下方预览的操作"));
+  const approveLabel = disclosure ? "同意发送" : "同意本次执行";
+  const cancelText = `${choice === "deny" ? "▶ " : "  "}拒绝`;
+  const innerWidth = Math.max(1, props.width - 4);
   return h(
     Box,
     {
       flexDirection: "column",
-      marginTop: 1,
       flexShrink: 0,
       width: props.width,
       borderStyle: "round",
       borderColor: colorFor("secondary", capabilities),
       paddingX: 1,
     },
-    h(Text, { bold: true, ...colorProps(colorFor("secondary", capabilities)) }, `▌ ${title}`),
+    h(
+      Text,
+      { bold: true, ...colorProps(colorFor("secondary", capabilities)) },
+      clipText(displayText(title), innerWidth),
+    ),
+    h(Text, null, clipText(`用途  ${purpose}`, innerWidth)),
+    ...previewLines
+      .slice(start, start + previewRows)
+      .map((line, index) => h(Text, { key: start + index }, line || " ")),
     h(
       Box,
-      { marginTop: 1 },
-      h(
-        Text,
-        {
-          ...colorProps(
-            colorFor(choice === "approve" && canApprove ? "secondary" : "dim", capabilities),
-          ),
-          ...(choice === "approve" && canApprove ? { bold: true } : {}),
-        },
-        approveText,
-      ),
+      null,
+      canApprove &&
+        h(
+          Text,
+          {
+            ...colorProps(
+              colorFor(choice === "approve" && canApprove ? "secondary" : "dim", capabilities),
+            ),
+            ...(choice === "approve" && canApprove ? { bold: true } : {}),
+          },
+          `${choice === "approve" ? "▶ " : "  "}${approveLabel}`,
+        ),
       h(Text, null, "    "),
       h(
         Text,
@@ -821,7 +858,12 @@ function ApprovalBox(props: {
     h(
       Text,
       colorProps(colorFor("faint", capabilities)),
-      "←/→ select · Enter confirms · input returns after the decision",
+      clipText(
+        last > 0
+          ? `Enter 确认 · ←/→ · PgUp/PgDn ${start + 1}–${start + previewRows}/${previewLines.length}`
+          : "←/→ 选择 · Enter 确认",
+        innerWidth,
+      ),
     ),
   );
 }
@@ -844,20 +886,9 @@ function Composer(props: {
   attachedImages: number;
   /** Why the last paste produced no image. */
   imageNotice: string | null;
-  approvalChoice: ApprovalChoice;
-  canApprove: boolean;
   animated?: boolean | undefined;
 }): ReactElement {
   const { view, editor, capabilities } = props;
-  if (view.pendingDisclosure != null || view.pendingApproval !== null) {
-    return h(ApprovalBox, {
-      view,
-      capabilities,
-      width: props.width,
-      choice: props.approvalChoice,
-      canApprove: props.canApprove,
-    });
-  }
   const accent = colorFor(view.queueingInput ? "secondary" : "primary", capabilities);
   const hint =
     view.pendingQuestion !== null

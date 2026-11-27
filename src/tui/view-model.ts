@@ -97,6 +97,7 @@ export type TuiViewState = Readonly<{
    * not invite an approval.
    */
   pendingApprovalPreview: readonly string[] | null;
+  pendingVerificationCommand?: boolean;
   /** Why the last question answer was rejected; null when there is no error. */
   answerError: string | null;
   /**
@@ -206,7 +207,7 @@ export function deriveView(input: ViewInput): TuiViewState {
     todo: input.todo,
     pendingApproval: input.pendingApproval,
     pendingDisclosure: input.pendingDisclosure ?? null,
-    pendingApprovalPreview: deriveApprovalPreview(input),
+    ...deriveApprovalPreview(input),
     answerError: input.answerError ?? null,
     meter: null,
     pendingQuestion: input.pendingQuestion,
@@ -245,19 +246,39 @@ function deriveActivity(input: ViewInput, waiting: WaitingKind | null): RunActiv
  * actually recorded, so a stale local copy cannot become the thing the user
  * approves.
  */
-function deriveApprovalPreview(input: ViewInput): readonly string[] | null {
+function deriveApprovalPreview(
+  input: ViewInput,
+): Pick<TuiViewState, "pendingApprovalPreview" | "pendingVerificationCommand"> {
   const pending = input.pendingApproval;
-  if (pending === null) return null;
+  if (pending === null) return { pendingApprovalPreview: null };
   for (let index = input.events.length - 1; index >= 0; index -= 1) {
     const payload = input.events[index]?.payload;
     if (payload === undefined) continue;
     if (payload.kind !== "approval_requested") continue;
     if (payload.approvalId !== pending.approvalId) continue;
-    return payload.safePreview.split("\n");
+    const call =
+      pending.toolName === "shell"
+        ? input.events.findLast(
+            ({ runId, payload: fact }) =>
+              runId === input.events[index]?.runId &&
+              fact.kind === "tool_call_received" &&
+              fact.toolCallId === pending.toolCallId &&
+              fact.toolName === "shell",
+          )?.payload
+        : null;
+    const args = call?.kind === "tool_call_received" ? call.arguments : null;
+    return {
+      pendingApprovalPreview: payload.safePreview.split("\n"),
+      pendingVerificationCommand:
+        typeof args === "object" &&
+        args !== null &&
+        "verification" in args &&
+        args.verification === true,
+    };
   }
   // No recorded preview: the panel cannot describe the operation, so it offers
   // no preview rather than inventing one.
-  return null;
+  return { pendingApprovalPreview: null };
 }
 
 function deriveWaitingKind(input: ViewInput): WaitingKind | null {

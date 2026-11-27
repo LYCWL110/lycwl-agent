@@ -83,7 +83,7 @@ describe("queued messages and compact tools", () => {
         }),
         { columns: viewport.columns },
       );
-      expect(output).toMatch(/shell|you · queued/);
+      expect(output).toMatch(/shell|你 · queued/);
       expect(output).toMatch(/请补充测试/);
       expect(output).not.toMatch(/private detail line/);
       expect(output.split("\n").length).toBeLessThan(viewport.rows);
@@ -142,11 +142,7 @@ describe("queued messages and compact tools", () => {
     let submitted = 0;
     stdout.on("data", (chunk) => {
       const text = chunk.toString();
-      if (
-        text.includes("task ›") ||
-        text.includes("queue ›") ||
-        text.includes("approval required")
-      ) {
+      if (text.includes("task ›") || text.includes("queue ›") || text.includes("工具审批")) {
         frame = text;
       }
     });
@@ -192,7 +188,7 @@ describe("queued messages and compact tools", () => {
       await press(stdin, "\u001b[<0;10;3M");
       expect(frame).toMatch(/private detail line/);
       expect(frame).toMatch(/command: echo approved-only/);
-      expect(frame).toMatch(/approval required/);
+      expect(frame).toMatch(/工具审批/);
       expect(frame).not.toMatch(/unfinished/);
       await press(stdin, "\u001b[<0;10;3m");
       expect(frame).toMatch(/private detail line/);
@@ -271,8 +267,8 @@ describe("TUI rendering", () => {
       ],
     });
     const frame = instance.lastFrame() ?? "";
-    expect(frame).toMatch(/you/);
-    expect(frame).toMatch(/agent/);
+    expect(frame).toContain("› 你");
+    expect(frame).toContain("▌ Agent");
     expect(frame).toMatch(/tool·failed/);
     expect(frame).toMatch(/fix the bug/);
     expect(frame).toMatch(/edit_file failed/);
@@ -311,16 +307,25 @@ describe("TUI rendering", () => {
           toolName: "shell",
           requestVersion: 1,
         },
-        pendingApprovalPreview: ["command: npm test", "cwd: D:\\fixture"],
+        pendingVerificationCommand: true,
+        pendingApprovalPreview: [
+          "shell",
+          "command=npm test",
+          "cwd=D:\\fixture",
+          "purpose=declared verification command",
+        ],
       },
       { columns: 80, rows: 24 },
     );
     const frame = instance.lastFrame() ?? "";
     expect(frame).toMatch(/waiting:approval/);
-    expect(frame).toMatch(/approval required · shell/);
-    expect(frame).toMatch(/▶ Approve/);
-    expect(frame).toMatch(/Cancel/);
-    expect(frame).toMatch(/←\/→ select · Enter confirms/);
+    expect(frame).toMatch(/工具审批 · shell/);
+    expect(frame).toMatch(/用途.*项目验证/);
+    expect(frame).toContain("npm test");
+    expect(frame).toContain("D:\\fixture");
+    expect(frame).toMatch(/▶ 同意本次执行/);
+    expect(frame).toMatch(/拒绝/);
+    expect(frame).toMatch(/←\/→ 选择 · Enter 确认/);
     expect(frame).not.toMatch(/task ›|queue ›/);
     instance.unmount();
   });
@@ -331,7 +336,7 @@ describe("TUI rendering", () => {
       transcript: [{ id: "s1", kind: "system", text: "waiting: approval", status: null }],
     });
     const frame = instance.lastFrame() ?? "";
-    expect(frame).toMatch(/\[sys\]/);
+    expect(frame).toContain("[系统] waiting: approval");
     expect(frame).toMatch(/waiting: approval/);
     instance.unmount();
   });
@@ -370,7 +375,7 @@ describe("TUI rendering", () => {
       }),
     );
     try {
-      expect(instance.lastFrame()).toMatch(/▶ Cancel/);
+      expect(instance.lastFrame()).toMatch(/▶ 拒绝/);
       await press(instance.stdin, "\r");
       expect(approved).toBe(0);
       expect(denied).toBe(1);
@@ -409,9 +414,9 @@ describe("TUI rendering", () => {
       }),
     );
     try {
-      expect(instance.lastFrame()).toMatch(/▶ Approve/);
+      expect(instance.lastFrame()).toMatch(/▶ 同意本次执行/);
       await press(instance.stdin, "\u001b[C");
-      expect(instance.lastFrame()).toMatch(/▶ Cancel/);
+      expect(instance.lastFrame()).toMatch(/▶ 拒绝/);
       await press(instance.stdin, "\r");
       expect(approved).toBe(0);
       expect(denied).toBe(1);
@@ -446,7 +451,7 @@ describe("TUI rendering", () => {
       }),
     );
     try {
-      expect(instance.lastFrame()).toMatch(/▶ Approve/);
+      expect(instance.lastFrame()).toMatch(/▶ 同意本次执行/);
       await press(instance.stdin, "\r");
       expect(approved).toBe(1);
     } finally {
@@ -577,7 +582,7 @@ describe("TUI palette", () => {
       transcript: [{ id: "1", kind: "user", text: "hi", status: null }],
     });
     const frame = instance.lastFrame() ?? "";
-    expect(frame).toMatch(/▌/);
+    expect(frame).toContain("› 你");
     instance.unmount();
   });
 
@@ -910,6 +915,7 @@ describe("Miyu layout and configuration keys", () => {
           approved = true;
         },
         capabilities: MONO,
+        viewport: { columns: 40, rows: 12 },
         view: {
           ...EMPTY_VIEW,
           runStatus: "waiting",
@@ -927,13 +933,56 @@ describe("Miyu layout and configuration keys", () => {
         },
       }),
     );
-    expect(instance.lastFrame()).toMatch(/exact-preview-line-39/);
+    expect(instance.lastFrame()).toMatch(/exact-preview-line-0\b/);
+    expect(instance.lastFrame()).toContain("Enter 确认");
     await new Promise((resolve) => setTimeout(resolve, 20));
-    instance.stdin.write("\u001b[5~");
+    instance.stdin.write("\u001b[6~");
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(instance.lastFrame()).not.toMatch(/exact-preview-line-39/);
+    expect(instance.lastFrame()).not.toMatch(/exact-preview-line-0\b/);
+    expect(instance.lastFrame()).toContain("▶ 同意本次执行");
     expect(approved).toBe(false);
     instance.unmount();
+  });
+
+  it("keeps multiline shell text literal and restores the draft after refusal", async () => {
+    const base = { ...actions, capabilities: MONO, viewport: { columns: 80, rows: 24 } };
+    const instance = render(createElement(App, { ...base, view: EMPTY_VIEW }));
+    const decline = () => instance.rerender(createElement(App, { ...base, view: EMPTY_VIEW }));
+    try {
+      await press(instance.stdin, "draft");
+      instance.rerender(
+        createElement(App, {
+          ...base,
+          onDeny: decline,
+          view: {
+            ...EMPTY_VIEW,
+            runStatus: "waiting",
+            pendingApproval: {
+              approvalId: "check",
+              toolCallId: "c",
+              toolName: "shell",
+              requestVersion: 1,
+            },
+            pendingApprovalPreview: [
+              "shell",
+              "command=echo first",
+              "cwd=literal-content",
+              "purpose=declared verification command",
+              "cwd=.",
+            ],
+          },
+        }),
+      );
+      expect(instance.lastFrame()).toContain("cwd=literal-content");
+      expect(instance.lastFrame()).not.toContain("请求运行项目验证");
+      await press(instance.stdin, "ignored");
+      await press(instance.stdin, "d");
+      await press(instance.stdin, "\r");
+      expect(instance.lastFrame()).toContain("task › draft");
+      expect(instance.lastFrame()).not.toContain("ignored");
+    } finally {
+      instance.unmount();
+    }
   });
 
   it("does not offer or accept approval without a recorded preview", async () => {
@@ -958,9 +1007,9 @@ describe("Miyu layout and configuration keys", () => {
         },
       }),
     );
-    expect(instance.lastFrame()).toMatch(/preview unavailable/);
-    expect(instance.lastFrame()).toMatch(/Approve \(unavailable\)/);
-    expect(instance.lastFrame()).toMatch(/▶ Cancel/);
+    expect(instance.lastFrame()).toContain("缺少已记录的操作预览");
+    expect(instance.lastFrame()).not.toContain("同意本次执行");
+    expect(instance.lastFrame()).toMatch(/▶ 拒绝/);
     await new Promise((resolve) => setTimeout(resolve, 20));
     instance.stdin.write("a");
     await new Promise((resolve) => setTimeout(resolve, 20));

@@ -461,6 +461,13 @@ describe("panel actions", () => {
 describe("approval preview comes from the authoritative event", () => {
   it("renders the recorded preview for the pending approval", async () => {
     const events = await build([
+      record("tool_call_received", {
+        kind: "tool_call_received",
+        providerToolCallId: "p1",
+        toolCallId: "call-1",
+        toolName: "shell",
+        arguments: { command: "echo hi", verification: true },
+      }),
       record("approval_requested", {
         kind: "approval_requested",
         approvalId: "ap-1",
@@ -484,6 +491,7 @@ describe("approval preview comes from the authoritative event", () => {
       draft: "",
     });
     assert.deepEqual(state.pendingApprovalPreview, ["shell", "command=echo hi", "cwd=C:\\ws"]);
+    assert.equal(state.pendingVerificationCommand, true);
   });
 
   it("ignores a preview belonging to a different approval", async () => {
