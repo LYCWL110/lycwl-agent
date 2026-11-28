@@ -149,7 +149,7 @@ export async function launchWeb(options) {
             modelLabel: chosen.kind === "real" ? chosen.config.model : null,
             modeLabel: options.permissionMode,
             contextWindow: chosen.kind === "real" ? chosen.config.contextWindow : null,
-            demo: false,
+            demo: chosen.kind !== "real",
             warnings: chosen.kind === "real"
                 ? chosen.warnings
                 : ["尚未配置 Provider，请在设置中填写接口地址、模型和 API Key。"],

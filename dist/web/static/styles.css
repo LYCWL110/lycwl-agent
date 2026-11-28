@@ -531,6 +531,7 @@ body.sidebar-collapsed .sidebar-toggle {
   border-radius: 999px;
   background: rgba(242, 184, 75, 0.14);
   color: #ffd896;
+  cursor: pointer;
   font-size: 10.5px;
   font-weight: 500;
   letter-spacing: 0.3px;

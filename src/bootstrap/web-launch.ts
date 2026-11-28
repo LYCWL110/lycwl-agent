@@ -17,7 +17,7 @@ import { canResumeSession } from "./session-launch.ts";
 import { undoSessionChanges } from "./undo.ts";
 
 /**
- * Browser presentation entry point for `lycwl --web`.
+ * Browser presentation entry point for `lycwl web`.
  *
  * The web server is a second front end over the same Runtime: each Session is
  * assembled exactly like the TUI's Session (configuration, credentials, Provider,
@@ -181,7 +181,7 @@ export async function launchWeb(options: WebLaunchOptions): Promise<WebLaunch> {
       modelLabel: chosen.kind === "real" ? chosen.config.model : null,
       modeLabel: options.permissionMode,
       contextWindow: chosen.kind === "real" ? chosen.config.contextWindow : null,
-      demo: false,
+      demo: chosen.kind !== "real",
       warnings:
         chosen.kind === "real"
           ? chosen.warnings

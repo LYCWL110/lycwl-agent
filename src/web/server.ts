@@ -16,10 +16,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { WebAssetSource } from "./assets.ts";
 import {
   WEB_IMAGE_MEDIA_TYPES,
+  type WebConfigRequest,
   type WebErrorCode,
   type WebEvent,
   type WebImage,
-  type WebConfigRequest,
   type WebState,
 } from "./protocol.ts";
 import { WebSessionError, type WebSessionHost } from "./session-host.ts";
@@ -719,10 +719,15 @@ function isConfigRequest(value: unknown): value is WebConfigRequest {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   return (
-    ["anthropic_messages", "openai_chat", "openai_responses"].includes(String(record["protocol"])) &&
-    typeof record["baseUrl"] === "string" && record["baseUrl"].length > 0 &&
-    typeof record["model"] === "string" && record["model"].length > 0 &&
-    typeof record["apiKey"] === "string" && record["apiKey"].length > 0
+    ["anthropic_messages", "openai_chat", "openai_responses"].includes(
+      String(record["protocol"]),
+    ) &&
+    typeof record["baseUrl"] === "string" &&
+    record["baseUrl"].length > 0 &&
+    typeof record["model"] === "string" &&
+    record["model"].length > 0 &&
+    typeof record["apiKey"] === "string" &&
+    record["apiKey"].length > 0
   );
 }
 

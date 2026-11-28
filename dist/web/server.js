@@ -640,9 +640,12 @@ function isConfigRequest(value) {
         return false;
     const record = value;
     return (["anthropic_messages", "openai_chat", "openai_responses"].includes(String(record["protocol"])) &&
-        typeof record["baseUrl"] === "string" && record["baseUrl"].length > 0 &&
-        typeof record["model"] === "string" && record["model"].length > 0 &&
-        typeof record["apiKey"] === "string" && record["apiKey"].length > 0);
+        typeof record["baseUrl"] === "string" &&
+        record["baseUrl"].length > 0 &&
+        typeof record["model"] === "string" &&
+        record["model"].length > 0 &&
+        typeof record["apiKey"] === "string" &&
+        record["apiKey"].length > 0);
 }
 function asRecord(value) {
     if (typeof value !== "object" || value === null || Array.isArray(value))

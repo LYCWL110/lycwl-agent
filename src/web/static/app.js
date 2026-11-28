@@ -1,7 +1,7 @@
 /**
  * lycwl web client.
  *
- * The browser is a pure view over the local `lycwl --web` server: the first paint
+ * The browser is a pure view over the local `lycwl web` server: the first paint
  * comes from GET /api/state, every later frame replaces the whole snapshot, and
  * commands are POSTed to the endpoints documented in docs/web-api.md. Nothing
  * here executes a tool or decides a permission; the SSR snapshot is the only
@@ -568,7 +568,7 @@ async function postJson(path, body) {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
-    showToast("无法连接本地服务，请确认 lycwl --web 仍在运行。", "error");
+    showToast("无法连接本地服务，请确认 lycwl web 仍在运行。", "error");
     return null;
   }
 
@@ -744,7 +744,8 @@ async function deleteSession(entry) {
 // ------------------------------- header -----------------------------------
 
 function renderHeader(snapshot) {
-  dom.headerDemo.hidden = true;
+  dom.headerDemo.hidden = snapshot.demo !== true;
+  dom.headerDemo.title = "尚未配置模型和 API Key，点击打开设置";
   const warnings = Array.isArray(snapshot.warnings) ? snapshot.warnings : [];
   dom.warningsBtn.hidden = warnings.length === 0;
   dom.warningsBtn.title =
@@ -1373,9 +1374,13 @@ function renderComposer(snapshot) {
   dom.shutdownNotice.hidden = !shutdown;
   dom.attachChips.hidden = shutdown || state.images.length === 0;
 
+  const unconfigured =
+    snapshot.demo === true ||
+    snapshot.modelLabel === null ||
+    snapshot.modelLabel === undefined;
   dom.modelPill.textContent =
     snapshot.modelLabel ?? "未配置模型";
-  dom.modelPill.classList.remove("demo");
+  dom.modelPill.classList.toggle("demo", unconfigured);
   dom.modelPill.title =
     snapshot.modelLabel === null || snapshot.modelLabel === undefined
       ? "当前没有配置模型"
@@ -1685,7 +1690,7 @@ function buildConsoleModal(body) {
 
   const danger = el("section", "modal-section danger-zone");
   danger.append(
-    el("p", "danger-zone-text", "关闭服务会结束 lycwl --web 进程，当前页面将断开连接。"),
+    el("p", "danger-zone-text", "关闭服务会结束 lycwl web 进程，当前页面将断开连接。"),
   );
   const quitButton = el("button", "btn btn-danger", "关闭服务");
   quitButton.type = "button";
@@ -1711,13 +1716,13 @@ function buildSettingsModal(body) {
   modelSection.append(el("h3", "section-title", "模型与服务"));
   const modelList = el("div", "kv-list");
   appendKv(modelList, "当前模型", snapshot?.modelLabel ?? "未配置");
-  appendKv(modelList, "连接状态", "已配置");
+  appendKv(modelList, "连接状态", snapshot?.demo === true ? "未配置" : "已配置");
   modelSection.append(modelList);
   modelSection.append(
     el(
       "p",
       "modal-note",
-      "模型、接口地址和 API Key 通过本机配置文件管理。首次配置或修改配置时，请运行 lycwl --cli --setup；保存后重新打开网页即可使用。",
+      "首次使用请在下方填写协议、接口地址、模型和 API Key，保存后立即生效。之后可以随时在这里修改。",
     ),
   );
   const configForm = el("form", "config-form");
@@ -1823,7 +1828,7 @@ function buildSettingsModal(body) {
 
 async function quitServer(button) {
   const confirmed = window.confirm(
-    "确定要关闭 lycwl 服务吗？关闭后需要重新运行 lycwl --web 才能继续使用。",
+    "确定要关闭 lycwl 服务吗？关闭后需要重新运行 lycwl web 才能继续使用。",
   );
   if (!confirmed) return;
   button.disabled = true;
@@ -1970,6 +1975,7 @@ function wireEvents() {
 
   dom.openConsoleBtn.addEventListener("click", openConsoleModal);
   dom.openSettingsBtn.addEventListener("click", openSettingsModal);
+  dom.headerDemo.addEventListener("click", openSettingsModal);
   dom.warningsBtn.addEventListener("click", openConsoleModal);
 
   dom.modalClose.addEventListener("click", closeModal);

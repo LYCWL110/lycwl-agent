@@ -222,7 +222,9 @@ export function createWebSessionHost(options: WebSessionHostOptions): WebSession
         runtime = opened;
         cached = null;
         generation += 1;
-        await previous.controller.close().catch((error) => log(`previous session close failed: ${describeError(error)}`));
+        await previous.controller
+          .close()
+          .catch((error) => log(`previous session close failed: ${describeError(error)}`));
         return runtime;
       } catch (error) {
         throw openFailure(error);
