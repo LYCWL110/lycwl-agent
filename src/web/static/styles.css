@@ -685,10 +685,11 @@ body.sidebar-collapsed .sidebar-toggle {
   position: relative;
   display: grid;
   place-items: center;
-  width: 112px;
-  height: 112px;
+  width: 240px;
+  height: auto;
+  aspect-ratio: 1272 / 1179;
   border: 1px solid color-mix(in srgb, var(--text-strong) 18%, transparent);
-  border-radius: 34px;
+  border-radius: 28px;
   background: var(--avatar-bg);
   color: var(--accent-strong);
   font-family: Georgia, "Times New Roman", serif;
@@ -2191,8 +2192,8 @@ body.sidebar-collapsed .sidebar-toggle {
   }
 
   .hero-avatar {
-    width: 96px;
-    height: 96px;
+    width: 160px;
+    height: auto;
   }
 
   .msg-user {
