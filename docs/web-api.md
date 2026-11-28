@@ -1,6 +1,6 @@
 # lycwl web interface — HTTP contract
 
-`lycwl --web` serves a local browser interface over the same Runtime the terminal
+`lycwl web` serves a local browser interface over the same Runtime the terminal
 drives. The server binds loopback only, and the browser is a pure view: it reads
 snapshots and submits commands through the `TuiController` command surface.
 

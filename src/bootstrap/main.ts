@@ -18,6 +18,7 @@ import { hasProvider, startConfigFlow } from "./config-flow.ts";
 import { saveMcpChange } from "./mcp-save.ts";
 import { permissionModeFromArgs } from "./permission-mode.ts";
 import { createClipboardReader, hostPlatform, platformDirectories } from "./platform.ts";
+import { presentationFromArgs } from "./presentation-mode.ts";
 import { describeSelection, selectRuntime } from "./runtime-selection.ts";
 import { SEARCH_CREDENTIAL_REFERENCE, storeSearchKey } from "./search-key.ts";
 import { canResumeSession, selectSessionLaunch } from "./session-launch.ts";
@@ -28,8 +29,8 @@ import { launchWeb } from "./web-launch.ts";
 /**
  * `lycwl` entry point.
  *
- * Web is the default presentation. Pass `--cli` when an interactive terminal is
- * preferred; `--web` remains accepted as an explicit alias for compatibility.
+ * The terminal UI is the default. `lycwl web` selects the browser presentation;
+ * `--web` remains accepted as an explicit alias for compatibility.
  */
 const args = process.argv.slice(2);
 const permissionMode = permissionModeFromArgs(args);
@@ -40,10 +41,11 @@ if (args.includes("--help") || args.includes("-h")) {
       "lycwl - local coding agent",
       "",
       "Usage:",
-      "  lycwl               start the browser UI on 127.0.0.1",
-      "  lycwl --cli         start the interactive terminal UI",
+      "  lycwl               start the interactive terminal UI",
+      "  lycwl web           start the browser UI on 127.0.0.1",
+      "  lycwl web --web-port 8787  pin the browser UI port",
+      "  lycwl --cli         explicit terminal UI alias",
       "  lycwl --web         explicit browser UI alias",
-      "  lycwl --web --web-port 8787  pin the browser UI port",
       "  lycwl --read-only   disable writes, shell, web and MCP; read and local search only",
       "  lycwl --skills      enable the .agents/skills catalog (default off)",
       "  lycwl --resume ID   explicitly continue a recorded conversation",
@@ -68,7 +70,7 @@ if (args.includes("--help") || args.includes("-h")) {
       "--read-only to opt out of writes, process execution, web and MCP access.",
       "",
       "The browser UI binds 127.0.0.1 only and grants the browser the same",
-      "authority as this terminal. Use --cli for an interactive terminal.",
+      "authority as this terminal. Run `lycwl web` to start it.",
       "",
     ].join("\n"),
   );
@@ -127,7 +129,7 @@ if (!launch.ok) {
 }
 let sessionId = launch.sessionId;
 
-const webMode = !args.includes("--cli");
+const webMode = presentationFromArgs(args) === "web";
 const webPort = parseWebPort(args);
 if (webPort === undefined) {
   process.stderr.write("--web-port needs a valid port between 0 and 65535\n");
@@ -139,7 +141,7 @@ if (!webMode && !process.stdin.isTTY) {
     [
       "lycwl requires an interactive terminal.",
       "Ink cannot enable raw mode on a piped or background stdin.",
-      "Use --web to serve the same Session to a browser instead.",
+      "Use `lycwl web` to serve the same Session to a browser instead.",
       "",
     ].join("\n"),
   );
@@ -152,11 +154,11 @@ const configureFirst = !(await hasProvider(configStore));
 
 if (configureFirst) {
   if (webMode) {
-    // The setup flow is an Ink form and needs a terminal.
+    // The browser shows the configuration form once it connects.
     process.stderr.write(
       [
         "no Provider is configured yet",
-        "run `lycwl --cli --setup` in a terminal, then start `lycwl` again",
+        "open the printed URL and fill in the endpoint, model and API key in the setup form",
         "",
       ].join("\n"),
     );
@@ -261,7 +263,7 @@ async function startSession(): Promise<void> {
   });
   if (chosen.kind !== "real") {
     process.stderr.write(
-      "Provider configuration is required. Run `lycwl --cli --setup`, then start `lycwl` again.\n",
+      "Provider configuration is required. Run `lycwl --setup` to see the configuration paths.\n",
     );
     process.exit(1);
   }

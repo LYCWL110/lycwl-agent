@@ -1,8 +1,9 @@
 # lycwl
 
-A local coding agent for Windows and Linux. It runs in a terminal — or, with
-`--web`, in your browser — and gives a model permission-controlled tools: read
-and search files, edit them, run shell commands, and talk to LSP and MCP servers.
+A local coding agent for Windows and Linux. It runs in a terminal; `lycwl web`
+serves the same Session in your browser. It gives a model permission-controlled
+tools: read and search files, edit them, run shell commands, and talk to LSP and
+MCP servers.
 
 Writes, shell and web access are enabled by default. Every write, command and
 web fetch is approved separately. Nothing is sandboxed: an approved command runs
@@ -51,12 +52,12 @@ Run `lycwl` inside the project you want to work on; that directory is the
 workspace.
 
 ```
-lycwl                  read, write, shell and web, each action approved
+lycwl                  interactive terminal UI; read, write, shell and web
+lycwl web              serve the browser UI on 127.0.0.1
+lycwl web --web-port 8787   pin the browser port (default: an ephemeral one)
 lycwl --read-only      disable writes, shell, web and MCP; read and local search only
-lycwl                  serve the browser UI on 127.0.0.1 (default)
-lycwl --cli            start the interactive terminal UI
+lycwl --cli            explicit terminal UI alias
 lycwl --web            explicit browser UI alias
-lycwl --web --web-port 8787   pin the browser port (default: an ephemeral one)
 lycwl --skills         enable the .agents/skills catalog
 lycwl --resume <id>    continue a recorded conversation
 lycwl --search-key     store or replace the Tavily key (input hidden)
@@ -81,7 +82,7 @@ is never extracted from a conversation automatically.
 
 ## Browser interface
 
-`lycwl` serves the same Session as a local web app by default. The printed
+`lycwl web` serves the same Session as a local web app. The printed
 `http://127.0.0.1:<port>` URL opens a chat view with the conversation, tool
 activity, todos, approvals, questions and the session list. The browser sends the
 same commands the composer does, so `/new`, `/cancel` and everything else behave
@@ -90,9 +91,9 @@ identically; runs stream live over Server-Sent Events.
 The server binds loopback only, rejects non-loopback `Host` headers and
 cross-origin writes, and has exactly the authority of the terminal that launched
 it: approvals granted in the browser allow the same writes and commands. Use
-`--read-only` to shrink that authority. `--cli` selects the interactive terminal
-presentation. A Provider configuration is required before launch; configure it
-with `lycwl --cli --setup`.
+`--read-only` to shrink that authority. On first launch without a Provider, the
+page opens the setup form and asks for the endpoint, model and API key; the same
+form stays available under Settings.
 The HTTP contract is in [`docs/web-api.md`](docs/web-api.md); the client lives in
 `src/web/static` and is copied into `dist/` by `pnpm build`.
 

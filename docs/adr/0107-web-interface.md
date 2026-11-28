@@ -1,7 +1,8 @@
 # ADR-0107: Browser Interface As a Second View of the Same Session
 
-- Status: Accepted (2026-11-28)
-- Related: ADR-0090 (default permissions), ADR-0038 (unencrypted credentials)
+- Status: Accepted (2026-11-28), amended by ADR-0108
+- Related: ADR-0090 (default permissions), ADR-0038 (unencrypted credentials),
+  ADR-0108 (terminal default and web subcommand)
 
 ## Context
 
@@ -50,10 +51,10 @@ Two front ends can be pointed at the same workspace from different processes
 without coordination, the same as two terminals. One process serves one live
 Session at a time; other Session rows open in the same process, replacing it.
 
-The configuration flow stays terminal-only: the browser cannot open the setup
-form, so an unconfigured launch serves the documented demo runtime with a visible
-warning. Changing Provider configuration from the browser would need a new
-approval surface, which is deliberately out of scope.
+The configuration flow stays terminal-only in this decision: the browser cannot
+open the setup form, so an unconfigured launch serves the documented demo runtime
+with a visible warning. ADR-0108 later adds the browser setup form and restores
+the terminal as the default presentation.
 
 ## Reassessment Conditions
 
