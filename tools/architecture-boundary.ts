@@ -11,6 +11,7 @@ export const FORBIDDEN_TARGET_LAYERS: Readonly<Record<string, readonly string[]>
   adapters: ["application", "bootstrap", "tui"],
   services: ["bootstrap", "tui"],
   tui: ["bootstrap"],
+  web: ["bootstrap"],
   bootstrap: [],
 };
 
@@ -34,11 +35,11 @@ const AMBIENT_PATTERNS: readonly Readonly<{ pattern: RegExp; label: string }>[] 
 ];
 
 /**
- * Layers that must not execute anything. The TUI reads projections and submits
- * commands; a render path that could execute a tool would make the interface an
- * authority instead of a view.
+ * Layers that must not execute anything. The TUI and the web front end read
+ * projections and submit commands; a render path that could execute a tool would
+ * make the interface an authority instead of a view.
  */
-const NO_EXECUTION_LAYERS = new Set(["tui", "contracts"]);
+const NO_EXECUTION_LAYERS = new Set(["tui", "web", "contracts"]);
 
 const EXECUTION_PATTERNS: readonly Readonly<{ pattern: RegExp; label: string }>[] = [
   { pattern: /\bchild_process\b/, label: "child_process" },

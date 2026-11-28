@@ -39,7 +39,7 @@
   ],
   "scripts": {
     "start": "node src/bootstrap/main.ts",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node tools/copy-web-assets.mjs",
     "build:bun": "bun tools/bun/build.mjs",
     "start:built": "node dist/bootstrap/main.js",
     "test": "node tools/run-tests.mjs",

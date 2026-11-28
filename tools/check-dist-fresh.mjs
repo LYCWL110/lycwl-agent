@@ -97,9 +97,28 @@ try {
 const sources = await newestMtime(SRC, [".ts", ".tsx"]);
 const outputs = await oldestMtime(DIST, [".js"]);
 
+// The browser assets are not compiled, so the TypeScript comparison cannot see
+// them: compare the copied tree separately and require the client entry to exist.
+const STATIC_SOURCE = path.join(SRC, "web", "static");
+const STATIC_OUTPUT = path.join(DIST, "web", "static");
+const STATIC_EXTENSIONS = [".html", ".css", ".js", ".svg"];
+const staticSources = await newestMtime(STATIC_SOURCE, STATIC_EXTENSIONS);
+// Copies are written by one build pass, so both trees are compared newest-to-newest:
+// a newer source means the copy is stale, and a fresh copy clears the check.
+const staticOutputs = await newestMtime(STATIC_OUTPUT, STATIC_EXTENSIONS);
+let staticMissing = false;
+try {
+  await stat(path.join(STATIC_OUTPUT, "index.html"));
+} catch {
+  staticMissing = true;
+}
+
 // A one-second tolerance absorbs the ordering of a build that writes files in the
 // same tick as the source edit that triggered it.
-const stale = sources.mtime > outputs.mtime + 1_000;
+const stale =
+  sources.mtime > outputs.mtime + 1_000 ||
+  staticMissing ||
+  staticSources.mtime > staticOutputs.mtime + 1_000;
 
 if (report || stale) {
   process.stdout.write(`newest source: ${relative(sources.path)}\n`);
@@ -107,6 +126,8 @@ if (report || stale) {
   process.stdout.write(
     `source ${new Date(sources.mtime).toISOString()} vs output ${new Date(outputs.mtime).toISOString()}\n`,
   );
+  process.stdout.write(`newest web asset: ${relative(staticSources.path)}\n`);
+  process.stdout.write(staticMissing ? "web client: dist/web/static/index.html is missing\n" : "");
 }
 
 if (!stale) {

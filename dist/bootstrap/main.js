@@ -22,21 +22,24 @@ import { SEARCH_CREDENTIAL_REFERENCE, storeSearchKey } from "./search-key.js";
 import { canResumeSession, selectSessionLaunch } from "./session-launch.js";
 import { createTerminalApproval } from "./terminal-approval.js";
 import { undoSessionChanges } from "./undo.js";
+import { launchWeb } from "./web-launch.js";
 /**
  * `lycwl` entry point.
  *
- * The runtime is chosen from configuration, never from a flag, so a configured
- * machine cannot silently fall back to the demo and appear to work. The selection
- * prints its reason before the TUI takes the screen.
+ * Web is the default presentation. Pass `--cli` when an interactive terminal is
+ * preferred; `--web` remains accepted as an explicit alias for compatibility.
  */
 const args = process.argv.slice(2);
 const permissionMode = permissionModeFromArgs(args);
 if (args.includes("--help") || args.includes("-h")) {
     process.stdout.write([
-        "lycwl - local agent TUI",
+        "lycwl - local coding agent",
         "",
         "Usage:",
-        "  lycwl               start the interactive TUI (writes, shell and web enabled)",
+        "  lycwl               start the browser UI on 127.0.0.1",
+        "  lycwl --cli         start the interactive terminal UI",
+        "  lycwl --web         explicit browser UI alias",
+        "  lycwl --web --web-port 8787  pin the browser UI port",
         "  lycwl --read-only   disable writes, shell, web and MCP; read and local search only",
         "  lycwl --skills      enable the .agents/skills catalog (default off)",
         "  lycwl --resume ID   explicitly continue a recorded conversation",
@@ -45,8 +48,7 @@ if (args.includes("--help") || args.includes("-h")) {
         "  lycwl --help        show this help",
         "  lycwl --version     show the package version",
         "",
-        "With no configured Provider the TUI runs a demo runtime that performs no",
-        "network, credential, process or write access.",
+        "A Provider configuration is required before starting a session.",
         "",
         "Writes, shell and web are enabled by default. Every write, command and",
         "web_fetch still needs its own approval. Provider-native search runs inside",
@@ -61,7 +63,8 @@ if (args.includes("--help") || args.includes("-h")) {
         "--write and --shell are accepted for compatibility but ignored. Use",
         "--read-only to opt out of writes, process execution, web and MCP access.",
         "",
-        "An interactive terminal is required.",
+        "The browser UI binds 127.0.0.1 only and grants the browser the same",
+        "authority as this terminal. Use --cli for an interactive terminal.",
         "",
     ].join("\n"));
     process.exit(0);
@@ -108,42 +111,59 @@ if (!launch.ok) {
     process.exit(1);
 }
 let sessionId = launch.sessionId;
-if (!process.stdin.isTTY) {
+const webMode = !args.includes("--cli");
+const webPort = parseWebPort(args);
+if (webPort === undefined) {
+    process.stderr.write("--web-port needs a valid port between 0 and 65535\n");
+    process.exit(1);
+}
+if (!webMode && !process.stdin.isTTY) {
     process.stderr.write([
         "lycwl requires an interactive terminal.",
         "Ink cannot enable raw mode on a piped or background stdin.",
+        "Use --web to serve the same Session to a browser instead.",
         "",
     ].join("\n"));
     process.exit(1);
 }
 // First-time setup: when no Provider is configured there is nothing to run, so the
-// setup screen is shown instead of a demo session that would look like a working
-// agent. `hasProvider` reads the document rather than guessing from file presence.
+// setup is shown instead of starting without a configured Provider.
 const configureFirst = !(await hasProvider(configStore));
 if (configureFirst) {
-    process.stderr.write([
-        "mode: setup",
-        "no Provider is configured yet",
-        "enter an endpoint, model and API key, then press enter to save",
-        "",
-    ].join("\n"));
-    const flow = startConfigFlow({
-        discoverContextOnSelection: true,
-        fetchModels: fetchModelsForBrowser,
-        fetchModel: fetchModelDetails,
-        configStore,
-        vault,
-        workspaceRoot: process.cwd(),
-        dataDirectory,
-        onReady: (lines) => {
-            process.stderr.write(`${lines.join("\n")}\n\n`);
-        },
-        onDiscard: () => {
-            process.stderr.write("setup discarded; nothing was written\n");
-        },
-    });
-    if ((await flow.done) === "discarded")
-        process.exit(0);
+    if (webMode) {
+        // The setup flow is an Ink form and needs a terminal.
+        process.stderr.write([
+            "no Provider is configured yet",
+            "run `lycwl --cli --setup` in a terminal, then start `lycwl` again",
+            "",
+        ].join("\n"));
+        process.exit(1);
+    }
+    else {
+        process.stderr.write([
+            "mode: setup",
+            "no Provider is configured yet",
+            "enter an endpoint, model and API key, then press enter to save",
+            "",
+        ].join("\n"));
+        const flow = startConfigFlow({
+            discoverContextOnSelection: true,
+            fetchModels: fetchModelsForBrowser,
+            fetchModel: fetchModelDetails,
+            configStore,
+            vault,
+            workspaceRoot: process.cwd(),
+            dataDirectory,
+            onReady: (lines) => {
+                process.stderr.write(`${lines.join("\n")}\n\n`);
+            },
+            onDiscard: () => {
+                process.stderr.write("setup discarded; nothing was written\n");
+            },
+        });
+        if ((await flow.done) === "discarded")
+            process.exit(0);
+    }
 }
 process.stderr.write(`${launch.mode === "new" ? "new" : "resuming"} session ${sessionId}\n`);
 // Reopen configuration from inside the Session. The browser replaces the app,
@@ -209,6 +229,10 @@ async function startSession() {
                 }),
             }),
     });
+    if (chosen.kind !== "real") {
+        process.stderr.write("Provider configuration is required. Run `lycwl --cli --setup`, then start `lycwl` again.\n");
+        process.exit(1);
+    }
     process.stderr.write(`${describeSelection(chosen).join("\n")}\n\n`);
     startTui(createTuiController({
         ...(chosen.kind === "real" ? { memory: chosen.memory } : {}),
@@ -385,7 +409,54 @@ async function startSession() {
         },
     });
 }
-void startSession();
+if (webMode) {
+    await startWebSession();
+}
+else {
+    void startSession();
+}
+/**
+ * Serve the browser front end instead of mounting Ink.
+ *
+ * The server keeps the process alive while it runs; Ctrl+C closes it cleanly so
+ * no SSE stream is left thinking the agent is still there.
+ */
+async function startWebSession() {
+    const launched = await launchWeb({
+        workspaceRoot: process.cwd(),
+        configDirectory: directories.config,
+        dataDirectory,
+        permissionMode,
+        enableSkills: args.includes("--skills"),
+        sessionId,
+        port: webPort ?? null,
+        write: (text) => process.stderr.write(`${text}\n`),
+        onQuit: () => process.exit(0),
+    });
+    process.stderr.write(`web: ${launched.url}\n`);
+    let closing = false;
+    const shutdown = () => {
+        if (closing)
+            return;
+        closing = true;
+        void launched.close().finally(() => process.exit(0));
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+}
+/**
+ * `null` when --web-port is absent, `undefined` when its value is not a port.
+ */
+function parseWebPort(values) {
+    const index = values.indexOf("--web-port");
+    if (index === -1)
+        return null;
+    const raw = values[index + 1];
+    if (raw === undefined || !/^\d{1,5}$/.test(raw))
+        return undefined;
+    const port = Number(raw);
+    return port <= 65_535 ? port : undefined;
+}
 async function describeConfiguration(state) {
     const lines = [`settings:    ${configStore.filePath}`, `credentials: ${vault.filePath}`];
     if (!state.ok) {

@@ -5,6 +5,7 @@ AGENTS.md
 # under docs/adr are the durable output and are tracked below.
 docs/*
 !docs/adr/
+!docs/web-api.md
 
 # Installed dependencies and tool caches.
 node_modules/
