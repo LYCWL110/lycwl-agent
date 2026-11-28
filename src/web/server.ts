@@ -509,7 +509,12 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       sendFailure(response, 400, "bad_request", "sessionId is required");
       return;
     }
-    await runSessionOperation(response, () => options.host.deleteSession(sessionId));
+    await runSessionOperation(response, async () => {
+      if (options.host.current().sessionId === sessionId) {
+        await options.host.switchSession(null);
+      }
+      await options.host.deleteSession(sessionId);
+    });
   }
 
   async function runSessionOperation(

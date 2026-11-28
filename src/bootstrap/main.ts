@@ -160,7 +160,6 @@ if (configureFirst) {
         "",
       ].join("\n"),
     );
-    process.exit(1);
   } else {
     process.stderr.write(
       [

@@ -137,7 +137,6 @@ if (configureFirst) {
             "run `lycwl --cli --setup` in a terminal, then start `lycwl` again",
             "",
         ].join("\n"));
-        process.exit(1);
     }
     else {
         process.stderr.write([

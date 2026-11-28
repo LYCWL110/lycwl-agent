@@ -155,6 +155,7 @@ let pendingScroll = false;
 let questionState = { questionId: "", version: -1, selected: new Set() };
 let modalOpen = false;
 let lastFocusedElement = null;
+let setupPromptShown = false;
 
 const mobileQuery = window.matchMedia("(max-width: 720px)");
 
@@ -475,6 +476,13 @@ function handleEventPayload(raw) {
 function applySnapshot(next) {
   const previousSessionId = state.snapshot === null ? null : state.snapshot.sessionId;
   state.snapshot = next;
+  if (typeof next.sessionId === "string" && next.sessionId.length > 0) {
+    try {
+      window.localStorage.setItem("lycwl:last-session", next.sessionId);
+    } catch {
+      // Private browsing or disabled storage should not affect chat.
+    }
+  }
   setConnectionState(true);
 
   if (previousSessionId !== null && next.sessionId !== previousSessionId) {
@@ -486,10 +494,33 @@ function applySnapshot(next) {
 
   renderAll();
   handleCommandNotice();
+  if (next.demo === true && !setupPromptShown) {
+    setupPromptShown = true;
+    openSettingsModal();
+  }
 }
 
 async function boot() {
+  let remembered = null;
+  try {
+    remembered = window.localStorage.getItem("lycwl:last-session");
+  } catch {
+    remembered = null;
+  }
   const loaded = await refreshState();
+  if (loaded && state.snapshot !== null) {
+    try {
+      if (
+        remembered !== null &&
+        remembered.length > 0 &&
+        remembered !== state.snapshot.sessionId
+      ) {
+        await postJson(API.session, { sessionId: remembered });
+      }
+    } catch {
+      // A missing or expired session simply starts with the new local session.
+    }
+  }
   if (!loaded) setConnectionState(false);
   connectEvents();
 }
@@ -1335,7 +1366,7 @@ function renderComposer(snapshot) {
   const shutdown = state.shutdown;
   const waitingMode = isWaitingMode(snapshot);
   const switching = snapshot.switching === true;
-  const disabled = shutdown || switching;
+  const disabled = shutdown || switching || snapshot.demo === true;
 
   dom.composer.hidden = waitingMode || shutdown;
   dom.composerHint.hidden = waitingMode || shutdown;

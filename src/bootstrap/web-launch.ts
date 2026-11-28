@@ -67,11 +67,6 @@ export async function launchWeb(options: WebLaunchOptions): Promise<WebLaunch> {
       readOnly: options.permissionMode === "read-only",
       sessionId,
     });
-    if (chosen.kind !== "real") {
-      throw new Error(
-        "Provider configuration is required. Run `lycwl --cli --setup`, then start `lycwl` again.",
-      );
-    }
     const lines = describeSelection(chosen);
     if (lines.length > 0) options.write(lines.join("\n"));
 
@@ -187,7 +182,10 @@ export async function launchWeb(options: WebLaunchOptions): Promise<WebLaunch> {
       modeLabel: options.permissionMode,
       contextWindow: chosen.kind === "real" ? chosen.config.contextWindow : null,
       demo: false,
-      warnings: chosen.warnings,
+      warnings:
+        chosen.kind === "real"
+          ? chosen.warnings
+          : ["尚未配置 Provider，请在设置中填写接口地址、模型和 API Key。"],
     };
   };
 
@@ -268,13 +266,17 @@ function createWebSessionCatalog(dataDirectory: string): WebSessionCatalog {
       if (!listed.ok) return listed;
       return {
         ok: true as const,
-        sessions: listed.sessions.map((entry) => ({
-          sessionId: entry.sessionId,
-          label: sessionLabel(entry),
-          title: entry.title,
-          modifiedAtUtc: entry.modifiedAtUtc,
-          bytes: entry.bytes,
-        })),
+        sessions: listed.sessions
+          // A launch-only session has no user input and its derived label is the
+          // raw UUID. It is an implementation detail, not a conversation row.
+          .filter((entry) => entry.title !== null || sessionLabel(entry) !== entry.sessionId)
+          .map((entry) => ({
+            sessionId: entry.sessionId,
+            label: sessionLabel(entry),
+            title: entry.title,
+            modifiedAtUtc: entry.modifiedAtUtc,
+            bytes: entry.bytes,
+          })),
       };
     },
     rename: (sessionId, title) => catalog().rename(sessionId, title),
