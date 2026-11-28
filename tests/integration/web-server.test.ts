@@ -612,7 +612,7 @@ describe("web server: sessions", () => {
     });
   });
 
-  it("deletes another Session but not the current one", async () => {
+  it("deletes the current Session by switching away first", async () => {
     await withFixture(async ({ baseUrl, fakeHost }) => {
       const removedOther = await request(baseUrl, "POST", "/api/session/delete", {
         payload: { sessionId: "session-other" },
@@ -623,7 +623,9 @@ describe("web server: sessions", () => {
       const removedCurrent = await request(baseUrl, "POST", "/api/session/delete", {
         payload: { sessionId: "session-current" },
       });
-      expectFailure(removedCurrent, 409, "conflict", "delete current");
+      assert.equal(removedCurrent.status, 200);
+      expectOk(removedCurrent, "delete current");
+      assert.deepEqual(fakeHost.calls.switchSession, [null]);
       assert.deepEqual(fakeHost.calls.deleteSession, ["session-other", "session-current"]);
     });
   });
