@@ -93,7 +93,8 @@ cross-origin writes, and has exactly the authority of the terminal that launched
 it: approvals granted in the browser allow the same writes and commands. Use
 `--read-only` to shrink that authority. On first launch without a Provider, the
 page opens the setup form and asks for the endpoint, model and API key; the same
-form stays available under Settings.
+form stays available under Settings. Settings also switches between the blue-white
+default and a warm beige background, and the choice is stored in the browser.
 The HTTP contract is in [`docs/web-api.md`](docs/web-api.md); the client lives in
 `src/web/static` and is copied into `dist/` by `pnpm build`.
 

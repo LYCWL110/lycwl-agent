@@ -136,7 +136,64 @@ const state = {
   sending: false,
   images: [],
   shutdown: false,
+  theme: "blue",
 };
+
+const THEME_STORAGE_KEY = "lycwl:theme";
+const THEME_COOKIE = "lycwl_theme";
+const THEMES = [
+  { id: "blue", label: "蓝白", description: "浅蓝白色背景", metaColor: "#eef4fe" },
+  { id: "warm", label: "暖米色", description: "暖米色背景", metaColor: "#f7f0e6" },
+];
+
+function readThemeCookie() {
+  for (const part of document.cookie.split(";")) {
+    const [name, value] = part.trim().split("=");
+    if (name === THEME_COOKIE && (value === "blue" || value === "warm")) return value;
+  }
+  return null;
+}
+
+function readTheme() {
+  // The server uses an ephemeral port by default, and localStorage is scoped by
+  // origin including the port. The cookie survives the next launch; localStorage
+  // remains a mirror for the current origin.
+  const cookie = readThemeCookie();
+  if (cookie !== null) return cookie;
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === "warm" || stored === "blue") return stored;
+  } catch {
+    // Storage can be unavailable; fall back to the default.
+  }
+  return "blue";
+}
+
+function persistTheme(theme) {
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch {
+    // A blocked storage write only loses the mirror, not the live theme.
+  }
+  document.cookie = `${THEME_COOKIE}=${theme}; Max-Age=315360000; Path=/; SameSite=Strict`;
+}
+
+function currentTheme() {
+  return document.documentElement.dataset.theme === "warm" ? "warm" : "blue";
+}
+
+function applyTheme(theme, options = {}) {
+  const next = theme === "warm" ? "warm" : "blue";
+  if (next === "warm") document.documentElement.dataset.theme = "warm";
+  else delete document.documentElement.dataset.theme;
+  const palette = THEMES.find((entry) => entry.id === next);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta !== null && palette !== undefined) meta.setAttribute("content", palette.metaColor);
+  state.theme = next;
+  if (options.persist !== false) persistTheme(next);
+}
+
+applyTheme(readTheme());
 
 let sse = null;
 let hadDisconnect = false;
@@ -1772,8 +1829,31 @@ function buildSettingsModal(body) {
 
   const appearance = el("section", "modal-section");
   appearance.append(el("h3", "section-title", "外观"));
+  const themeOptions = el("div", "theme-options");
+  const selectedTheme = currentTheme();
+  for (const theme of THEMES) {
+    const button = el("button", "theme-option");
+    button.type = "button";
+    button.setAttribute("aria-pressed", theme.id === selectedTheme ? "true" : "false");
+    button.append(el("span", `theme-swatch theme-swatch-${theme.id}`));
+    const copy = el("span", "theme-copy");
+    copy.append(el("span", "theme-name", theme.label));
+    copy.append(el("span", "theme-desc", theme.description));
+    button.append(copy);
+    button.addEventListener("click", () => {
+      applyTheme(theme.id);
+      for (const option of themeOptions.querySelectorAll(".theme-option")) {
+        option.setAttribute("aria-pressed", option === button ? "true" : "false");
+      }
+      showToast(`已切换到${theme.label}主题`, "info");
+    });
+    themeOptions.append(button);
+  }
+  appearance.append(themeOptions);
+  appearance.append(
+    el("p", "modal-note", "主题保存在本机浏览器中，下次打开网页会沿用当前选择。"),
+  );
   const appearanceList = el("div", "kv-list");
-  appendKv(appearanceList, "主题", "深色（当前仅提供深色主题）");
   appendKv(appearanceList, "界面语言", "简体中文");
   appearance.append(appearanceList);
   body.append(appearance);

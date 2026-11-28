@@ -3,9 +3,24 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#0e0b14" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#eef4fe" />
     <title>lycwl · lycwl</title>
+    <script>
+      let theme = null;
+      const match = document.cookie.match(/(?:^|;\s*)lycwl_theme=(blue|warm)(?:;|$)/);
+      if (match) theme = match[1];
+      else {
+        try {
+          theme = window.localStorage.getItem("lycwl:theme");
+        } catch {
+          // Storage can be unavailable; the blue-white default still applies.
+        }
+      }
+      if (theme === "warm" || theme === "blue") {
+        document.documentElement.dataset.theme = theme;
+      }
+    </script>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
